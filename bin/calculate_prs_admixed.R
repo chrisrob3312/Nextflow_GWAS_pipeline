@@ -554,8 +554,117 @@ if (opt$validate && !is.null(opt$phenotype) && !is.null(opt$trait)) {
     # Load phenotype
     pheno <- fread(opt$phenotype)
 
-    # Calculate R² and AUC for each method
-    # ... implementation
+    # Find ID column
+    id_cols <- c("IID", "sample_id", "FID", "ID")
+    id_col <- intersect(names(pheno), id_cols)[1]
+
+    if (is.na(id_col)) {
+        stop("No ID column found in phenotype file")
+    }
+
+    # Get trait column
+    if (!opt$trait %in% names(pheno)) {
+        stop("Trait '", opt$trait, "' not found in phenotype file")
+    }
+
+    # Determine trait type
+    trait_values <- pheno[[opt$trait]]
+    trait_values <- trait_values[!is.na(trait_values)]
+
+    is_binary <- all(trait_values %in% c(0, 1, 2)) && length(unique(trait_values)) <= 3
+
+    # Load PRS scores
+    score_files <- list.files(".", pattern = "\\.sscore$", full.names = TRUE)
+
+    validation_results <- list()
+
+    for (score_file in score_files) {
+        method_name <- gsub(".*\\.([^.]+)\\.scores\\.sscore", "\\1", score_file)
+
+        scores <- fread(score_file)
+        score_col <- intersect(names(scores), c("SCORE1_AVG", "SCORE", "PRS"))
+        if (length(score_col) == 0) score_col <- names(scores)[ncol(scores)]
+
+        # Merge with phenotype
+        merged <- merge(pheno, scores, by.x = id_col, by.y = "#IID")
+        merged <- merged[!is.na(get(opt$trait))]
+
+        if (nrow(merged) < 10) {
+            cat("  Skipping", method_name, "- too few samples\n")
+            next
+        }
+
+        prs_values <- merged[[score_col[1]]]
+        trait_values <- merged[[opt$trait]]
+
+        if (is_binary) {
+            # Calculate AUC for binary traits
+            if (requireNamespace("pROC", quietly = TRUE)) {
+                roc_obj <- pROC::roc(trait_values, prs_values, quiet = TRUE)
+                auc <- as.numeric(pROC::auc(roc_obj))
+                auc_ci <- pROC::ci.auc(roc_obj, conf.level = 0.95)
+
+                validation_results[[method_name]] <- data.table(
+                    method = method_name,
+                    n = nrow(merged),
+                    metric = "AUC",
+                    value = auc,
+                    ci_lower = as.numeric(auc_ci[1]),
+                    ci_upper = as.numeric(auc_ci[3])
+                )
+
+                cat("  ", method_name, "AUC:", round(auc, 4),
+                    "(", round(auc_ci[1], 4), "-", round(auc_ci[3], 4), ")\n")
+            }
+        } else {
+            # Calculate R² for quantitative traits
+            model <- lm(trait_values ~ prs_values)
+            r2 <- summary(model)$r.squared
+            r2_adj <- summary(model)$adj.r.squared
+
+            # Incremental R² (if covariates available)
+            cov_cols <- intersect(names(merged), c("PC1", "PC2", "PC3", "PC4", "PC5",
+                                                    "age", "sex", "Age", "Sex"))
+            if (length(cov_cols) > 0) {
+                formula_null <- as.formula(paste(opt$trait, "~", paste(cov_cols, collapse = " + ")))
+                formula_full <- as.formula(paste(opt$trait, "~ prs_values +", paste(cov_cols, collapse = " + ")))
+
+                model_null <- lm(formula_null, data = merged)
+                model_full <- lm(formula_full, data = merged)
+
+                r2_incremental <- summary(model_full)$r.squared - summary(model_null)$r.squared
+            } else {
+                r2_incremental <- r2
+            }
+
+            validation_results[[method_name]] <- data.table(
+                method = method_name,
+                n = nrow(merged),
+                metric = "R2",
+                value = r2,
+                incremental_r2 = r2_incremental
+            )
+
+            cat("  ", method_name, "R²:", round(r2, 4),
+                "(incremental:", round(r2_incremental, 4), ")\n")
+        }
+    }
+
+    # Combine and write validation results
+    if (length(validation_results) > 0) {
+        validation_combined <- rbindlist(validation_results, fill = TRUE)
+        validation_combined <- validation_combined[order(-value)]
+
+        fwrite(validation_combined,
+               paste0(opt$output_prefix, ".validation.tsv"),
+               sep = "\t")
+
+        cat("\nValidation summary saved to:", paste0(opt$output_prefix, ".validation.tsv"), "\n")
+
+        # Identify best method
+        best_method <- validation_combined$method[1]
+        cat("Best performing method:", best_method, "\n")
+    }
 }
 
 # ============================================================================
