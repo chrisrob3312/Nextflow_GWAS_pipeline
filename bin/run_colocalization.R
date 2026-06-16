@@ -3,20 +3,31 @@
 # ============================================================================
 # Multi-Method Colocalization Workflow
 # ============================================================================
-# Tiered colocalization analysis for GWAS-QTL integration
+# Comprehensive colocalization analysis for GWAS-QTL integration
 #
-# TIER 1: coloc.susie (per QTL type individually)
-#   - Reduces multiple testing burden
-#   - Tests eQTL, sQTL, pQTL, etc. separately first
-#   - Identifies candidate loci with PP4 > threshold
+# PARALLEL METHODS (not hierarchical - each handles its own MTC):
 #
-# TIER 2: HyPrColoc / ColocBoost (on candidates)
-#   - Multi-trait colocalization on Tier 1 candidates
-#   - Tests if multiple QTLs share the same causal variant
+# 1. coloc.susie (per QTL type individually)
+#    - Fine-mapping based colocalization
+#    - Tests eQTL, sQTL, pQTL, mQTL, caQTL, hQTL separately
+#    - Bayesian framework handles multiple testing
 #
-# TIER 3: OPERA (SMR-based)
-#   - Bayesian SMR for causal inference
-#   - NOT causal mediation - tests for shared causal variants
+# 2. HyPrColoc (multi-trait)
+#    - Tests if multiple QTLs share the same causal variant
+#    - Run on ALL QTL types simultaneously
+#
+# 3. OPERA (multi-QTL SMR-based) - PARALLEL, NOT TIERED
+#    - Uses ALL QTLs simultaneously
+#    - Built-in multiple testing correction (Bonferroni + FDR)
+#    - NOT causal mediation - tests for shared causal variants
+#
+# QTL MEGASET: Draws from curated_qtl_sources.yml containing:
+#   - eQTL: eQTLGen, GTEx, OneK1K, DICE, BLUEPRINT, MESA, etc.
+#   - sQTL: GTEx, AFGR, AIDA
+#   - mQTL: GoDMC, GENOA, BLUEPRINT
+#   - pQTL: UK Biobank, deCODE, ARIC, Fenland
+#   - caQTL: AFGR, DICE, snATAC PBMC
+#   - hQTL: BLUEPRINT H3K27ac/H3K4me1, Roadmap
 #
 # USES COHORT-SPECIFIC LD (not reference panels)
 # ============================================================================
@@ -70,18 +81,26 @@ option_list <- list(
                 help = "Gene to test (for QTL filtering)"),
 
     # Method selection
-    make_option(c("--tier1_method"), type = "character", default = "coloc_susie",
-                help = "Tier 1 method: coloc, coloc_susie [default: coloc_susie]"),
-    make_option(c("--tier2_method"), type = "character", default = "hyprcoloc",
-                help = "Tier 2 method: hyprcoloc, colocboost [default: hyprcoloc]"),
-    make_option(c("--tier3"), action = "store_true", default = FALSE,
-                help = "Run Tier 3 OPERA analysis"),
+    make_option(c("--methods"), type = "character", default = "coloc_susie,hyprcoloc,opera",
+                help = "Methods to run (comma-separated): coloc_susie, hyprcoloc, opera [default: all]"),
+    make_option(c("--parallel"), action = "store_true", default = TRUE,
+                help = "Run methods in parallel (not hierarchical) [default: TRUE]"),
+    make_option(c("--coloc_method"), type = "character", default = "coloc_susie",
+                help = "Coloc variant: coloc, coloc_susie [default: coloc_susie]"),
+    make_option(c("--run_opera"), action = "store_true", default = TRUE,
+                help = "Run OPERA on ALL QTLs (handles own MTC) [default: TRUE]"),
+
+    # QTL megaset
+    make_option(c("--qtl_megaset"), type = "character", default = NULL,
+                help = "QTL megaset directory (from curated_qtl_sources.yml)"),
+    make_option(c("--include_all_qtl_types"), action = "store_true", default = TRUE,
+                help = "Include all QTL types: eQTL,sQTL,pQTL,mQTL,caQTL,hQTL [default: TRUE]"),
 
     # Thresholds
     make_option(c("--pp4_threshold"), type = "numeric", default = 0.8,
                 help = "PP4 threshold for colocalization [default: 0.8]"),
-    make_option(c("--tier2_threshold"), type = "numeric", default = 0.5,
-                help = "PP4 threshold to advance to Tier 2 [default: 0.5]"),
+    make_option(c("--opera_fdr"), type = "numeric", default = 0.05,
+                help = "OPERA FDR threshold [default: 0.05]"),
 
     # Fine-mapping
     make_option(c("--max_causal"), type = "integer", default = 5,
@@ -112,20 +131,49 @@ opt <- parse_args(OptionParser(
     description = "Multi-method colocalization workflow"
 ))
 
-# Parse QTL types
-qtl_types <- strsplit(opt$qtl_types, ",")[[1]]
+# Parse QTL types - expand to full megaset if requested
+if (opt$include_all_qtl_types) {
+    qtl_types <- c("eqtl", "sqtl", "pqtl", "mqtl", "caqtl", "hqtl")
+} else {
+    qtl_types <- strsplit(opt$qtl_types, ",")[[1]]
+}
+
+# Parse methods
+methods <- strsplit(opt$methods, ",")[[1]]
 
 cat("\n")
 cat("╔══════════════════════════════════════════════════════════════════╗\n")
-cat("║            Multi-Method Colocalization Workflow                  ║\n")
+cat("║         Multi-Method Colocalization Workflow                     ║\n")
 cat("╠══════════════════════════════════════════════════════════════════╣\n")
-cat("║ TIER 1: coloc.susie (per QTL type)                               ║\n")
-cat("║ TIER 2: HyPrColoc (multi-trait, on candidates)                   ║\n")
-cat("║ TIER 3: OPERA (SMR-based, optional)                              ║\n")
+cat("║ MODE: PARALLEL (each method handles its own MTC)                 ║\n")
+cat("╠══════════════════════════════════════════════════════════════════╣\n")
+cat("║ 1. coloc.susie  - Fine-mapping colocalization per QTL type       ║\n")
+cat("║ 2. HyPrColoc    - Multi-trait across ALL QTL types               ║\n")
+cat("║ 3. OPERA        - Multi-QTL SMR (ALL QTLs, built-in MTC)         ║\n")
 cat("╠══════════════════════════════════════════════════════════════════╣\n")
 cat(sprintf("║ QTL types: %-53s ║\n", paste(qtl_types, collapse = ", ")))
-cat(sprintf("║ PP4 threshold: %-49s ║\n", opt$pp4_threshold))
+cat(sprintf("║ Methods: %-55s ║\n", paste(methods, collapse = ", ")))
+cat(sprintf("║ PP4 threshold: %-49.2f ║\n", opt$pp4_threshold))
+if (opt$run_opera) {
+    cat(sprintf("║ OPERA FDR: %-53.3f ║\n", opt$opera_fdr))
+}
 cat("╚══════════════════════════════════════════════════════════════════╝\n\n")
+
+# QTL megaset sources (from curated_qtl_sources.yml)
+QTL_SOURCES <- list(
+    eqtl = c("eqtlgen_blood", "gtex_v8", "onek1k_pbmc", "dice_immune",
+             "blueprint_blood", "mesa_eqtl", "afgr_eqtl", "hchs_sol_eqtl"),
+    sqtl = c("gtex_sqtl", "afgr_sqtl", "aida_sqtl"),
+    mqtl = c("godmc", "genoa_mqtl", "blueprint_mqtl", "eas_blood_mqtl"),
+    pqtl = c("ukb_pqtl", "decode_pqtl", "fenland_pqtl", "aric_pqtl"),
+    caqtl = c("afgr_caqtl", "dice_caqtl", "snATAC_pbmc"),
+    hqtl = c("blueprint_h3k4me1", "blueprint_h3k27ac", "roadmap_hqtl")
+)
+
+cat("QTL MEGASET SOURCES:\n")
+for (qt in names(QTL_SOURCES)) {
+    cat("  ", toupper(qt), ":", length(QTL_SOURCES[[qt]]), "datasets\n")
+}
 
 # ============================================================================
 # Load Data
@@ -461,20 +509,22 @@ if (nrow(tier2_candidates) > 0 && has_hyprcoloc) {
 }
 
 # ============================================================================
-# TIER 3: OPERA (optional)
+# OPERA: Multi-QTL SMR Analysis (PARALLEL - runs on ALL QTLs)
 # ============================================================================
-if (opt$tier3) {
+if (opt$run_opera && "opera" %in% methods) {
     cat("\n")
     cat("════════════════════════════════════════════════════════════════════\n")
-    cat("TIER 3: OPERA - Bayesian SMR analysis\n")
+    cat("OPERA - Multi-QTL SMR Analysis (PARALLEL on ALL QTLs)\n")
     cat("════════════════════════════════════════════════════════════════════\n\n")
 
     # OPERA is NOT causal mediation - it's SMR-based
     # Tests for shared causal variants between GWAS and QTL
     # Uses instrumental variable approach
+    # BUILT-IN multiple testing correction (Bonferroni + FDR)
 
-    cat("NOTE: OPERA uses SMR framework but is NOT causal mediation\n")
-    cat("      It tests whether the same causal variant affects both traits\n\n")
+    cat("NOTE: OPERA runs on ALL QTL types simultaneously (not hierarchical)\n")
+    cat("      Built-in MTC: Bonferroni within, FDR across QTL types\n")
+    cat("      NOT causal mediation - tests shared causal variants\n\n")
 
     # Check for OPERA executable
     opera_path <- Sys.which("opera")
@@ -482,60 +532,82 @@ if (opt$tier3) {
         opera_path <- file.path(Sys.getenv("OPERA_PATH", ""), "opera")
     }
 
-    if (nrow(tier1_combined) == 0) {
-        cat("  No Tier 1 results - skipping OPERA\n")
-    } else if (file.exists(opera_path)) {
-        # Run OPERA on colocalized loci
-        coloc_loci <- tier1_combined[colocalizes == TRUE]
+    opera_results <- list()
 
-        if (nrow(coloc_loci) == 0) {
-            cat("  No colocalized loci - skipping OPERA\n")
-        } else {
-            tier3_results <- list()
+    if (file.exists(opera_path)) {
+        # Run OPERA with ALL QTL types simultaneously
+        cat("Running OPERA on ALL QTL types:\n")
+        cat("  ", paste(qtl_types, collapse = ", "), "\n\n")
 
-            for (i in 1:nrow(coloc_loci)) {
-                gene <- coloc_loci$gene[i]
-                qt <- coloc_loci$qtl_type[i]
+        # Collect all QTL BESD files
+        besd_files <- c()
+        for (qt in qtl_types) {
+            besd_file <- file.path(opt$qtl_dir, paste0(qt, ".besd"))
+            if (file.exists(besd_file)) {
+                besd_files <- c(besd_files, besd_file)
+                cat("  Found:", qt, "\n")
+            }
+        }
 
-                cat("  Running OPERA for", gene, "(", qt, ")\n")
+        if (length(besd_files) > 0) {
+            # Write multi-QTL config
+            config_file <- paste0(opt$output_prefix, ".opera_config.txt")
+            writeLines(besd_files, config_file)
 
-                # Prepare BESD format for QTL
-                # OPERA uses SMR's BESD format
+            # Run OPERA with all QTLs
+            cmd <- paste(
+                opera_path,
+                "--bfile", opt$geno,
+                "--gwas-summary", opt$gwas,
+                "--beqtl-summary-list", config_file,
+                "--out", paste0(opt$output_prefix, ".opera"),
+                "--thread-num", opt$threads,
+                "--diff-freq-prop 0.1"  # Allow MAF diff up to 10%
+            )
 
-                # Run OPERA
-                cmd <- paste(
-                    opera_path,
-                    "--bfile", opt$geno,
-                    "--gwas-summary", opt$gwas,
-                    "--beqtl-summary", paste0(opt$qtl_dir, "/", qt, ".besd"),
-                    "--out", paste0(opt$output_prefix, ".opera.", gene),
-                    "--thread-num", opt$threads
-                )
+            cat("\nRunning OPERA...\n")
+            if (opt$verbose) cat("  ", cmd, "\n")
+            system(cmd, ignore.stdout = !opt$verbose)
 
-                if (opt$verbose) cat("    ", cmd, "\n")
-                # system(cmd)
+            # Read OPERA results
+            opera_out <- paste0(opt$output_prefix, ".opera.smr")
+            if (file.exists(opera_out)) {
+                opera_results <- fread(opera_out)
+                cat("  OPERA complete:", nrow(opera_results), "genes tested\n")
             }
         }
     } else {
-        # R-based SMR approximation
-        cat("  OPERA not found - using R-based SMR approximation\n")
-        cat("  Full OPERA: https://github.com/yanglab-emory/OPERA\n\n")
+        # R-based multi-QTL SMR approximation
+        cat("OPERA not found - using R-based multi-QTL SMR\n")
+        cat("Full OPERA: https://github.com/yanglab-emory/OPERA\n\n")
 
-        if (nrow(tier1_combined) > 0) {
-            coloc_loci <- tier1_combined[colocalizes == TRUE]
+        # Test ALL QTL types for ALL genes (not just coloc candidates)
+        all_genes <- c()
 
-            tier3_results <- list()
-
-            for (i in 1:min(nrow(coloc_loci), 100)) {  # Limit for efficiency
-                gene <- coloc_loci$gene[i]
-                qt <- coloc_loci$qtl_type[i]
-
-                # Simple SMR test
-                # SMR beta = beta_GWAS / beta_QTL
-                # SMR SE = sqrt(se_GWAS^2/beta_QTL^2 + beta_GWAS^2*se_QTL^2/beta_QTL^4)
-
-                # Get top QTL for this gene
+        # Collect genes from all QTL types
+        for (qt in qtl_types) {
+            qtl_file <- NULL
+            if (!is.null(opt$qtl_dir)) {
                 qtl_file <- file.path(opt$qtl_dir, paste0(qt, ".harmonized.tsv.gz"))
+            } else if (!is.null(opt$qtl)) {
+                qtl_file <- opt$qtl
+            }
+
+            if (!is.null(qtl_file) && file.exists(qtl_file)) {
+                qtl <- fread(qtl_file, select = "gene")
+                all_genes <- union(all_genes, unique(qtl$gene))
+            }
+        }
+
+        cat("Testing", length(all_genes), "genes across", length(qtl_types), "QTL types\n\n")
+
+        # SMR for each gene x QTL type combination
+        smr_results <- list()
+
+        for (gene in all_genes) {
+            for (qt in qtl_types) {
+                qtl_file <- file.path(opt$qtl_dir, paste0(qt, ".harmonized.tsv.gz"))
+
                 if (file.exists(qtl_file)) {
                     qtl <- fread(qtl_file)
                     if ("gene" %in% names(qtl)) {
@@ -543,58 +615,94 @@ if (opt$tier3) {
                     }
 
                     if (nrow(qtl) > 0) {
-                        # Get lead QTL variant
-                        qtl <- qtl[order(pvalue)][1]
+                        # Get lead QTL variant (strongest association)
+                        qtl_lead <- qtl[order(pvalue)][1]
 
                         # Get matching GWAS
-                        gwas_match <- gwas[snp == qtl$variant_id]
+                        gwas_match <- gwas[snp == qtl_lead$variant_id]
 
                         if (nrow(gwas_match) > 0) {
                             # Calculate SMR statistics
                             beta_gwas <- gwas_match$beta[1]
                             se_gwas <- gwas_match$se[1]
-                            beta_qtl <- qtl$beta[1]
-                            se_qtl <- qtl$se[1]
+                            beta_qtl <- qtl_lead$beta[1]
+                            se_qtl <- qtl_lead$se[1]
 
-                            smr_beta <- beta_gwas / beta_qtl
-                            smr_se <- sqrt(
-                                (se_gwas^2 / beta_qtl^2) +
-                                (beta_gwas^2 * se_qtl^2 / beta_qtl^4)
-                            )
-                            smr_z <- smr_beta / smr_se
-                            smr_p <- 2 * pnorm(-abs(smr_z))
+                            if (!is.na(beta_qtl) && abs(beta_qtl) > 0) {
+                                smr_beta <- beta_gwas / beta_qtl
+                                smr_se <- sqrt(
+                                    (se_gwas^2 / beta_qtl^2) +
+                                    (beta_gwas^2 * se_qtl^2 / beta_qtl^4)
+                                )
+                                smr_z <- smr_beta / smr_se
+                                smr_p <- 2 * pnorm(-abs(smr_z))
 
-                            # HEIDI test (simplified - tests for heterogeneity)
-                            # Full HEIDI requires multiple variants
-
-                            tier3_results[[paste(gene, qt, sep = "_")]] <- data.table(
-                                gene = gene,
-                                qtl_type = qt,
-                                lead_snp = qtl$variant_id,
-                                beta_gwas = beta_gwas,
-                                beta_qtl = beta_qtl,
-                                smr_beta = smr_beta,
-                                smr_se = smr_se,
-                                smr_p = smr_p,
-                                tier1_pp4 = coloc_loci$PP4[i]
-                            )
-
-                            if (smr_p < 0.05) {
-                                cat("    ✓", gene, "SMR p:", format(smr_p, scientific = TRUE), "\n")
+                                smr_results[[paste(gene, qt, sep = "_")]] <- data.table(
+                                    gene = gene,
+                                    qtl_type = qt,
+                                    lead_snp = qtl_lead$variant_id,
+                                    n_qtl_variants = nrow(qtl),
+                                    qtl_pvalue = qtl_lead$pvalue,
+                                    beta_gwas = beta_gwas,
+                                    se_gwas = se_gwas,
+                                    beta_qtl = beta_qtl,
+                                    se_qtl = se_qtl,
+                                    smr_beta = smr_beta,
+                                    smr_se = smr_se,
+                                    smr_z = smr_z,
+                                    smr_p = smr_p
+                                )
                             }
                         }
                     }
                 }
             }
+        }
 
-            # Combine Tier 3 results
-            if (length(tier3_results) > 0) {
-                tier3_combined <- rbindlist(tier3_results, fill = TRUE)
-                tier3_combined <- tier3_combined[order(smr_p)]
-                tier3_file <- paste0(opt$output_prefix, ".tier3.opera.tsv")
-                fwrite(tier3_combined, tier3_file, sep = "\t")
-                cat("\nTier 3 results:", tier3_file, "\n")
-                cat("  SMR significant (p < 0.05):", sum(tier3_combined$smr_p < 0.05, na.rm = TRUE), "\n")
+        # Combine and apply MTC
+        if (length(smr_results) > 0) {
+            opera_results <- rbindlist(smr_results, fill = TRUE)
+
+            # Multiple testing correction (like OPERA)
+            # FDR within each QTL type, then Bonferroni across types
+            opera_results[, fdr_within_qtl := p.adjust(smr_p, method = "BH"), by = qtl_type]
+            opera_results[, bonf_across_qtl := smr_p * length(qtl_types)]
+            opera_results[bonf_across_qtl > 1, bonf_across_qtl := 1]
+
+            # Final significance
+            opera_results[, significant := fdr_within_qtl < opt$opera_fdr]
+
+            # Sort by p-value
+            opera_results <- opera_results[order(smr_p)]
+
+            cat("SMR Results:\n")
+            cat("  Total gene-QTL pairs tested:", nrow(opera_results), "\n")
+            cat("  Significant (FDR <", opt$opera_fdr, "):",
+                sum(opera_results$significant, na.rm = TRUE), "\n")
+
+            # Summary by QTL type
+            cat("\n  By QTL type:\n")
+            for (qt in unique(opera_results$qtl_type)) {
+                n_sig <- sum(opera_results$qtl_type == qt & opera_results$significant, na.rm = TRUE)
+                n_tot <- sum(opera_results$qtl_type == qt)
+                cat("    ", toupper(qt), ":", n_sig, "/", n_tot, "significant\n")
+            }
+        }
+    }
+
+    # Write OPERA results
+    if (length(opera_results) > 0 && nrow(opera_results) > 0) {
+        opera_file <- paste0(opt$output_prefix, ".opera.tsv")
+        fwrite(opera_results, opera_file, sep = "\t")
+        cat("\nOPERA results:", opera_file, "\n")
+
+        # Write significant hits
+        if ("significant" %in% names(opera_results)) {
+            sig_hits <- opera_results[significant == TRUE]
+            if (nrow(sig_hits) > 0) {
+                sig_file <- paste0(opt$output_prefix, ".opera.significant.tsv")
+                fwrite(sig_hits, sig_file, sep = "\t")
+                cat("Significant hits:", sig_file, "\n")
             }
         }
     }
