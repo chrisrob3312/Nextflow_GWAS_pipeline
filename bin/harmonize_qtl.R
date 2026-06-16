@@ -186,6 +186,96 @@ FORMAT_SPECS <- list(
         pvalue = "pvalue",
         pip = "pip",  # SuShiE includes PIPs
         build = "GRCh38"
+    ),
+    # =========================================================================
+    # USER-GENERATED QTL FORMATS
+    # =========================================================================
+    # TensorQTL output (cis-eQTL nominal pass)
+    tensorqtl = list(
+        variant = "variant_id",
+        chr = "chr",           # or extracted from variant_id
+        pos = "pos",           # or extracted from variant_id
+        ref = "ref",
+        alt = "alt",
+        gene = "phenotype_id",
+        beta = "slope",
+        se = "slope_se",
+        pvalue = "pval_nominal",
+        maf = "maf",
+        build = "GRCh38"       # User should verify
+    ),
+    # TensorQTL cis-eQTL permutation pass (top associations per gene)
+    tensorqtl_perm = list(
+        variant = "variant_id",
+        chr = "chr",
+        pos = "pos",
+        ref = "ref",
+        alt = "alt",
+        gene = "phenotype_id",
+        beta = "slope",
+        se = "slope_se",
+        pvalue = "pval_beta",  # Empirical p-value
+        maf = "maf",
+        build = "GRCh38",
+        qvalue = "qval"        # Storey q-value
+    ),
+    # LAMatrix output (local ancestry-aware QTL)
+    lamatrix = list(
+        variant = "snp",
+        chr = "chr",
+        pos = "pos",
+        ref = "ref",
+        alt = "alt",
+        gene = "gene",
+        beta = "beta",         # May have beta_EUR, beta_AFR, etc.
+        se = "se",
+        pvalue = "pvalue",
+        maf = "maf",
+        build = "GRCh38",
+        # LAMatrix-specific: ancestry-stratified effects
+        beta_by_ancestry = TRUE
+    ),
+    # Tractor QTL output (local ancestry-aware association)
+    tractor_qtl = list(
+        variant = "SNP",
+        chr = "CHR",
+        pos = "POS",
+        ref = "REF",
+        alt = "ALT",
+        gene = "gene",
+        beta = "BETA",         # Joint or ancestry-specific
+        se = "SE",
+        pvalue = "P_JOINT",    # Joint test p-value
+        build = "GRCh38",
+        # Tractor-specific columns
+        ancestry_betas = TRUE,  # Has BETA_EUR, BETA_AFR, etc.
+        het_pvalue = "P_HET"   # Heterogeneity test
+    ),
+    # QTLtools output
+    qtltools = list(
+        variant = "var_id",
+        chr = "var_chr",
+        pos = "var_start",
+        ref = NA,              # Not in standard output
+        alt = NA,
+        gene = "phe_id",
+        beta = "slope",
+        se = "slope_se",
+        pvalue = "nom_pval",
+        build = "GRCh38"
+    ),
+    # MatrixEQTL output
+    matrixeqtl = list(
+        variant = "SNP",
+        chr = NA,              # Need to extract from SNP ID
+        pos = NA,
+        ref = NA,
+        alt = NA,
+        gene = "gene",
+        beta = "beta",
+        se = "se",             # May need to calculate from t-stat
+        pvalue = "p-value",
+        build = "GRCh38"
     )
 )
 

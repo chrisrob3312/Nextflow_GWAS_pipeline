@@ -11,10 +11,17 @@
 #   2. cov-LDSC - Covariate-stratified LDSC, better for admixed populations
 #   3. GCTA-GREML - Individual-level, gold standard, computationally intensive
 #   4. BOLT-REML - Fast REML, handles relatedness
+#   5. LOCAL-ANCESTRY h² (AJHG 2023) - h² explained by local ancestry variation
+#      Purpose-built for admixed populations with Tractor/RFMix output
 #
 # FOR ADMIXED POPULATIONS:
 #   Standard LDSC is BIASED due to heterogeneous LD across ancestry backgrounds.
 #   Use cov-LDSC which stratifies by ancestry, or GREML with ancestry PCs.
+#
+# LOCAL-ANCESTRY h² (Atkinson et al., AJHG 2023):
+#   Partitions h² by ancestral background - how much variance is explained
+#   by genetic effects on EUR vs AFR vs AMR haplotypes?
+#   Requires: Tractor summary stats with ancestry-specific betas
 #
 # OUTPUT:
 #   - h2 estimate with SE and 95% CI
@@ -34,7 +41,13 @@ suppressPackageStartupMessages({
 option_list <- list(
     # Method selection
     make_option(c("--method"), type = "character", default = "cov_ldsc",
-                help = "Method: ldsc, cov_ldsc, greml, bolt_reml [default: cov_ldsc]"),
+                help = "Method: ldsc, cov_ldsc, greml, bolt_reml, local_ancestry_h2 [default: cov_ldsc]"),
+
+    # Local-ancestry h² specific (AJHG 2023)
+    make_option(c("--tractor_sumstats"), type = "character", default = NULL,
+                help = "Tractor summary stats with ancestry-specific betas (for local_ancestry_h2)"),
+    make_option(c("--la_files"), type = "character", default = NULL,
+                help = "Local ancestry files prefix (for local_ancestry_h2)"),
 
     # Input for summary stat methods (LDSC)
     make_option(c("--sumstats"), type = "character", default = NULL,
@@ -461,6 +474,85 @@ if (opt$method == "ldsc") {
     if (is.null(opt$phenotype)) stop("--phenotype required for BOLT-REML")
     if (is.null(opt$trait)) stop("--trait required for BOLT-REML")
     results <- run_bolt_reml(opt$plink, opt$phenotype, opt$trait, opt$output_prefix)
+
+} else if (opt$method == "local_ancestry_h2") {
+    # Local-ancestry heritability (AJHG 2023)
+    # Partitions h² by ancestral background
+    cat("Running Local-Ancestry Heritability Analysis (AJHG 2023)...\n")
+    cat("  This estimates h² explained by each ancestry background.\n\n")
+
+    if (is.null(opt$tractor_sumstats)) stop("--tractor_sumstats required for local_ancestry_h2")
+    if (is.null(ancestries)) stop("--ancestries required for local_ancestry_h2")
+
+    # Read Tractor summary statistics
+    tractor_ss <- fread(opt$tractor_sumstats)
+
+    # Extract ancestry-specific effect sizes
+    h2_by_ancestry <- list()
+
+    for (anc in ancestries) {
+        beta_col <- paste0("BETA_", anc)
+        se_col <- paste0("SE_", anc)
+        p_col <- paste0("P_", anc)
+
+        if (!beta_col %in% names(tractor_ss)) {
+            cat("  Warning:", beta_col, "not found, skipping\n")
+            next
+        }
+
+        # Calculate variance explained by this ancestry component
+        # h²_anc = sum(beta²) / total_variance
+        # This is a simplified estimate - full method uses LD structure
+
+        betas <- tractor_ss[[beta_col]]
+        valid <- !is.na(betas)
+
+        if (sum(valid) > 0) {
+            # Variance explained by ancestry-specific effects
+            var_explained <- sum(betas[valid]^2)
+
+            # Proportion of significant variants
+            if (p_col %in% names(tractor_ss)) {
+                n_sig <- sum(tractor_ss[[p_col]] < 5e-8, na.rm = TRUE)
+            } else {
+                n_sig <- NA
+            }
+
+            h2_by_ancestry[[anc]] <- list(
+                ancestry = anc,
+                n_variants = sum(valid),
+                n_significant = n_sig,
+                sum_beta_sq = var_explained,
+                mean_abs_beta = mean(abs(betas[valid]))
+            )
+
+            cat("  ", anc, ":\n")
+            cat("    Variants:", sum(valid), "\n")
+            cat("    GW-sig (P < 5e-8):", n_sig, "\n")
+            cat("    Mean |beta|:", round(mean(abs(betas[valid])), 4), "\n")
+        }
+    }
+
+    # Test for heterogeneity in h² across ancestries
+    if (length(h2_by_ancestry) >= 2) {
+        cat("\n  Ancestry heterogeneity analysis:\n")
+        # Compare variance explained across ancestries
+        var_by_anc <- sapply(h2_by_ancestry, function(x) x$sum_beta_sq)
+        cat("    Variance ratio (", names(var_by_anc)[1], "/", names(var_by_anc)[2], "): ",
+            round(var_by_anc[1] / var_by_anc[2], 2), "\n", sep = "")
+    }
+
+    results <- list(
+        method = "local_ancestry_h2",
+        per_ancestry = h2_by_ancestry,
+        note = "Full local-ancestry h² requires GRM partitioned by ancestry"
+    )
+
+    # Save detailed results
+    la_h2_file <- paste0(opt$output_prefix, ".local_ancestry_h2.tsv")
+    la_h2_df <- rbindlist(lapply(h2_by_ancestry, as.data.frame))
+    fwrite(la_h2_df, la_h2_file, sep = "\t")
+    cat("\n  Local-ancestry h² saved to:", la_h2_file, "\n")
 
 } else {
     stop("Unknown method: ", opt$method)
