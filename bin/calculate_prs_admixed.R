@@ -91,14 +91,40 @@ option_list <- list(
                 help = "Phenotype file for validation"),
     make_option(c("--trait"), type = "character", default = NULL,
                 help = "Trait column for validation"),
+    make_option(c("--trait_type"), type = "character", default = NULL,
+                help = "Trait type: binary, quantitative, survival [default: auto-detect]"),
+    make_option(c("--time_col"), type = "character", default = NULL,
+                help = "Time column for survival analysis"),
+    make_option(c("--event_col"), type = "character", default = NULL,
+                help = "Event column for survival analysis"),
     make_option(c("--validate"), action = "store_true", default = FALSE,
                 help = "Run validation analysis"),
+
+    # Ancestry stratification for validation
+    make_option(c("--ancestry_col"), type = "character", default = NULL,
+                help = "Column with ancestry group labels for stratified validation"),
+    make_option(c("--ancestry_prop_cols"), type = "character", default = NULL,
+                help = "Comma-separated ancestry proportion columns (e.g., EUR_prop,AFR_prop)"),
+    make_option(c("--stratify_validation"), action = "store_true", default = TRUE,
+                help = "Run ancestry-stratified validation [default: TRUE]"),
+
+    # GWAS type matching
+    make_option(c("--gwas_type"), type = "character", default = "joint",
+                help = "GWAS type: joint, tractor_la, ancestry_specific [default: joint]"),
+    make_option(c("--match_gwas_to_method"), action = "store_true", default = TRUE,
+                help = "Auto-match GWAS type to appropriate PRS method [default: TRUE]"),
 
     # Runtime
     make_option(c("--threads"), type = "integer", default = 4,
                 help = "Number of threads [default: 4]"),
     make_option(c("-v", "--verbose"), action = "store_true", default = FALSE,
-                help = "Verbose output")
+                help = "Verbose output"),
+
+    # SLURM array job support
+    make_option(c("--array_index"), type = "integer", default = NULL,
+                help = "SLURM array task index (for parallelization)"),
+    make_option(c("--array_total"), type = "integer", default = NULL,
+                help = "Total SLURM array tasks")
 )
 
 opt <- parse_args(OptionParser(
@@ -548,8 +574,24 @@ if (opt$method == "prosper" || opt$method == "all") {
 # ============================================================================
 # Validation (if requested)
 # ============================================================================
+# TRUTH BASIS: Phenotype itself is the ground truth
+# - Binary traits: AUC (discrimination) + calibration slope/intercept
+# - Quantitative: R² (variance explained) + correlation
+# - Survival: C-index (concordance) + hazard ratio per SD
+#
+# CRITICAL: Must evaluate BOTH overall AND within ancestry strata
+# A method might look good overall but systematically fail in some groups
+# ============================================================================
 if (opt$validate && !is.null(opt$phenotype) && !is.null(opt$trait)) {
-    cat("\nRunning validation analysis...\n")
+    cat("\n")
+    cat("════════════════════════════════════════════════════════════════════\n")
+    cat("PRS VALIDATION\n")
+    cat("════════════════════════════════════════════════════════════════════\n\n")
+
+    cat("TRUTH BASIS: Phenotype outcome (", opt$trait, ")\n")
+    cat("  - Discrimination: How well does PRS separate outcomes?\n")
+    cat("  - Calibration: Are predicted risks accurate?\n")
+    cat("  - Stratification: Performance WITHIN ancestry groups\n\n")
 
     # Load phenotype
     pheno <- fread(opt$phenotype)
@@ -567,19 +609,56 @@ if (opt$validate && !is.null(opt$phenotype) && !is.null(opt$trait)) {
         stop("Trait '", opt$trait, "' not found in phenotype file")
     }
 
+    # Find ancestry column for stratification
+    anc_cols <- c("ancestry", "population", "GRAF_ANC", "global_ancestry",
+                  "ancestry_group", "ethnicity", "race")
+    anc_col <- intersect(names(pheno), anc_cols)
+    if (length(anc_col) > 0) {
+        anc_col <- anc_col[1]
+        cat("Ancestry column found:", anc_col, "\n")
+        cat("  Groups:", paste(unique(pheno[[anc_col]]), collapse = ", "), "\n\n")
+    } else {
+        anc_col <- NULL
+        cat("No ancestry column found - stratified analysis not possible\n")
+        cat("  Add column: ancestry, population, GRAF_ANC, or global_ancestry\n\n")
+    }
+
+    # Find global ancestry proportion columns (for continuous stratification)
+    prop_cols <- grep("^(EUR|AFR|AMR|EAS|SAS|NAT|HISP)(_prop|_frac)?$",
+                      names(pheno), value = TRUE, ignore.case = TRUE)
+
+    # Check for survival data
+    time_cols <- c("time", "OS_time", "survival_time", "follow_up", "days", "months")
+    event_cols <- c("event", "status", "OS_status", "censored", "death")
+    time_col <- intersect(names(pheno), time_cols)
+    event_col <- intersect(names(pheno), event_cols)
+    is_survival <- length(time_col) > 0 && length(event_col) > 0
+
     # Determine trait type
     trait_values <- pheno[[opt$trait]]
     trait_values <- trait_values[!is.na(trait_values)]
 
     is_binary <- all(trait_values %in% c(0, 1, 2)) && length(unique(trait_values)) <= 3
 
+    if (is_survival) {
+        cat("Trait type: SURVIVAL (time-to-event)\n")
+        cat("  Time column:", time_col[1], "\n")
+        cat("  Event column:", event_col[1], "\n\n")
+    } else if (is_binary) {
+        cat("Trait type: BINARY (case-control)\n\n")
+    } else {
+        cat("Trait type: QUANTITATIVE\n\n")
+    }
+
     # Load PRS scores
     score_files <- list.files(".", pattern = "\\.sscore$", full.names = TRUE)
 
     validation_results <- list()
+    stratified_results <- list()
 
     for (score_file in score_files) {
         method_name <- gsub(".*\\.([^.]+)\\.scores\\.sscore", "\\1", score_file)
+        cat("Validating", method_name, "...\n")
 
         scores <- fread(score_file)
         score_col <- intersect(names(scores), c("SCORE1_AVG", "SCORE", "PRS"))
@@ -590,37 +669,86 @@ if (opt$validate && !is.null(opt$phenotype) && !is.null(opt$trait)) {
         merged <- merged[!is.na(get(opt$trait))]
 
         if (nrow(merged) < 10) {
-            cat("  Skipping", method_name, "- too few samples\n")
+            cat("  Skipping - too few samples\n")
             next
         }
 
         prs_values <- merged[[score_col[1]]]
         trait_values <- merged[[opt$trait]]
 
-        if (is_binary) {
-            # Calculate AUC for binary traits
+        # ================================================================
+        # OVERALL VALIDATION
+        # ================================================================
+        if (is_survival && requireNamespace("survival", quietly = TRUE)) {
+            # C-index for survival outcomes
+            library(survival)
+            surv_obj <- Surv(merged[[time_col[1]]], merged[[event_col[1]]])
+
+            # Cox model
+            cox_model <- coxph(surv_obj ~ prs_values)
+            c_index <- summary(cox_model)$concordance[1]
+            c_se <- summary(cox_model)$concordance[2]
+
+            # Hazard ratio per SD
+            prs_sd <- sd(prs_values, na.rm = TRUE)
+            hr_per_sd <- exp(coef(cox_model) * prs_sd)
+            hr_ci <- exp(confint(cox_model) * prs_sd)
+
+            validation_results[[method_name]] <- data.table(
+                method = method_name,
+                stratum = "OVERALL",
+                n = nrow(merged),
+                n_events = sum(merged[[event_col[1]]]),
+                metric = "C-index",
+                value = c_index,
+                se = c_se,
+                ci_lower = c_index - 1.96 * c_se,
+                ci_upper = c_index + 1.96 * c_se,
+                hr_per_sd = hr_per_sd,
+                hr_lower = hr_ci[1],
+                hr_upper = hr_ci[2]
+            )
+
+            cat("  OVERALL C-index:", round(c_index, 4), "\n")
+            cat("           HR/SD:", round(hr_per_sd, 2),
+                "(", round(hr_ci[1], 2), "-", round(hr_ci[2], 2), ")\n")
+
+        } else if (is_binary) {
+            # AUC for binary traits
             if (requireNamespace("pROC", quietly = TRUE)) {
                 roc_obj <- pROC::roc(trait_values, prs_values, quiet = TRUE)
                 auc <- as.numeric(pROC::auc(roc_obj))
                 auc_ci <- pROC::ci.auc(roc_obj, conf.level = 0.95)
 
+                # Calibration (Hosmer-Lemeshow style)
+                prs_deciles <- cut(prs_values, breaks = quantile(prs_values, probs = seq(0, 1, 0.1)),
+                                   include.lowest = TRUE, labels = 1:10)
+                calib <- merged[, .(observed = mean(get(opt$trait)),
+                                    n = .N), by = prs_deciles]
+                calib_slope <- cor(1:10, calib$observed[order(as.numeric(calib$prs_deciles))])
+
                 validation_results[[method_name]] <- data.table(
                     method = method_name,
+                    stratum = "OVERALL",
                     n = nrow(merged),
+                    n_cases = sum(trait_values == 1),
                     metric = "AUC",
                     value = auc,
                     ci_lower = as.numeric(auc_ci[1]),
-                    ci_upper = as.numeric(auc_ci[3])
+                    ci_upper = as.numeric(auc_ci[3]),
+                    calibration_slope = calib_slope
                 )
 
-                cat("  ", method_name, "AUC:", round(auc, 4),
+                cat("  OVERALL AUC:", round(auc, 4),
                     "(", round(auc_ci[1], 4), "-", round(auc_ci[3], 4), ")\n")
+                cat("           Calibration slope:", round(calib_slope, 3), "\n")
             }
         } else {
-            # Calculate R² for quantitative traits
+            # R² for quantitative traits
             model <- lm(trait_values ~ prs_values)
             r2 <- summary(model)$r.squared
             r2_adj <- summary(model)$adj.r.squared
+            cor_val <- cor(prs_values, trait_values, use = "complete.obs")
 
             # Incremental R² (if covariates available)
             cov_cols <- intersect(names(merged), c("PC1", "PC2", "PC3", "PC4", "PC5",
@@ -639,9 +767,168 @@ if (opt$validate && !is.null(opt$phenotype) && !is.null(opt$trait)) {
 
             validation_results[[method_name]] <- data.table(
                 method = method_name,
+                stratum = "OVERALL",
                 n = nrow(merged),
                 metric = "R2",
                 value = r2,
+                incremental_r2 = r2_incremental,
+                correlation = cor_val
+            )
+
+            cat("  OVERALL R²:", round(r2, 4), "(incremental:", round(r2_incremental, 4), ")\n")
+        }
+
+        # ================================================================
+        # ANCESTRY-STRATIFIED VALIDATION
+        # ================================================================
+        if (!is.null(anc_col)) {
+            cat("  Stratified by", anc_col, ":\n")
+
+            ancestry_groups <- unique(merged[[anc_col]])
+            ancestry_groups <- ancestry_groups[!is.na(ancestry_groups)]
+
+            for (anc in ancestry_groups) {
+                merged_anc <- merged[get(anc_col) == anc]
+
+                if (nrow(merged_anc) < 20) {
+                    cat("    ", anc, ": N =", nrow(merged_anc), "(too few, skipped)\n")
+                    next
+                }
+
+                prs_anc <- merged_anc[[score_col[1]]]
+                trait_anc <- merged_anc[[opt$trait]]
+
+                if (is_survival && requireNamespace("survival", quietly = TRUE)) {
+                    surv_anc <- Surv(merged_anc[[time_col[1]]], merged_anc[[event_col[1]]])
+                    cox_anc <- tryCatch(coxph(surv_anc ~ prs_anc), error = function(e) NULL)
+
+                    if (!is.null(cox_anc)) {
+                        c_anc <- summary(cox_anc)$concordance[1]
+                        stratified_results[[paste(method_name, anc, sep = "_")]] <- data.table(
+                            method = method_name,
+                            stratum = anc,
+                            n = nrow(merged_anc),
+                            n_events = sum(merged_anc[[event_col[1]]]),
+                            metric = "C-index",
+                            value = c_anc
+                        )
+                        cat("    ", anc, ": C-index =", round(c_anc, 4), "(N =", nrow(merged_anc), ")\n")
+                    }
+
+                } else if (is_binary && requireNamespace("pROC", quietly = TRUE)) {
+                    roc_anc <- tryCatch(pROC::roc(trait_anc, prs_anc, quiet = TRUE),
+                                        error = function(e) NULL)
+
+                    if (!is.null(roc_anc)) {
+                        auc_anc <- as.numeric(pROC::auc(roc_anc))
+                        stratified_results[[paste(method_name, anc, sep = "_")]] <- data.table(
+                            method = method_name,
+                            stratum = anc,
+                            n = nrow(merged_anc),
+                            n_cases = sum(trait_anc == 1),
+                            metric = "AUC",
+                            value = auc_anc
+                        )
+                        cat("    ", anc, ": AUC =", round(auc_anc, 4), "(N =", nrow(merged_anc), ")\n")
+                    }
+
+                } else {
+                    model_anc <- lm(trait_anc ~ prs_anc)
+                    r2_anc <- summary(model_anc)$r.squared
+
+                    stratified_results[[paste(method_name, anc, sep = "_")]] <- data.table(
+                        method = method_name,
+                        stratum = anc,
+                        n = nrow(merged_anc),
+                        metric = "R2",
+                        value = r2_anc
+                    )
+                    cat("    ", anc, ": R² =", round(r2_anc, 4), "(N =", nrow(merged_anc), ")\n")
+                }
+            }
+        }
+
+        # ================================================================
+        # GLOBAL ANCESTRY PROPORTION ANALYSIS (continuous)
+        # ================================================================
+        if (length(prop_cols) > 0) {
+            cat("  Performance vs global ancestry proportions:\n")
+
+            for (prop_col in prop_cols) {
+                # Check if PRS performance correlates with ancestry proportion
+                # (indicates ancestry bias)
+                merged$prs_residual <- abs(residuals(lm(get(opt$trait) ~ prs_values, data = merged)))
+                cor_bias <- cor(merged$prs_residual, merged[[prop_col]], use = "complete.obs")
+                cat("    Residual ~ ", prop_col, ": r =", round(cor_bias, 3), "\n")
+            }
+        }
+    }
+
+    # Combine and write validation results
+    if (length(validation_results) > 0) {
+        validation_combined <- rbindlist(validation_results, fill = TRUE)
+
+        # Add stratified results
+        if (length(stratified_results) > 0) {
+            stratified_combined <- rbindlist(stratified_results, fill = TRUE)
+            validation_combined <- rbind(validation_combined, stratified_combined, fill = TRUE)
+        }
+
+        # Sort: overall first, then by performance
+        validation_combined <- validation_combined[order(stratum != "OVERALL", -value)]
+
+        fwrite(validation_combined,
+               paste0(opt$output_prefix, ".validation.tsv"),
+               sep = "\t")
+
+        cat("\nValidation results saved to:", paste0(opt$output_prefix, ".validation.tsv"), "\n")
+
+        # ================================================================
+        # BEST METHOD SELECTION (considering ancestry equity)
+        # ================================================================
+        cat("\n")
+        cat("════════════════════════════════════════════════════════════════════\n")
+        cat("BEST METHOD SELECTION\n")
+        cat("════════════════════════════════════════════════════════════════════\n")
+
+        overall_results <- validation_combined[stratum == "OVERALL"]
+        overall_results <- overall_results[order(-value)]
+
+        cat("\nOverall ranking:\n")
+        for (i in 1:min(nrow(overall_results), 5)) {
+            cat("  ", i, ". ", overall_results$method[i], ": ",
+                overall_results$metric[i], " = ", round(overall_results$value[i], 4), "\n", sep = "")
+        }
+
+        # Check for ancestry disparity
+        if (length(stratified_results) > 0) {
+            cat("\nAncestry equity check:\n")
+
+            for (method in unique(validation_combined$method)) {
+                method_strat <- validation_combined[method == method & stratum != "OVERALL"]
+
+                if (nrow(method_strat) > 1) {
+                    perf_range <- max(method_strat$value, na.rm = TRUE) -
+                                  min(method_strat$value, na.rm = TRUE)
+                    worst_group <- method_strat$stratum[which.min(method_strat$value)]
+                    worst_perf <- min(method_strat$value, na.rm = TRUE)
+
+                    cat("  ", method, ":\n")
+                    cat("    Performance range:", round(perf_range, 4), "\n")
+                    cat("    Worst performing group:", worst_group,
+                        "(", round(worst_perf, 4), ")\n")
+
+                    if (perf_range > 0.1) {
+                        cat("    ⚠ WARNING: Large ancestry disparity detected!\n")
+                    }
+                }
+            }
+        }
+
+        best_method <- overall_results$method[1]
+        cat("\nBest overall method:", best_method, "\n")
+    }
+}
                 incremental_r2 = r2_incremental
             )
 
