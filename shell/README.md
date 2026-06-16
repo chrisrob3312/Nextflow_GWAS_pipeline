@@ -66,10 +66,12 @@ nextflow run main.nf \
 
 | Script | Description | Corresponding Module |
 |--------|-------------|---------------------|
-| `tractor_genesis_adapter.sh` | Tractor→GENESIS survival/binary/quantitative | `tractor_genesis_adapter` |
+| `tractor_genesis_adapter.sh` | Tractor→GENESIS local ancestry-aware GWAS | `tractor_genesis_adapter` |
+| `calculate_cohort_ld.sh` | Cohort-specific LD calculation by ancestry | `cohort_ld` |
+| `harmonize_qtl.sh` | QTL harmonization and liftover | `qtl_harmonization` |
+| `estimate_heritability.sh` | Heritability estimation (cov-LDSC, GREML) | `heritability` |
 | `run_coloc.sh` | Colocalization analysis (planned) | `coloc` |
 | `run_env_mr_mega.sh` | env-MR-MEGA meta-analysis (planned) | `mr_mega_env` |
-| `calculate_ld.sh` | Cohort-specific LD calculation (planned) | `ld_calculation` |
 
 ### Adding New Wrappers
 
