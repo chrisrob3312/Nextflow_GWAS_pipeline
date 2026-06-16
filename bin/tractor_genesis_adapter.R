@@ -147,18 +147,35 @@ cat("╚════════════════════════
 # ============================================================================
 cat("STATISTICAL MODEL:\n")
 cat("  g(E[Y]) = β₀")
+
+# Display with numbered coefficients to clarify these are SEPARATE terms
+coef_num <- 1
 for (anc in non_ref_anc) {
-    cat(" + β_LA_", anc, "·LA_", anc, sep = "")
+    cat(" + β", coef_num, "·LA_", anc, sep = "")
+    coef_num <- coef_num + 1
 }
 for (anc in ancestries) {
-    cat(" + β_", anc, "·Dose_", anc, sep = "")
+    cat(" + β", coef_num, "·Dose_", anc, sep = "")
+    coef_num <- coef_num + 1
 }
 cat(" + covariates\n\n")
 
-cat("INTERPRETATION:\n")
-cat("  LA_", non_ref_anc[1], ": Local ancestry count (0,1,2 haplotypes of ", non_ref_anc[1], " at this locus)\n", sep = "")
-cat("  Dose_", ancestries[1], ": Risk allele copies carried on ", ancestries[1], " haplotypes\n", sep = "")
-cat("  β_", ancestries[1], ": Effect of allele WHEN on ", ancestries[1], " background\n\n", sep = "")
+# Show coefficient mapping
+cat("COEFFICIENT MAPPING:\n")
+coef_num <- 1
+for (anc in non_ref_anc) {
+    cat("  β", coef_num, " = effect of having ", anc, " ancestry at this locus (LA term)\n", sep = "")
+    coef_num <- coef_num + 1
+}
+for (anc in ancestries) {
+    cat("  β", coef_num, " = effect of allele WHEN carried on ", anc, " haplotype (Dose term)\n", sep = "")
+    coef_num <- coef_num + 1
+}
+cat("\n")
+
+cat("NOTE: Each β is an INDEPENDENT coefficient (not interaction terms).\n")
+cat("      LA terms: k-1 coefficients (", paste(non_ref_anc, collapse = ", "), " vs ", ref_anc, " reference)\n", sep = "")
+cat("      Dose terms: k coefficients (all ancestries)\n\n")
 
 # ============================================================================
 # Load Phenotype Data
