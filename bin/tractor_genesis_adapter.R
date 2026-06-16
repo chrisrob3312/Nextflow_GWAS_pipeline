@@ -682,27 +682,77 @@ cat("\n")
 # ============================================================================
 cat("\nWriting results...\n")
 
-# Main results file
-out_file <- paste0(opt$output_prefix, ".tractor_genesis.tsv.gz")
-fwrite(results, out_file, sep = "\t", compress = "gzip")
-cat("  Main results:", out_file, "\n")
+# Sort results for different output files
+# 1. Genomic order (for LD, fine-mapping, visualization)
+# 2. P-value order (for quick interpretation)
 
-# Significant hits (P_JOINT < 1e-5 OR any P_{anc} < 1e-5)
+results_genomic <- copy(results)
+results_genomic[, CHR_NUM := as.integer(gsub("chr|X|Y|M", "", CHR, ignore.case = TRUE))]
+results_genomic[is.na(CHR_NUM), CHR_NUM := 99]  # Handle X, Y, MT
+setorder(results_genomic, CHR_NUM, POS)
+results_genomic[, CHR_NUM := NULL]
+
+results_pval <- copy(results)
+setorder(results_pval, P_JOINT, na.last = TRUE)
+
+# Main results file (SORTED BY P_JOINT - most significant first)
+out_file <- paste0(opt$output_prefix, ".tractor_genesis.tsv.gz")
+fwrite(results_pval, out_file, sep = "\t", compress = "gzip")
+cat("  Main results (sorted by P_JOINT):", out_file, "\n")
+
+# Genomic order file (for downstream analysis)
+genomic_file <- paste0(opt$output_prefix, ".tractor_genesis.genomic_order.tsv.gz")
+fwrite(results_genomic, genomic_file, sep = "\t", compress = "gzip")
+cat("  Genomic order (for LD/fine-mapping):", genomic_file, "\n")
+
+# Top hits file (top 1000 by P_JOINT)
+n_top <- min(1000, nrow(results_pval))
+top_file <- paste0(opt$output_prefix, ".tractor_genesis.top_hits.tsv")
+fwrite(results_pval[1:n_top], top_file, sep = "\t")
+cat("  Top", n_top, "hits:", top_file, "\n")
+
+# Significant hits (P_JOINT < 1e-5 OR any P_{anc} < 1e-5) - sorted by P_JOINT
 sig_cols <- c("P_JOINT", paste0("P_", ancestries))
-is_sig <- apply(results[, ..sig_cols], 1, function(x) any(x < 1e-5, na.rm = TRUE))
+is_sig <- apply(results_pval[, ..sig_cols], 1, function(x) any(x < 1e-5, na.rm = TRUE))
 if (sum(is_sig) > 0) {
+    sig_results <- results_pval[is_sig]
+    setorder(sig_results, P_JOINT, na.last = TRUE)
     sig_file <- paste0(opt$output_prefix, ".tractor_genesis.significant.tsv")
-    fwrite(results[is_sig], sig_file, sep = "\t")
-    cat("  Significant hits (P < 1e-5):", sig_file, "(", sum(is_sig), "variants)\n")
+    fwrite(sig_results, sig_file, sep = "\t")
+    cat("  Significant hits (P < 1e-5, sorted):", sig_file, "(", sum(is_sig), "variants)\n")
 }
 
-# Heterogeneous effects (P_HET < 0.05 AND P_JOINT < 1e-5)
-is_het <- results$P_HET < 0.05 & results$P_JOINT < 1e-5
+# Heterogeneous effects (P_HET < 0.05 AND P_JOINT < 1e-5) - sorted by P_HET
+is_het <- results_pval$P_HET < 0.05 & results_pval$P_JOINT < 1e-5
 is_het[is.na(is_het)] <- FALSE
 if (sum(is_het) > 0) {
+    het_results <- results_pval[is_het]
+    setorder(het_results, P_HET, na.last = TRUE)
     het_file <- paste0(opt$output_prefix, ".tractor_genesis.heterogeneous.tsv")
-    fwrite(results[is_het], het_file, sep = "\t")
-    cat("  Heterogeneous effects:", het_file, "(", sum(is_het), "variants)\n")
+    fwrite(het_results, het_file, sep = "\t")
+    cat("  Heterogeneous effects (sorted by P_HET):", het_file, "(", sum(is_het), "variants)\n")
+}
+
+# Ancestry-divergent effects (significant in one ancestry but not others)
+cat("\n  Checking for ancestry-divergent effects...\n")
+for (anc in ancestries) {
+    p_col <- paste0("P_", anc)
+    other_p_cols <- paste0("P_", setdiff(ancestries, anc))
+
+    # Significant in this ancestry (P < 5e-8) but not others (P > 0.05)
+    is_anc_specific <- results_pval[[p_col]] < 5e-8
+    for (other_col in other_p_cols) {
+        is_anc_specific <- is_anc_specific & (results_pval[[other_col]] > 0.05 | is.na(results_pval[[other_col]]))
+    }
+    is_anc_specific[is.na(is_anc_specific)] <- FALSE
+
+    if (sum(is_anc_specific) > 0) {
+        anc_results <- results_pval[is_anc_specific]
+        setorder(anc_results, get(p_col), na.last = TRUE)
+        anc_file <- paste0(opt$output_prefix, ".tractor_genesis.", anc, "_specific.tsv")
+        fwrite(anc_results, anc_file, sep = "\t")
+        cat("    ", anc, "-specific effects:", sum(is_anc_specific), "variants →", anc_file, "\n")
+    }
 }
 
 # ============================================================================
