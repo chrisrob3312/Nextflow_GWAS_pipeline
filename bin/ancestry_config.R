@@ -18,17 +18,25 @@
 #   - AAC: African American (run separately)
 #   - LAT1: Latino high-Indigenous (run separately)
 #   - LAT2: Latino high-European (run separately)
-#   - OTHER: EAS + SAS + small groups (<30) - pooled/meta-analyzed
+#   - EAS: East Asian (run separately IF N >= 30, else pool to OTHER)
+#   - SAS: South Asian (run separately IF N >= 30, else pool to OTHER)
+#   - OTHER: Small groups (<30) - pooled/meta-analyzed
+#
+# DYNAMIC: Groups with N >= MIN_STRATUM_N run separately
+#          Groups with N < MIN_STRATUM_N pool to OTHER
 # ============================================================================
 
 # Minimum sample size for separate analysis
 MIN_STRATUM_N <- 30
 
-# Primary ancestry groups (run as separate strata)
+# Guaranteed primary ancestries (always attempt separate analysis)
 PRIMARY_ANCESTRIES <- c("EUR", "AAC", "LAT1", "LAT2")
 
-# Groups that get pooled into OTHER if N < MIN_STRATUM_N
-POOLABLE_ANCESTRIES <- c("EAS", "SAS", "AMR", "AFR", "OTHER")
+# Conditional ancestries (run separately if N >= MIN_STRATUM_N)
+CONDITIONAL_ANCESTRIES <- c("EAS", "SAS")
+
+# Groups that always get pooled into OTHER
+ALWAYS_POOL <- c("AMR", "AFR", "UNKNOWN")
 
 # GRAF-ANC code mapping
 GRAF_ANC_CODES <- list(
@@ -70,20 +78,41 @@ assign_analysis_strata <- function(ancestry_data, ancestry_col = "ancestry",
 
     # Assign analysis strata
     ancestry_data$analysis_stratum <- sapply(ancestry_data$ancestry_name, function(anc) {
+        n <- anc_counts[anc]
+        if (is.na(n)) n <- 0
+
         # Primary ancestries always get their own stratum if N >= min_n
         if (anc %in% PRIMARY_ANCESTRIES) {
-            if (anc_counts[anc] >= min_n) {
+            if (n >= min_n) {
                 return(anc)
             } else {
-                cat("  Warning:", anc, "has N =", anc_counts[anc],
+                cat("  Warning:", anc, "has N =", n,
                     "< min_n, pooling to OTHER\n")
                 return("OTHER")
             }
         }
-        # Poolable ancestries go to OTHER if small
-        if (anc %in% POOLABLE_ANCESTRIES || anc_counts[anc] < min_n) {
+
+        # Conditional ancestries (EAS, SAS): run separately if N >= min_n
+        if (anc %in% CONDITIONAL_ANCESTRIES) {
+            if (n >= min_n) {
+                cat("  ✓", anc, "has N =", n, ">= min_n, running separately\n")
+                return(anc)
+            } else {
+                cat("  →", anc, "has N =", n, "< min_n, pooling to OTHER\n")
+                return("OTHER")
+            }
+        }
+
+        # Always-pool ancestries go to OTHER
+        if (anc %in% ALWAYS_POOL) {
             return("OTHER")
         }
+
+        # Unknown groups: pool if small
+        if (n < min_n) {
+            return("OTHER")
+        }
+
         return(anc)
     })
 
