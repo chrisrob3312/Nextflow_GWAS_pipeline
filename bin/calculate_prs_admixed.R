@@ -133,6 +133,49 @@ opt <- parse_args(OptionParser(
     description = "Multi-method PRS for admixed populations"
 ))
 
+# ============================================================================
+# SLURM Array Job Detection
+# ============================================================================
+slurm_task_id <- opt$array_index
+if (is.null(slurm_task_id)) {
+    slurm_task_id <- as.integer(Sys.getenv("SLURM_ARRAY_TASK_ID", ""))
+    if (is.na(slurm_task_id)) slurm_task_id <- NULL
+}
+
+slurm_task_count <- opt$array_total
+if (is.null(slurm_task_count)) {
+    slurm_task_count <- as.integer(Sys.getenv("SLURM_ARRAY_TASK_COUNT", ""))
+    if (is.na(slurm_task_count)) slurm_task_count <- NULL
+}
+
+if (!is.null(slurm_task_id)) {
+    cat("Running as SLURM array task:", slurm_task_id, "\n")
+
+    # Can use array ID to select method, chromosome, or ancestry
+    available_methods <- c("prs_csx", "gaudi", "disco_divas", "sdpr_admix", "mussel", "prosper")
+
+    if (opt$method == "all" && slurm_task_id <= length(available_methods)) {
+        opt$method <- available_methods[slurm_task_id]
+        cat("  Method (from array):", opt$method, "\n")
+    }
+}
+
+# Set thread count from SLURM
+slurm_cpus <- as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", ""))
+if (!is.na(slurm_cpus) && slurm_cpus > 0) {
+    opt$threads <- slurm_cpus
+}
+
+# ============================================================================
+# Ancestry Configuration for Latino Cohort
+# ============================================================================
+# Primary strata (run separately): EUR, AAC, LAT1, LAT2
+# Small groups (N < 30): Pool to OTHER, meta-analyze into pooled results
+# LAT1/LAT2: Run separately as >60% of cohort is Latino
+
+MIN_STRATUM_N <- 30
+PRIMARY_ANCESTRIES <- c("EUR", "AAC", "LAT1", "LAT2")
+
 # Parse ancestries
 ancestries <- strsplit(opt$ancestries, ",")[[1]]
 n_anc <- length(ancestries)

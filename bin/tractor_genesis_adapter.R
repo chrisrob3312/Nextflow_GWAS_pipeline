@@ -96,7 +96,23 @@ option_list <- list(
     make_option(c("--threads"), type = "integer", default = 1,
                 help = "Number of threads [default: 1]"),
     make_option(c("-v", "--verbose"), action = "store_true", default = FALSE,
-                help = "Verbose output")
+                help = "Verbose output"),
+
+    # SLURM array job support
+    make_option(c("--slurm_array_task_id"), type = "integer", default = NULL,
+                help = "SLURM_ARRAY_TASK_ID (auto-detected if not set)"),
+    make_option(c("--slurm_array_task_count"), type = "integer", default = NULL,
+                help = "Total array tasks (for chunking)"),
+    make_option(c("--chromosome"), type = "character", default = NULL,
+                help = "Chromosome to analyze (for array parallelization)"),
+
+    # Ancestry stratification
+    make_option(c("--stratum"), type = "character", default = NULL,
+                help = "Ancestry stratum to analyze (EUR, AAC, LAT1, LAT2, OTHER, or POOLED)"),
+    make_option(c("--min_stratum_n"), type = "integer", default = 30,
+                help = "Minimum samples per stratum [default: 30]"),
+    make_option(c("--ancestry_config"), type = "character", default = NULL,
+                help = "Path to ancestry_config.R for cohort-specific settings")
 )
 
 opt <- parse_args(OptionParser(
@@ -118,6 +134,38 @@ if (is.null(opt$tractor_prefix) && is.null(opt$msp)) {
 
 if (!is.null(opt$msp) && is.null(opt$gds)) {
     stop("--gds required when using --msp input")
+}
+
+# ============================================================================
+# SLURM Array Job Detection
+# ============================================================================
+slurm_task_id <- opt$slurm_array_task_id
+if (is.null(slurm_task_id)) {
+    slurm_task_id <- as.integer(Sys.getenv("SLURM_ARRAY_TASK_ID", ""))
+    if (is.na(slurm_task_id)) slurm_task_id <- NULL
+}
+
+if (!is.null(slurm_task_id)) {
+    cat("Running as SLURM array task:", slurm_task_id, "\n")
+
+    # If chromosome specified via array, use task ID
+    if (is.null(opt$chromosome) && slurm_task_id >= 1 && slurm_task_id <= 22) {
+        opt$chromosome <- as.character(slurm_task_id)
+        cat("  Chromosome (from array):", opt$chromosome, "\n")
+    }
+}
+
+# Set thread count from SLURM if available
+slurm_cpus <- as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", ""))
+if (!is.na(slurm_cpus) && slurm_cpus > 0) {
+    opt$threads <- slurm_cpus
+    cat("Using SLURM CPUs:", opt$threads, "\n")
+}
+
+# Load ancestry config if provided
+if (!is.null(opt$ancestry_config) && file.exists(opt$ancestry_config)) {
+    source(opt$ancestry_config)
+    cat("Loaded ancestry config from:", opt$ancestry_config, "\n")
 }
 
 # Parse ancestries
