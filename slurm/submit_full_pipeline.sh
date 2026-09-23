@@ -64,10 +64,29 @@ submit_job() {
 }
 
 # ============================================================================
+# STEP 0: GENESIS PC-AiR + PC-Relate (ancestry PCs + GRM for EVERY model)
+# ============================================================================
+echo ""
+echo "STEP 0: Submitting PC-AiR / PC-Relate..."
+DEPEND_PCAIR=""
+if [[ "${SKIP_PCAIR:-false}" != "true" ]]; then
+    cmd="sbatch --parsable ${SCRIPT_DIR}/submit_pcair.sh"
+    if [[ "$DRY_RUN" != "--dry-run" ]]; then
+        PCAIR_JOB=$(eval "$cmd")
+        DEPEND_PCAIR="--dependency=afterok:${PCAIR_JOB}"
+        echo "  Job ID: ${PCAIR_JOB}"
+    else
+        echo "  [DRY-RUN] $cmd"
+    fi
+else
+    echo "  Skipped (SKIP_PCAIR=true): using data/kinship + PCs already in the phenotype file"
+fi
+
+# ============================================================================
 # STEP 1: Tractor-GENESIS GWAS for every trait x stratum (array over chromosomes)
 # ============================================================================
 # ALL traits use the same adapter so they are comparable:
-#   MRD -> binary (logistic null), relapse/OS -> survival (Cox null + kinship)
+#   MRD -> binary (logistic null), DFS/OS -> survival (Cox null + PC-Relate GRM)
 echo ""
 echo "STEP 1: Submitting Tractor-GENESIS GWAS jobs..."
 declare -A GWAS_JOBS
@@ -76,7 +95,7 @@ for trait in "${TRAITS[@]}"; do
     model=$(trait_model "$trait")
     for stratum in "${STRATA[@]}"; do
         echo "  ${trait} (${model}) / ${stratum}: 22 chromosomes"
-        cmd="sbatch --parsable ${SCRIPT_DIR}/submit_gwas_array.sh ${stratum} ${trait} ${model}"
+        cmd="sbatch --parsable ${DEPEND_PCAIR} ${SCRIPT_DIR}/submit_gwas_array.sh ${stratum} ${trait} ${model}"
         if [[ "$DRY_RUN" != "--dry-run" ]]; then
             GWAS_JOBS["${trait}.${stratum}"]=$(eval "$cmd")
             echo "    Job ID: ${GWAS_JOBS["${trait}.${stratum}"]}"

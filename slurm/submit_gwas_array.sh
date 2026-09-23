@@ -49,9 +49,19 @@ DATA_DIR="${SCRIPT_DIR}/data"
 RESULTS_DIR="${SCRIPT_DIR}/results/gwas/${TRAIT}/${STRATUM}"
 mkdir -p "${RESULTS_DIR}"
 
-PHENO="${DATA_DIR}/phenotypes/phenotypes.tsv"
+# Prefer PC-AiR / PC-Relate outputs (step 0) so every model adjusts for the
+# same ancestry PCs and the same admixture-robust GRM; fall back to data/
+PCAIR_DIR="${SCRIPT_DIR}/results/pcair"
+if [[ -z "${PHENO:-}" ]]; then
+    [[ -f "${PCAIR_DIR}/cohort.phenotypes.with_pcs.tsv" ]] && PHENO="${PCAIR_DIR}/cohort.phenotypes.with_pcs.tsv" \
+        || PHENO="${DATA_DIR}/phenotypes/phenotypes.tsv"
+fi
+if [[ -z "${KINSHIP:-}" ]]; then
+    [[ -f "${PCAIR_DIR}/cohort.pcrelate.grm.rds" ]] && KINSHIP="${PCAIR_DIR}/cohort.pcrelate.grm.rds" \
+        || KINSHIP="${DATA_DIR}/kinship/kinship_matrix.rds"
+fi
+echo "Phenotype: ${PHENO}"; echo "GRM: ${KINSHIP}"
 TRACTOR_PREFIX="${DATA_DIR}/tractor/${STRATUM}/chr${CHR}"
-KINSHIP="${DATA_DIR}/kinship/kinship_matrix.rds"
 
 # Ancestral populations for the Tractor decomposition
 case "${STRATUM}" in

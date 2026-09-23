@@ -127,6 +127,7 @@ include { FUNCTIONAL_ANNOT    } from './subworkflows/functional'
 include { VISUALIZATION       } from './subworkflows/visualization'
 include { REPORTING           } from './subworkflows/reporting'
 include { GXG_INTERACTION     } from './subworkflows/gxg'
+include { GENESIS_PCAIR_PCRELATE } from './modules/local/genesis_pcair'
 
 // Utility modules
 include { SOFTWARE_VERSIONS   } from './modules/local/software_versions'
@@ -182,6 +183,29 @@ workflow {
     ch_versions = ch_versions.mix(QC_WORKFLOW.out.versions)
 
     // =========================================================================
+    // GENESIS PC-AiR + PC-Relate (ancestry PCs and GRM used by EVERY model)
+    // =========================================================================
+    // PC-AiR: PCs from an unrelated set, projected onto relatives (not distorted
+    // by family structure). PC-Relate: kinship conditional on those PCs (not
+    // inflated by admixture). The GRM feeds the standard GENESIS null model,
+    // Tractor-GENESIS and GxG; the PC-AiR PCs replace any PC columns in the
+    // phenotype file so covariate_cols = PC1..PCn uses them.
+    if (params.run_pcair) {
+        GENESIS_PCAIR_PCRELATE(
+            ch_qc_genotypes.first(),
+            ch_phenotypes.first(),
+            params.pcair_n_pcs
+        )
+        ch_phenotypes = GENESIS_PCAIR_PCRELATE.out.phenotype_with_pcs.map { m, p -> p }
+        ch_kinship    = GENESIS_PCAIR_PCRELATE.out.grm.map { m, k -> k }.first()
+        ch_unrelated  = GENESIS_PCAIR_PCRELATE.out.unrelated.map { m, f -> f }.first()
+        ch_versions   = ch_versions.mix(GENESIS_PCAIR_PCRELATE.out.versions)
+    } else {
+        ch_kinship   = Channel.value(params.kinship_matrix ? file(params.kinship_matrix) : [])
+        ch_unrelated = Channel.value([])
+    }
+
+    // =========================================================================
     // ANCESTRY INFERENCE
     // =========================================================================
     ANCESTRY_INFERENCE(
@@ -228,7 +252,7 @@ workflow {
         params.covariate_cols,
         params.gwas_tool,
         params.gwas_model,
-        params.kinship_matrix ? file(params.kinship_matrix) : [],
+        ch_kinship,                       // PC-Relate GRM (or params.kinship_matrix)
         params.run_tractor,
         ch_local_ancestry,
         params.tractor_aac_pops,
@@ -338,15 +362,21 @@ workflow {
             )
         }
 
+        // Parallel coloc.susie | HyPrColoc | OPERA on every ancestry-stratified
+        // GWAS (standard + Tractor-GENESIS) AND on the meta/POOLED GWAS
         COLOCALIZATION(
-            params.fine_mapping ? ch_fm_results : ch_gwas_filtered,
+            ch_gwas_results.mix(params.run_tractor ? ch_tractor_results : Channel.empty()),
+            params.meta_analysis ? ch_meta_results : Channel.empty(),
             ch_qtl_data,
-            params.coloc_method,
+            Channel.empty(),                 // cohort LD by ancestry: connect CALCULATE_LD output here when run
+            params.gwas_n,
+            params.qtl_n,
             params.coloc_p1,
             params.coloc_p2,
             params.coloc_p12
         )
         ch_coloc_results = COLOCALIZATION.out.coloc_results
+        ch_coloc_consensus = COLOCALIZATION.out.consensus
         ch_versions = ch_versions.mix(COLOCALIZATION.out.versions)
     }
 
@@ -372,23 +402,24 @@ workflow {
     // PRS ANALYSIS
     // =========================================================================
     if (params.prs_analysis) {
-        // Prepare inputs for different PRS methods
-        ch_prs_inputs = params.meta_analysis ?
-            ch_meta_results.map { meta, results -> [meta, results, 'meta'] } :
-            ch_gwas_results.map { meta, results -> [meta, results, meta.ancestry] }
-
+        // PRS-CSx + GAUDI, DiscoDivas, SDPR_admix, MUSSEL, PROSPER on the
+        // ancestry-specific GWAS; local-ancestry partial scores from Tractor
+        // dosages x Tractor-GENESIS betas; validation overall + per stratum
         PRS_WORKFLOW(
-            ch_prs_inputs,
-            ch_stratified_genotypes,
+            ch_gwas_results,
+            ch_qc_genotypes,
             ch_local_ancestry,
+            ch_phenotypes_with_meta,
+            params.run_tractor ? ch_tractor_results : Channel.empty(),
+            params.run_tractor ? GWAS_WORKFLOW.out.tractor_dosages : Channel.empty(),
             params.prs_methods.split(',') as List,
-            params.prscsx_reference ? file(params.prscsx_reference) : [],
-            params.ld_reference_dir ? file(params.ld_reference_dir) : [],
-            params.validation_cohort ? file(params.validation_cohort) : [],
+            params.prscsx_reference ? file(params.prscsx_reference) :
+                (params.ld_reference_dir ? file(params.ld_reference_dir) : []),
             params.prs_validation,
-            params.prs_best_method
+            params.gxg_ancestry_col
         )
         ch_prs_scores = PRS_WORKFLOW.out.prs_scores
+        ch_prs_la_partial = PRS_WORKFLOW.out.la_partial
         ch_prs_validation = PRS_WORKFLOW.out.validation_results
         ch_prs_comparison = PRS_WORKFLOW.out.method_comparison
         ch_versions = ch_versions.mix(PRS_WORKFLOW.out.versions)

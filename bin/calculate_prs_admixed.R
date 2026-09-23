@@ -59,6 +59,12 @@ option_list <- list(
     # Input: Local ancestry (for LA-aware methods)
     make_option(c("--local_ancestry"), type = "character", default = NULL,
                 help = "Local ancestry files prefix (RFMix MSP format)"),
+    make_option(c("--tractor_prefix"), type = "character", default = NULL,
+                help = "Tractor prefix (.ancdose.<k>.tsv.gz / .dosage.<anc>.txt.gz) for local-ancestry PARTIAL scores"),
+    make_option(c("--weights"), type = "character", default = NULL,
+                help = "Ancestry-specific weights: Tractor-GENESIS sumstats (BETA_<anc>, ALT) or a table with ID, A1, BETA_<anc>"),
+    make_option(c("--la_p_threshold"), type = "numeric", default = 1e-5,
+                help = "When --weights is a Tractor-GENESIS file: keep variants with P_JOINT below this [default: 1e-5]"),
 
     # Ancestry specification
     make_option(c("--ancestries"), type = "character", default = "EUR,AFR",
@@ -504,6 +510,104 @@ run_prosper <- function(sumstats, ld_ref, geno, ancestries, output_prefix, opt) 
 }
 
 # ============================================================================
+# Method: local-ancestry PARTIAL PRS (DiscoDivas / GAUDI idea, R implementation)
+# ============================================================================
+# For each person i and ancestry background a:
+#     PRS_a,i = sum_j  w_a,j * Dose_a,ij
+# Dose_a,ij = copies of the effect allele carried on haplotypes of ancestry a
+# (Tractor ancdose files); w_a,j = ancestry-specific effect (Tractor-GENESIS
+# BETA_<a>, or per-ancestry posterior weights). Total PRS = sum_a PRS_a.
+# Output: per-person partial scores, total, z-score, and the share of the
+# score carried on each ancestral background.
+run_la_partial <- function(weights_file, tractor_prefix, ancestries, output_prefix, opt) {
+    cat("Running local-ancestry PARTIAL PRS...\n")
+    cat("  PRS_anc,i = sum_j w_anc,j * Dose_anc,ij  (Tractor dosages x ancestry-specific effects)\n\n")
+    if (is.null(weights_file) || !file.exists(weights_file)) stop("--weights required for la_partial")
+    if (is.null(tractor_prefix)) stop("--tractor_prefix required for la_partial")
+
+    w <- fread(weights_file)
+    idc <- intersect(c("ID", "SNP", "variant_id", "rsid"), names(w))[1]
+    if (is.na(idc)) stop("weights file needs an ID column")
+    setnames(w, idc, "ID")
+    ea_col <- intersect(c("ALT", "A1", "effect_allele", "EA"), names(w))[1]
+    is_tractor <- "P_JOINT" %in% names(w)
+    if (is_tractor) {
+        n0 <- nrow(w); w <- w[!is.na(P_JOINT) & P_JOINT < opt$la_p_threshold]
+        cat("  Tractor-GENESIS weights: kept", nrow(w), "of", n0, "variants at P_JOINT <", opt$la_p_threshold, "\n")
+        cat("  NOTE: raw betas without shrinkage; prefer per-ancestry PRS-CSx posterior weights when available\n")
+    }
+    if (nrow(w) == 0) stop("No variants left in weights")
+
+    # weight per ancestry: BETA_<anc>, else a shared BETA
+    wcols <- sapply(ancestries, function(a) {
+        c1 <- paste0("BETA_", a); if (c1 %in% names(w)) c1 else if ("BETA" %in% names(w)) "BETA" else NA
+    })
+    if (any(is.na(wcols))) stop("No BETA_<anc> or BETA column for: ", paste(ancestries[is.na(wcols)], collapse = ","))
+    if (any(wcols == "BETA")) cat("  WARNING: shared BETA used for", paste(ancestries[wcols == "BETA"], collapse = ","), "(no ancestry-specific effect)\n")
+
+    read_dose <- function(a, k) {
+        cands <- c(paste0(tractor_prefix, ".ancdose.", a, ".tsv.gz"), paste0(tractor_prefix, ".ancdose.", k, ".tsv.gz"),
+                   paste0(tractor_prefix, ".dosage.", a, ".txt.gz"), paste0(tractor_prefix, ".dosage.", k, ".txt.gz"))
+        f <- cands[file.exists(cands)][1]
+        if (is.na(f)) stop("No Tractor dosage file for ", a, " (tried ", paste(basename(cands), collapse = ", "), ")")
+        d <- fread(f)
+        info <- intersect(names(d), c("CHR", "CHROM", "#CHROM", "POS", "BP", "ID", "SNP", "REF", "ALT"))
+        idn <- intersect(c("ID", "SNP"), names(d))[1]
+        ids <- if (!is.na(idn)) as.character(d[[idn]]) else paste0(d[[1]], ":", d[[2]])
+        alt <- if ("ALT" %in% names(d)) as.character(d$ALT) else NA
+        m <- as.matrix(d[, setdiff(names(d), info), with = FALSE]); rownames(m) <- ids
+        list(m = m, alt = alt, ids = ids)
+    }
+
+    scores <- NULL; used <- list()
+    for (k in seq_along(ancestries)) {
+        a <- ancestries[k]
+        dd <- read_dose(a, k - 1)
+        common <- intersect(w$ID, dd$ids)
+        if (length(common) == 0) { cat("  ", a, ": no overlapping variants\n"); next }
+        wa <- w[match(common, ID)]
+        beta <- as.numeric(wa[[wcols[k]]])
+        # align effect allele to the dosage ALT allele
+        if (!is.na(ea_col) && !all(is.na(dd$alt))) {
+            alt_d <- dd$alt[match(common, dd$ids)]
+            flip <- !is.na(alt_d) & toupper(as.character(wa[[ea_col]])) != toupper(alt_d)
+            beta[flip] <- -beta[flip]
+            if (any(flip)) cat("  ", a, ": flipped", sum(flip), "weights to the dosage ALT allele\n")
+        }
+        beta[is.na(beta)] <- 0
+        D <- dd$m[common, , drop = FALSE]; D[is.na(D)] <- 0
+        s <- as.numeric(crossprod(D, beta))           # per-sample partial score
+        names(s) <- colnames(D)
+        if (is.null(scores)) scores <- data.table(sample_id = names(s))
+        scores[[paste0("PRS_", a)]] <- s[scores$sample_id]
+        used[[a]] <- data.table(ancestry = a, n_variants = length(common), mean = mean(s), sd = sd(s))
+        cat("  ", a, ":", length(common), "variants | mean", signif(mean(s), 3), "| sd", signif(sd(s), 3), "\n")
+    }
+    if (is.null(scores)) stop("No partial scores computed")
+    pcols <- grep("^PRS_", names(scores), value = TRUE)
+    scores[, PRS_total := rowSums(.SD, na.rm = TRUE), .SDcols = pcols]
+    scores[, PRS_total_z := (PRS_total - mean(PRS_total)) / sd(PRS_total)]
+    abs_sum <- rowSums(abs(scores[, ..pcols]), na.rm = TRUE)
+    for (pc in pcols) scores[[sub("^PRS_", "share_", pc)]] <- abs(scores[[pc]]) / ifelse(abs_sum > 0, abs_sum, NA)
+
+    # optional: association of each partial score with the phenotype
+    summ <- rbindlist(used)
+    if (!is.null(opt$phenotype) && !is.null(opt$trait) && file.exists(opt$phenotype)) {
+        ph <- fread(opt$phenotype); idp <- intersect(c("sample_id", "IID", "ID"), names(ph))[1]
+        if (!is.na(idp) && opt$trait %in% names(ph)) {
+            ph[[idp]] <- as.character(ph[[idp]])
+            mm <- merge(scores, ph[, c(idp, opt$trait), with = FALSE], by.x = "sample_id", by.y = idp)
+            summ[, cor_with_trait := sapply(ancestry, function(a) suppressWarnings(cor(mm[[paste0("PRS_", a)]], mm[[opt$trait]], use = "complete.obs")))]
+            cat("  Correlation of partial scores with", opt$trait, ":", paste(summ$ancestry, signif(summ$cor_with_trait, 3), collapse = ", "), "\n")
+        }
+    }
+    fwrite(scores, paste0(output_prefix, ".la_partial.scores.tsv"), sep = "\t")
+    fwrite(summ, paste0(output_prefix, ".la_partial.summary.tsv"), sep = "\t")
+    cat("  Partial scores:", paste0(output_prefix, ".la_partial.scores.tsv"), "\n")
+    invisible(list(method = "la_partial", scores = scores))
+}
+
+# ============================================================================
 # Calculate PRS scores
 # ============================================================================
 calculate_scores <- function(weights_list, geno_prefix, output_prefix) {
@@ -573,6 +677,19 @@ combine_prs <- function(scores, ancestries, anc_props = NULL, method = "weighted
 # Run Selected Method
 # ============================================================================
 results <- NULL
+
+# validate-only: score files already exist in the working directory
+if (opt$method == "validate") {
+    opt$validate <- TRUE
+    cat("Validation-only mode (using existing *.sscore / *.scores.tsv files)\n")
+}
+
+# Local-ancestry partial scores (also the R fallback for GAUDI / DiscoDivas)
+if (opt$method == "la_partial" || opt$method == "all" ||
+    (opt$method %in% c("gaudi", "disco_divas") && !is.null(opt$tractor_prefix) && !is.null(opt$weights))) {
+    run_la_partial(opt$weights, opt$tractor_prefix, ancestries,
+                   paste0(opt$output_prefix, if (opt$method %in% c("gaudi", "disco_divas")) paste0(".", opt$method) else ""), opt)
+}
 
 if (opt$method == "prs_csx" || opt$method == "all") {
     if (is.null(opt$sumstats_dir)) stop("--sumstats_dir required for PRS-CSx")
@@ -970,30 +1087,6 @@ if (opt$validate && !is.null(opt$phenotype) && !is.null(opt$trait)) {
 
         best_method <- overall_results$method[1]
         cat("\nBest overall method:", best_method, "\n")
-    }
-}
-                incremental_r2 = r2_incremental
-            )
-
-            cat("  ", method_name, "R²:", round(r2, 4),
-                "(incremental:", round(r2_incremental, 4), ")\n")
-        }
-    }
-
-    # Combine and write validation results
-    if (length(validation_results) > 0) {
-        validation_combined <- rbindlist(validation_results, fill = TRUE)
-        validation_combined <- validation_combined[order(-value)]
-
-        fwrite(validation_combined,
-               paste0(opt$output_prefix, ".validation.tsv"),
-               sep = "\t")
-
-        cat("\nValidation summary saved to:", paste0(opt$output_prefix, ".validation.tsv"), "\n")
-
-        # Identify best method
-        best_method <- validation_combined$method[1]
-        cat("Best performing method:", best_method, "\n")
     }
 }
 

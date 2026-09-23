@@ -41,6 +41,10 @@ echo "=============================================="
 DATA_DIR="${SCRIPT_DIR}/data"
 GWAS_DIR="${SCRIPT_DIR}/results/gwas/${TRAIT}"     # Tractor-GENESIS output for this trait (all strata + POOLED)
 RESULTS_DIR="${SCRIPT_DIR}/results/gxg/${TRAIT}"
+# Phenotype with PC-AiR PCs (step 0) if present, else the raw phenotype file
+PCAIR_PHENO="${SCRIPT_DIR}/results/pcair/cohort.phenotypes.with_pcs.tsv"
+PHENO="${PHENO:-$([[ -f "${PCAIR_PHENO}" ]] && echo "${PCAIR_PHENO}" || echo "${DATA_DIR}"/phenotypes/phenotypes.tsv)}"
+echo "Phenotype: ${PHENO}"
 mkdir -p "${RESULTS_DIR}"
 
 # Hits come from EVERY GWAS variant for this trait: pooled meta + each stratum
@@ -74,7 +78,7 @@ Rscript "${SCRIPT_DIR}/bin/run_gxg_interaction.R" \
     ${LOCI_ARGS} \
     --prune_mode "${PRUNE_MODE}" \
     --geno "${DATA_DIR}/genotypes/cohort" \
-    --phenotype "${DATA_DIR}/phenotypes/phenotypes.tsv" \
+    --phenotype "${PHENO}" \
     --trait "${TRAIT}" \
     --model "${MODEL}" \
     ${SURV_ARGS} \
@@ -101,7 +105,7 @@ if [[ "${SLURM_ARRAY_TASK_ID}" == "${SLURM_ARRAY_TASK_MAX}" ]]; then
                      --sumstats '${SUMSTATS}' --p_threshold ${GXG_P_THRESHOLD:-1e-5} --max_hits ${GXG_MAX_HITS:-200} \
                      ${LOCI_ARGS} --prune_mode ${PRUNE_MODE} \
                      --geno ${DATA_DIR}/genotypes/cohort \
-                     --phenotype ${DATA_DIR}/phenotypes/phenotypes.tsv \
+                     --phenotype ${PHENO} \
                      --trait ${TRAIT} --model ${MODEL} ${SURV_ARGS} \
                      --covariates ${COVARIATES} --ancestry_col ${ANCESTRY_COL} \
                      --ancestry_config ${SCRIPT_DIR}/bin/ancestry_config.R --min_stratum_n 30 \

@@ -2,180 +2,107 @@
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     PRS_WORKFLOW SUBWORKFLOW
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    Multi-ancestry PRS calculation and validation
-    Methods: PRS-CSx, PRS-CS, GAUDI, LDpred2, PRS-weighted
-    Includes validation framework and best method determination
+    Multi-method PRS for admixed populations (bin/calculate_prs_admixed.R):
+      primary PRS-CSx; adjuncts GAUDI, DiscoDivas, SDPR_admix, MUSSEL, PROSPER
+      (no clumping + thresholding).
+    Local-ancestry PARTIAL scores from Tractor dosages x ancestry-specific
+    effects (Tractor-GENESIS BETA_<anc>): the part of each person's score
+    carried on EUR / AFR / AMR haplotypes.
+    Validation on the phenotype, OVERALL and WITHIN each ancestry stratum,
+    with disparity flags; best method overall and per stratum.
+    Aligned with the SLURM path (slurm/submit_prs_array.sh), same script.
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 */
 
-include { PRS_CSX           } from '../../modules/local/prs_csx'
-include { PRS_CS            } from '../../modules/local/prs_cs'
-include { GAUDI             } from '../../modules/local/gaudi'
-include { LDPRED2           } from '../../modules/local/ldpred2'
-include { PRS_WEIGHTED      } from '../../modules/local/prs_weighted'
-include { PRS_CALCULATE     } from '../../modules/local/prs_calculate'
-include { PRS_VALIDATION    } from '../../modules/local/prs_validation'
-include { PRS_COMPARISON    } from '../../modules/local/prs_comparison'
-include { PRS_BEST_METHOD   } from '../../modules/local/prs_best_method'
+include { PRS_METHOD              } from '../../modules/local/prs_admixed'
+include { PRS_LA_PARTIAL          } from '../../modules/local/prs_admixed'
+include { PRS_VALIDATE_STRATIFIED } from '../../modules/local/prs_admixed'
+include { PRS_COMBINE_METHODS     } from '../../modules/local/prs_admixed'
 
 workflow PRS_WORKFLOW {
     take:
-    ch_sumstats          // channel: [ meta, sumstats, source_type ]
-    ch_genotypes         // channel: [ meta, bed, bim, fam ]
-    ch_local_ancestry    // channel: [ meta, local_ancestry_files ]
-    prs_methods          // list: methods to run
-    prscsx_reference     // file: PRS-CSx LD reference
-    ld_reference_dir     // file: LD reference directory
-    validation_cohort    // file: validation cohort data
+    ch_sumstats          // channel: [ meta(trait, ancestry, binary, survival, ...), sumstats ]  ancestry-specific GWAS
+    ch_genotypes         // channel: [ meta, bed, bim, fam ]   full QC'd cohort (scoring + validation)
+    ch_local_ancestry    // channel: [ meta, msp ] or empty
+    ch_phenotype         // channel: [ meta, phenotype_with_pcs ]
+    ch_tractor_sumstats  // channel: [ meta(trait), tractor_genesis.tsv.gz ] ancestry-specific weights, or empty
+    ch_tractor_dosages   // channel: [ meta, ancdose files ] or empty
+    prs_methods          // list: e.g. ['prs_csx','gaudi','disco_divas','sdpr_admix','mussel','prosper']
+    ld_ref               // file: LD reference dir (PRS-CSx / SDPR), or []
     run_validation       // boolean
-    determine_best       // boolean
+    ancestry_col         // string
 
     main:
     ch_versions = Channel.empty()
-    ch_prs_weights = Channel.empty()
-    ch_prs_scores = Channel.empty()
+
+    ch_geno_single  = ch_genotypes.first()
+    ch_pheno_single = ch_phenotype.map { m, p -> p }.first()
+    ch_la_single    = ch_local_ancestry.map { m, f -> f }.first().ifEmpty([])
+
+    // One record per trait: ancestry list + matching sumstats list (for PRS-CSx / SDPR)
+    ch_by_trait = ch_sumstats
+        .filter { meta, ss -> meta.ancestry && meta.ancestry != 'META' }
+        .map { meta, ss -> [[trait: meta.trait, binary: meta.binary ?: false, survival: meta.survival ?: false,
+                             time_col: meta.time_col, event_col: meta.event_col], meta.ancestry, ss] }
+        .groupTuple(by: 0)
+        .map { meta, ancs, files -> [meta, ancs, files] }
+
+    ch_method_input = ch_by_trait
+        .combine(ch_geno_single)
+        .combine(ch_la_single)
+        .combine(ch_pheno_single)
+        .map { meta, ancs, files, gmeta, bed, bim, fam, la, pheno -> [meta, ancs, files, bed, bim, fam, la, pheno] }
+
+    // ------------------------------------------------------------------
+    // All methods in parallel (each method = one task per trait)
+    // ------------------------------------------------------------------
+    PRS_METHOD(ch_method_input, prs_methods, ld_ref)
+    ch_versions = ch_versions.mix(PRS_METHOD.out.versions)
+
+    ch_scores = PRS_METHOD.out.results
+        .map { meta, method, files -> [meta + [method: method], files] }
+
+    // ------------------------------------------------------------------
+    // Local-ancestry partial scores (Tractor dosages x Tractor-GENESIS betas)
+    // ------------------------------------------------------------------
+    ch_la_input = ch_tractor_sumstats
+        .map { meta, ss -> [[trait: meta.trait], meta.tractor_pops ?: params.tractor_lat_pops, ss] }
+        .combine(ch_tractor_dosages.map { m, f -> f }.collect().map { [it] })
+        .combine(ch_pheno_single)
+        .map { meta, ancs, ss, dos, pheno -> [meta, ancs.tokenize(','), ss, dos, pheno] }
+
+    PRS_LA_PARTIAL(ch_la_input)
+    ch_versions = ch_versions.mix(PRS_LA_PARTIAL.out.versions)
+
+    // ------------------------------------------------------------------
+    // Validation: overall + per stratum, then method comparison
+    // ------------------------------------------------------------------
     ch_validation = Channel.empty()
-
-    // =========================================================================
-    // CALCULATE PRS WEIGHTS USING MULTIPLE METHODS
-    // =========================================================================
-
-    // PRS-CSx (multi-ancestry, uses all populations jointly)
-    if ('prs-csx' in prs_methods) {
-        // Group sumstats by trait for multi-ancestry PRS-CSx
-        ch_prscsx_input = ch_sumstats
-            .filter { meta, sumstats, source -> source == 'meta' || source != 'meta' }
-            .map { meta, sumstats, source -> [[trait: meta.trait], sumstats, meta.ancestry ?: 'meta'] }
+    ch_comparison = Channel.empty()
+    ch_best       = Channel.empty()
+    if (run_validation) {
+        ch_val_input = ch_scores
+            .map { meta, files -> [[trait: meta.trait, binary: meta.binary, survival: meta.survival,
+                                    time_col: meta.time_col, event_col: meta.event_col], files] }
             .groupTuple(by: 0)
+            .map { meta, files -> [meta, files.flatten()] }
+            .combine(ch_pheno_single)
 
-        PRS_CSX(
-            ch_prscsx_input,
-            prscsx_reference
-        )
-        ch_prs_weights = ch_prs_weights.mix(
-            PRS_CSX.out.weights.map { meta, weights -> [meta + [method: 'prs-csx'], weights] }
-        )
-        ch_versions = ch_versions.mix(PRS_CSX.out.versions)
-    }
+        PRS_VALIDATE_STRATIFIED(ch_val_input, ancestry_col)
+        ch_validation = PRS_VALIDATE_STRATIFIED.out.validation
+        ch_versions = ch_versions.mix(PRS_VALIDATE_STRATIFIED.out.versions)
 
-    // PRS-CS (single ancestry)
-    if ('prs-cs' in prs_methods) {
-        ch_prscs_input = ch_sumstats
-            .filter { meta, sumstats, source -> source != 'meta' }
-            .map { meta, sumstats, source -> [meta, sumstats] }
-
-        PRS_CS(
-            ch_prscs_input,
-            ld_reference_dir
-        )
-        ch_prs_weights = ch_prs_weights.mix(
-            PRS_CS.out.weights.map { meta, weights -> [meta + [method: 'prs-cs'], weights] }
-        )
-        ch_versions = ch_versions.mix(PRS_CS.out.versions)
-    }
-
-    // GAUDI (local ancestry-informed PRS)
-    if ('gaudi' in prs_methods && ch_local_ancestry) {
-        ch_gaudi_input = ch_sumstats
-            .map { meta, sumstats, source -> [[trait: meta.trait], sumstats, source] }
-            .groupTuple(by: 0)
-            .combine(ch_local_ancestry)
-
-        GAUDI(
-            ch_gaudi_input,
-            ld_reference_dir
-        )
-        ch_prs_weights = ch_prs_weights.mix(
-            GAUDI.out.weights.map { meta, weights -> [meta + [method: 'gaudi'], weights] }
-        )
-        ch_versions = ch_versions.mix(GAUDI.out.versions)
-    }
-
-    // LDpred2 (single ancestry, Bayesian)
-    if ('ldpred2' in prs_methods) {
-        ch_ldpred2_input = ch_sumstats
-            .filter { meta, sumstats, source -> source != 'meta' }
-            .map { meta, sumstats, source -> [meta, sumstats] }
-
-        LDPRED2(
-            ch_ldpred2_input,
-            ld_reference_dir
-        )
-        ch_prs_weights = ch_prs_weights.mix(
-            LDPRED2.out.weights.map { meta, weights -> [meta + [method: 'ldpred2'], weights] }
-        )
-        ch_versions = ch_versions.mix(LDPRED2.out.versions)
-    }
-
-    // PRS-weighted (optimally weighted across ancestries)
-    if ('prs-weighted' in prs_methods) {
-        // Requires ancestry-specific PRS first
-        ch_weights_for_weighted = ch_prs_weights
-            .filter { meta, weights -> meta.method in ['prs-cs', 'ldpred2'] }
-            .map { meta, weights -> [[trait: meta.trait], meta.ancestry, weights] }
-            .groupTuple(by: 0)
-
-        PRS_WEIGHTED(
-            ch_weights_for_weighted
-        )
-        ch_prs_weights = ch_prs_weights.mix(
-            PRS_WEIGHTED.out.weights.map { meta, weights -> [meta + [method: 'prs-weighted'], weights] }
-        )
-        ch_versions = ch_versions.mix(PRS_WEIGHTED.out.versions)
-    }
-
-    // =========================================================================
-    // CALCULATE PRS SCORES
-    // =========================================================================
-
-    // Calculate PRS for each individual using each method's weights
-    ch_calc_input = ch_prs_weights.combine(ch_genotypes)
-
-    PRS_CALCULATE(
-        ch_calc_input
-    )
-    ch_prs_scores = PRS_CALCULATE.out.scores
-    ch_versions = ch_versions.mix(PRS_CALCULATE.out.versions)
-
-    // =========================================================================
-    // VALIDATION AND METHOD COMPARISON
-    // =========================================================================
-
-    if (run_validation && validation_cohort) {
-        PRS_VALIDATION(
-            ch_prs_scores,
-            validation_cohort
-        )
-        ch_validation = PRS_VALIDATION.out.results
-        ch_versions = ch_versions.mix(PRS_VALIDATION.out.versions)
-    }
-
-    // Compare methods and determine best approach
-    if (determine_best) {
-        // Group scores by trait for comparison
-        ch_comparison_input = ch_prs_scores
-            .map { meta, scores -> [[trait: meta.trait], meta.method, meta.ancestry ?: 'multi', scores] }
-            .groupTuple(by: 0)
-
-        PRS_COMPARISON(
-            ch_comparison_input,
-            ch_validation.collect { it[1] }.ifEmpty([])
-        )
-        ch_versions = ch_versions.mix(PRS_COMPARISON.out.versions)
-
-        // Determine best method overall and per ancestry
-        PRS_BEST_METHOD(
-            PRS_COMPARISON.out.comparison
-        )
-        ch_best = PRS_BEST_METHOD.out.best_method
-        ch_versions = ch_versions.mix(PRS_BEST_METHOD.out.versions)
+        PRS_COMBINE_METHODS(ch_validation)
+        ch_comparison = PRS_COMBINE_METHODS.out.comparison
+        ch_best = PRS_COMBINE_METHODS.out.best_prs
+        ch_versions = ch_versions.mix(PRS_COMBINE_METHODS.out.versions)
     }
 
     emit:
-    prs_weights        = ch_prs_weights                                           // channel: [ meta, weights ]
-    prs_scores         = ch_prs_scores                                            // channel: [ meta, scores ]
-    validation_results = ch_validation                                            // channel: [ meta, validation ]
-    method_comparison  = determine_best ? PRS_COMPARISON.out.comparison : Channel.empty()  // channel: [ meta, comparison ]
-    best_method        = determine_best ? ch_best : Channel.empty()               // channel: [ best_method_report ]
-    versions           = ch_versions                                              // channel: [ versions.yml ]
+    prs_scores         = ch_scores                        // channel: [ meta(trait, method), files ]
+    la_partial         = PRS_LA_PARTIAL.out.scores        // channel: [ meta(trait), la_partial.scores.tsv ]
+    validation_results = ch_validation                    // channel: [ meta(trait), validation.tsv ]
+    method_comparison  = ch_comparison                    // channel: [ meta(trait), prs_comparison.tsv ]
+    best_method        = ch_best                          // channel: [ meta(trait), best_prs.tsv ]
+    versions           = ch_versions
 }

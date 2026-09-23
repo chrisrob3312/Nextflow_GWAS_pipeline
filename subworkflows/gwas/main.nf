@@ -50,6 +50,7 @@ workflow GWAS_WORKFLOW {
     ch_versions = Channel.empty()
     ch_gwas_results = Channel.empty()
     ch_tractor_results = Channel.empty()
+    ch_tractor_dosages = Channel.empty()
     ch_survival_results = Channel.empty()
 
     // =========================================================================
@@ -277,6 +278,7 @@ workflow GWAS_WORKFLOW {
             tractor_lat_pops
         )
         ch_versions = ch_versions.mix(TRACTOR_EXTRACT_TRACTS.out.versions.first())
+        ch_tractor_dosages = TRACTOR_EXTRACT_TRACTS.out.ancestry_dosages   // reused by PRS (LA partial scores) and GxG
 
         // Tractor-GENESIS for every trait: binary, quantitative and time-to-event
         ch_tractor_genesis_input = TRACTOR_EXTRACT_TRACTS.out.ancestry_dosages
@@ -347,7 +349,8 @@ workflow GWAS_WORKFLOW {
 
     emit:
     summary_stats     = ch_gwas_results                    // channel: [ meta, sumstats ]
-    tractor_results   = ch_tractor_results                 // channel: [ meta, tractor_sumstats ]
+    tractor_results   = ch_tractor_results                 // channel: [ meta, tractor_genesis.tsv.gz ]
+    tractor_dosages   = ch_tractor_dosages                 // channel: [ meta, ancdose files ] (PRS LA-partial, GxG)
     survival_results  = ch_survival_results                // channel: [ meta, survival_sumstats ]
     filtered_results  = GWAS_FILTER.out.filtered           // channel: [ meta, filtered_sumstats ]
     significant       = GWAS_FILTER.out.significant        // channel: [ meta, sig_variants ]

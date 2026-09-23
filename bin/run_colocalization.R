@@ -358,7 +358,7 @@ if (length(tier1_results) > 0) {
     tier1_combined <- tier1_combined[order(-PP4)]
 
     # Write Tier 1 results
-    tier1_file <- paste0(opt$output_prefix, ".tier1.tsv")
+    tier1_file <- paste0(opt$output_prefix, ".coloc_susie.tsv")
     fwrite(tier1_combined, tier1_file, sep = "\t")
     cat("\nTier 1 results:", tier1_file, "\n")
     cat("  Total genes tested:", nrow(tier1_combined), "\n")
@@ -499,7 +499,7 @@ if (nrow(tier2_candidates) > 0 && has_hyprcoloc) {
     # Combine Tier 2 results
     if (length(tier2_results) > 0) {
         tier2_combined <- rbindlist(tier2_results, fill = TRUE)
-        tier2_file <- paste0(opt$output_prefix, ".tier2.hyprcoloc.tsv")
+        tier2_file <- paste0(opt$output_prefix, ".hyprcoloc.tsv")
         fwrite(tier2_combined, tier2_file, sep = "\t")
         cat("\nTier 2 results:", tier2_file, "\n")
     }

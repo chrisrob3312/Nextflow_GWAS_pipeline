@@ -24,11 +24,16 @@ flowchart TD
     GXG["GXG_INTERACTION (end of pipeline)<br/>hits + known loci + custom list -> LD prune<br/>pairwise SNP x SNP: pooled + per stratum<br/>ancestry modification of the interaction"]
     REP["REPORTING<br/>MultiQC + summary report"]
 
+    PCA["GENESIS_PCAIR_PCRELATE<br/>PC-AiR ancestry PCs + PC-Relate GRM<br/>used by every model"]
     IN --> QC --> ANC
+    QC --> PCA
     ANC -->|"stratified bed/bim/fam"| GWAS
     ANC -->|"stratified genotypes + MSP"| TR
-    IN -->|"phenotype, kinship"| GWAS
-    IN -->|"phenotype, kinship"| TR
+    PCA -->|"GRM + PC covariates"| GWAS
+    PCA -->|"GRM + PC covariates"| TR
+    PCA -->|"PC covariates"| GXG
+    IN -->|"phenotype"| GWAS
+    IN -->|"phenotype"| TR
     GWAS -->|"sumstats per stratum x trait"| META
     TR -->|"tractor_genesis.tsv.gz per group x trait"| META
     GWAS --> VIS
@@ -56,16 +61,17 @@ flowchart TD
 | Module (subworkflow / process) | Reads | Writes | Feeds |
 |---|---|---|---|
 | `INPUT_CHECK` | samplesheet CSV | validated genotype channel | QC |
-| `QC_WORKFLOW` | bed/bim/fam | QC'd bed/bim/fam, QC report | ANCESTRY, GxG (full cohort) |
+| `QC_WORKFLOW` | bed/bim/fam | QC'd bed/bim/fam, QC report | ANCESTRY, PC-AiR, GxG (full cohort) |
+| `GENESIS_PCAIR_PCRELATE` (`bin/genesis_pcair_pcrelate.R`) | QC'd full cohort, phenotype | PC-AiR PCs (`.pcair.pcs.tsv`), PC-Relate GRM (`.pcrelate.grm.rds`), kinship, unrelated set, phenotype with PC1..PCn replaced | GWAS null models, Tractor-GENESIS, GxG, PRS validation (every model uses the same GRM and PCs) |
 | `ANCESTRY_INFERENCE` | QC'd genotypes, GRAF reference, MSP | `ancestry_calls.tsv`, stratified bed/bim/fam per group, local ancestry channel | GWAS, Tractor, PRS |
 | `GWAS_WORKFLOW` (standard) | stratified genotypes x trait, phenotype, covariates, kinship | `<id>.<ancestry>.<trait>.sumstats.gz`, filtered sumstats, significant variants | META, FM, H2, VIS, GxG |
 | `PLINK_TO_VCF` -> `TRACTOR_EXTRACT_TRACTS` | AAC and merged LATINO genotypes + MSP; `meta.tractor_pops` | `<id>.ancdose.<k>.tsv.gz`, `<id>.hapcount.<k>.tsv.gz` per ancestry k | TRACTOR_GENESIS |
 | `TRACTOR_GENESIS` (`bin/tractor_genesis_adapter.R`) | dosages + hapcounts, phenotype, kinship, covariates; `meta.model` | `<prefix>.tractor_genesis.tsv.gz` (sorted by P_JOINT), `.genomic_order.tsv.gz`, `.top_hits.tsv`, `.significant.tsv`, `.heterogeneous.tsv`, `.<anc>_specific.tsv`, `.null_model.rds` | META, GxG |
 | `META_ANALYSIS` | sumstats grouped by trait across strata | MR-MEGA results, heterogeneity table; SLURM path: `bin/meta_analyze_strata.R` -> `POOLED.sumstats.gz` | FM, H2, PRS, FUNC, GxG |
 | `FINE_MAPPING` | filtered sumstats, LD reference / cohort LD | credible sets, PIPs | COLOC |
-| `COLOCALIZATION` | credible sets or filtered sumstats, QTL megaset (`assets/qtl_datasets/curated_qtl_sources.yml` via `bin/download_qtl_datasets.R`, harmonized by `bin/harmonize_qtl.R`), cohort LD | `*.coloc.tsv`, `*.hyprcoloc.tsv`, `*.opera.tsv`, combined + consensus tables | REP |
+| `COLOCALIZATION` (`COLOC_RUN` = `bin/run_colocalization.R`) | every ancestry-stratified GWAS (standard + Tractor-GENESIS) and the meta/POOLED GWAS; QTL megaset pooled by type (`curated_qtl_sources.yml` via `download_qtl_datasets.R`, `harmonize_qtl.R`); optional cohort LD | per GWAS: `.coloc_susie.tsv`, `.hyprcoloc.tsv`, `.opera.tsv`; per trait: `coloc_combined.tsv`, `coloc_consensus.tsv`, shared / divergent / meta-only tables, PP4 heatmap | REP |
 | `HERITABILITY` | sumstats, meta results, LD reference | h2 per stratum, local-ancestry h2, genetic correlations | REP |
-| `PRS_WORKFLOW` (`bin/calculate_prs_admixed.R` on the SLURM path) | ancestry-specific sumstats, LD reference, stratified genotypes, local ancestry, phenotype | weights and `.sscore` per method, `<prefix>.validation.tsv` (OVERALL + one row per stratum, AUC / R2 / C-index, disparity flags) | REP |
+| `PRS_WORKFLOW` (`PRS_METHOD` = `bin/calculate_prs_admixed.R`) | ancestry-specific sumstats per trait, LD reference, full-cohort genotypes, local ancestry, phenotype with PC-AiR PCs | per method: weights and `.sscore`; `<trait>.la_partial.scores.tsv` (Tractor dosages x Tractor-GENESIS betas: the part of each score on EUR / AFR / AMR haplotypes); `<trait>.validation.tsv` (OVERALL + one row per stratum, AUC / R2 / C-index); `prs_comparison.tsv`, `best_prs.tsv` (best overall and per stratum, disparity flags) | REP |
 | `FUNCTIONAL_ANNOT` | meta or filtered sumstats | MAGMA / FUMA / LAVA / FLAMES outputs | REP |
 | `GXG_INTERACTION` (`bin/run_gxg_interaction.R`) | see section 4 | see section 4 | REP |
 | `REPORTING` | everything above | HTML report | user |
@@ -154,7 +160,9 @@ Each pair reports Wald and LRT p-values with Bonferroni over pairs and BH FDR.
 
 ```mermaid
 flowchart TD
+    S0["STEP 0  submit_pcair.sh<br/>PC-AiR PCs + PC-Relate GRM (once)"]
     S1["STEP 1  submit_gwas_array.sh<br/>traits x strata, 22-chromosome arrays<br/>Tractor-GENESIS for every trait"]
+    S0 --> S1
     S2["STEP 2  combine per trait<br/>chr* -> <stratum>.sumstats.gz<br/>bin/meta_analyze_strata.R -> POOLED.sumstats.gz"]
     S3["STEP 3  submit_prs_array.sh<br/>6 PRS methods per trait"]
     S4["STEP 4  colocalization array<br/>6 QTL types x 3 methods"]
@@ -169,13 +177,31 @@ flowchart TD
 Results land under `results/gwas/<trait>/<stratum>/`, `results/prs/<trait>/`,
 `results/coloc/`, `results/gxg/<trait>/`.
 
-## 7. Known drift between the two paths
+## 7. Dual structure: both paths call the same scripts
 
-The Nextflow PRS and colocalization subworkflows (`subworkflows/prs`,
-`subworkflows/colocalization`) still call the older per-method modules
-(`prs_csx`, `prs_cs`, `gaudi`, `ldpred2`, single-method coloc). The SLURM path
-calls the newer scripts (`bin/calculate_prs_admixed.R` with six methods and
-stratified validation; `bin/run_colocalization.R` with parallel coloc.susie,
-HyPrColoc and OPERA). The GWAS, Tractor-GENESIS and GxG steps are aligned on
-both paths. Aligning PRS and colocalization is the next piece of dual-structure
-work.
+Every analysis step now has one implementation in `bin/` that both the
+Nextflow modules and the SLURM scripts call:
+
+| Step | Script | Nextflow process | SLURM |
+|---|---|---|---|
+| PC-AiR + PC-Relate | `genesis_pcair_pcrelate.R` | `GENESIS_PCAIR_PCRELATE` | `submit_pcair.sh` (step 0) |
+| Tractor-GENESIS GWAS | `tractor_genesis_adapter.R` | `TRACTOR_GENESIS` | `submit_gwas_array.sh` |
+| Strata meta-analysis | `meta_analyze_strata.R` | (MR-MEGA in Nextflow) | step 2 |
+| PRS (6 methods, LA partial, stratified validation) | `calculate_prs_admixed.R` | `PRS_METHOD`, `PRS_LA_PARTIAL`, `PRS_VALIDATE_STRATIFIED` | `submit_prs_array.sh` |
+| Colocalization (coloc.susie, HyPrColoc, OPERA) | `run_colocalization.R` | `COLOC_RUN`, `COLOC_COMBINE` | step 4 |
+| GxG interaction | `run_gxg_interaction.R` | `GXG_*` | `submit_gxg_array.sh` |
+
+The older single-method modules (`prs_csx`, `prs_cs`, `gaudi`, `ldpred2`,
+`coloc`, `ecaviar`, `fastenloc`) remain in `modules/local/` but are no longer
+wired into the workflow.
+
+## 8. What comes out per ancestry
+
+Tractor-GENESIS reports, for every variant and trait: `P_JOINT` (any effect),
+and for each ancestral background `BETA_<anc>`, `SE_<anc>`, `Z_<anc>`,
+`P_<anc>`, `MAC_<anc>`, plus `P_HET` and `I2` for whether the effects differ
+across backgrounds. The per-stratum SLURM runs add stratum-level results
+(EUR, AAC, LAT1, LAT2, ...) on top, and `meta_analyze_strata.R` pools each
+background across strata. PRS adds the local-ancestry partial scores, and
+GxG reports every interaction pooled, per stratum, and for ancestry
+modification.

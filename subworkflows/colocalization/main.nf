@@ -2,245 +2,137 @@
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     COLOCALIZATION SUBWORKFLOW
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    Colocalization analysis with eQTL/sQTL/pQTL/mQTL/caQTL/hQTL datasets
+    Runs the parallel multi-method colocalization (bin/run_colocalization.R:
+    coloc.susie per QTL type | HyPrColoc across QTL types | OPERA on all QTLs)
+    on BOTH:
+      1. ancestry-stratified GWAS (population-specific regulation)
+      2. meta-analysis / POOLED GWAS (power for shared causal variants)
+    against the pooled QTL megaset (eQTL, sQTL, pQTL, mQTL, caQTL, hQTL),
+    then builds a per-trait consensus and the shared-vs-divergent analysis.
 
-    IMPORTANT: This workflow runs colocalization on BOTH:
-    1. Ancestry-stratified GWAS results (per-ancestry analysis)
-    2. Meta-analysis results (combined across ancestries)
-
-    The rationale:
-    - Ancestry-stratified: Identifies population-specific regulatory mechanisms
-    - Meta-analysis: Higher power to detect shared causal variants
-
-    Supports pooling of diverse QTL datasets for improved representation
-    across ancestries (addressing GTEx's limited diversity).
+    Aligned with the SLURM path (slurm/submit_full_pipeline.sh step 4), which
+    calls the same script.
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 */
 
 include { PREPARE_QTL_DATA           } from '../../modules/local/prepare_qtl_data'
-include { POOL_QTL_DATASETS          } from '../../modules/local/pool_qtl_datasets'
-include { COLOC                      } from '../../modules/local/coloc'
-include { ECAVIAR                    } from '../../modules/local/ecaviar'
-include { FASTENLOC                  } from '../../modules/local/fastenloc'
-include { COLOC_SUMMARY              } from '../../modules/local/coloc_summary'
+include { POOL_QTL_DATASETS          } from '../../modules/local/prepare_qtl_data'
+include { COLOC_RUN                  } from '../../modules/local/colocalization'
+include { COLOC_COMBINE              } from '../../modules/local/colocalization'
 include { COLOC_DIVERGENCE_ANALYSIS  } from '../../modules/local/coloc_divergence'
 include { COLOC_ANCESTRY_HEATMAP     } from '../../modules/local/coloc_divergence'
 
 workflow COLOCALIZATION {
     take:
-    ch_ancestry_gwas   // channel: [ meta, sumstats ] - Ancestry-stratified GWAS results
-    ch_meta_gwas       // channel: [ meta, sumstats ] - Meta-analysis GWAS results
+    ch_ancestry_gwas   // channel: [ meta(trait, ancestry, binary), sumstats ]  ancestry-stratified (incl. Tractor-GENESIS)
+    ch_meta_gwas       // channel: [ meta(trait), sumstats ]                    meta-analysis / POOLED
     ch_qtl_data        // channel: [ name, type, qtl_file ]
-    coloc_method       // value: 'coloc', 'ecaviar', 'fastenloc'
+    ch_cohort_ld       // channel: [ meta, ld_rds ] cohort-specific LD, or empty
+    gwas_n             // value: GWAS sample size (fallback when meta.n is absent)
+    qtl_n              // value: QTL sample size
     p1                 // value: prior for trait association
     p2                 // value: prior for QTL association
     p12                // value: prior for colocalization
 
     main:
     ch_versions = Channel.empty()
-    ch_coloc_ancestry = Channel.empty()
-    ch_coloc_meta = Channel.empty()
 
-    // =========================================================================
-    // PREPARE QTL DATA
-    // =========================================================================
-
-    // Standardize QTL data format
-    PREPARE_QTL_DATA(
-        ch_qtl_data
-    )
+    // ------------------------------------------------------------------
+    // QTL megaset: standardize each source, pool by QTL type
+    // ------------------------------------------------------------------
+    PREPARE_QTL_DATA(ch_qtl_data)
     ch_versions = ch_versions.mix(PREPARE_QTL_DATA.out.versions)
 
-    // Optionally pool diverse QTL datasets to create mega-set
-    // This addresses the limited diversity in GTEx by combining multiple sources
     ch_qtl_by_type = PREPARE_QTL_DATA.out.standardized
         .map { name, type, qtl_file -> [type, name, qtl_file] }
         .groupTuple(by: 0)
 
-    POOL_QTL_DATASETS(
-        ch_qtl_by_type
-    )
+    POOL_QTL_DATASETS(ch_qtl_by_type)
     ch_versions = ch_versions.mix(POOL_QTL_DATASETS.out.versions)
 
-    // Use pooled datasets for colocalization
-    ch_qtl_pooled = POOL_QTL_DATASETS.out.pooled
+    // All pooled QTL types as ONE list -> every GWAS sees the whole megaset
+    ch_qtl_megaset = POOL_QTL_DATASETS.out.pooled
+        .toList()
+        .map { rows -> [rows.collect { it[1] }, rows.collect { it[0] }] }   // [files, types]
 
-    // =========================================================================
-    // COLOCALIZATION: ANCESTRY-STRATIFIED GWAS
-    // =========================================================================
-    // Run colocalization on each ancestry-specific GWAS separately
-    // This identifies population-specific regulatory mechanisms
-    // Best practice: Match QTL ancestry to GWAS ancestry when possible
+    // ------------------------------------------------------------------
+    // GWAS inputs: ancestry-stratified + meta, tagged
+    // ------------------------------------------------------------------
+    ch_gwas_all = ch_ancestry_gwas
+        .map { meta, ss -> [meta + [analysis_type: 'ancestry_stratified'], ss] }
+        .mix(ch_meta_gwas.map { meta, ss -> [meta + [analysis_type: 'meta_analysis', ancestry: meta.ancestry ?: 'META'], ss] })
 
-    // Tag ancestry results
-    ch_ancestry_gwas_tagged = ch_ancestry_gwas
-        .map { meta, sumstats ->
-            def new_meta = meta.clone()
-            new_meta.analysis_type = 'ancestry_stratified'
-            [new_meta, sumstats]
-        }
-
-    // Create GWAS x QTL combinations for ancestry-stratified analysis
-    ch_ancestry_coloc_input = ch_ancestry_gwas_tagged.combine(ch_qtl_pooled)
-
-    // =========================================================================
-    // COLOCALIZATION: META-ANALYSIS GWAS
-    // =========================================================================
-    // Run colocalization on meta-analysis results
-    // Higher power due to larger sample size
-    // Identifies shared causal variants across ancestries
-
-    // Tag meta-analysis results
-    ch_meta_gwas_tagged = ch_meta_gwas
-        .map { meta, sumstats ->
-            def new_meta = meta.clone()
-            new_meta.analysis_type = 'meta_analysis'
-            [new_meta, sumstats]
-        }
-
-    // Create GWAS x QTL combinations for meta-analysis
-    ch_meta_coloc_input = ch_meta_gwas_tagged.combine(ch_qtl_pooled)
-
-    // =========================================================================
-    // COMBINE AND RUN COLOCALIZATION
-    // =========================================================================
-    // Merge both ancestry-stratified and meta-analysis inputs
-
-    ch_all_coloc_input = ch_ancestry_coloc_input.mix(ch_meta_coloc_input)
-
-    if (coloc_method == 'coloc') {
-        COLOC(
-            ch_all_coloc_input,
-            p1,
-            p2,
-            p12
+    // Optional cohort LD keyed by ancestry (empty -> ABF instead of SuSiE)
+    ch_ld_by_anc = ch_cohort_ld.map { meta, ld -> [meta.ancestry ?: 'ALL', ld] }
+    ch_coloc_input = ch_gwas_all
+        .map { meta, ss -> [meta.ancestry ?: 'ALL', meta, ss] }
+        .combine(ch_ld_by_anc.ifEmpty { ['__none__', []] }, by: 0)
+        .map { anc, meta, ss, ld -> [meta, ss, ld] }
+        .mix(  // GWAS with no matching LD entry still run (ABF)
+            ch_gwas_all.map { meta, ss -> [meta, ss, []] }
         )
-        ch_coloc_all = COLOC.out.results
-        ch_versions = ch_versions.mix(COLOC.out.versions)
+        .unique { it[0] }
+        .combine(ch_qtl_megaset)
+        .map { meta, ss, ld, qtl_files, qtl_types -> [meta, ss, qtl_files, qtl_types, ld] }
 
-    } else if (coloc_method == 'ecaviar') {
-        ECAVIAR(
-            ch_all_coloc_input
-        )
-        ch_coloc_all = ECAVIAR.out.results
-        ch_versions = ch_versions.mix(ECAVIAR.out.versions)
+    COLOC_RUN(ch_coloc_input, gwas_n, qtl_n, p1, p2, p12)
+    ch_versions = ch_versions.mix(COLOC_RUN.out.versions)
 
-    } else if (coloc_method == 'fastenloc') {
-        FASTENLOC(
-            ch_all_coloc_input
-        )
-        ch_coloc_all = FASTENLOC.out.results
-        ch_versions = ch_versions.mix(FASTENLOC.out.versions)
-    }
+    ch_all_results = COLOC_RUN.out.coloc_susie
+        .mix(COLOC_RUN.out.hyprcoloc)
+        .mix(COLOC_RUN.out.opera)
 
-    // =========================================================================
-    // SPLIT RESULTS BY ANALYSIS TYPE
-    // =========================================================================
+    // ------------------------------------------------------------------
+    // Per-trait consensus across strata and methods
+    // ------------------------------------------------------------------
+    ch_by_trait = ch_all_results
+        .map { meta, f -> [[trait: meta.trait], f] }
+        .groupTuple(by: 0)
 
-    // Separate ancestry-stratified and meta-analysis results
-    ch_coloc_ancestry = ch_coloc_all
-        .filter { meta, results -> meta.analysis_type == 'ancestry_stratified' }
+    COLOC_COMBINE(ch_by_trait)
+    ch_versions = ch_versions.mix(COLOC_COMBINE.out.versions)
 
-    ch_coloc_meta = ch_coloc_all
-        .filter { meta, results -> meta.analysis_type == 'meta_analysis' }
-
-    // =========================================================================
-    // SUMMARIZE COLOCALIZATION RESULTS
-    // =========================================================================
-    // Generate comprehensive summary across all analyses
-
-    COLOC_SUMMARY(
-        ch_coloc_all.collect { it[1] }
-    )
-    ch_versions = ch_versions.mix(COLOC_SUMMARY.out.versions)
-
-    // =========================================================================
-    // SHARED vs DIVERGENT COLOCALIZATION ANALYSIS
-    // =========================================================================
-    // Compare ancestry-stratified to meta-analysis to identify:
-    // - SHARED: Universal regulatory mechanisms (in meta + multiple ancestries)
-    // - DIVERGENT: Population-specific effects (only in one ancestry)
-    // - META-ONLY: Effects only significant when combined
-
-    // Group coloc results by trait for divergence analysis
-    ch_ancestry_by_trait = ch_coloc_ancestry
-        .map { meta, results -> [meta.trait, results] }
+    // ------------------------------------------------------------------
+    // Shared vs divergent (ancestry-stratified vs meta) on coloc.susie PP4
+    // ------------------------------------------------------------------
+    ch_cs_ancestry = COLOC_RUN.out.coloc_susie
+        .filter { meta, f -> meta.analysis_type == 'ancestry_stratified' }
+        .map { meta, f -> [meta.trait, f] }
         .groupTuple()
+    ch_cs_meta = COLOC_RUN.out.coloc_susie
+        .filter { meta, f -> meta.analysis_type == 'meta_analysis' }
+        .map { meta, f -> [meta.trait, f] }
 
-    ch_meta_by_trait = ch_coloc_meta
-        .map { meta, results -> [meta.trait, results] }
-
-    // Join ancestry and meta results by trait
-    ch_divergence_input = ch_ancestry_by_trait
-        .join(ch_meta_by_trait)
-        .map { trait, ancestry_files, meta_file ->
-            [ancestry_files, meta_file, trait]
-        }
+    ch_divergence_input = ch_cs_ancestry.join(ch_cs_meta)
 
     COLOC_DIVERGENCE_ANALYSIS(
-        ch_divergence_input.map { it[0] },  // ancestry files
-        ch_divergence_input.map { it[1] },  // meta file
-        ch_divergence_input.map { it[2] },  // trait name
-        0.8  // PP4 threshold
+        ch_divergence_input.map { it[1] },
+        ch_divergence_input.map { it[2] },
+        ch_divergence_input.map { it[0] },
+        0.8
     )
     ch_versions = ch_versions.mix(COLOC_DIVERGENCE_ANALYSIS.out.versions)
 
-    // Heatmap of PP4 across ancestries
-    ch_all_coloc_files = ch_coloc_all
-        .map { meta, results -> [meta.trait, results] }
-        .groupTuple()
-
+    ch_heatmap_input = COLOC_RUN.out.coloc_susie.map { meta, f -> [meta.trait, f] }.groupTuple()
     COLOC_ANCESTRY_HEATMAP(
-        ch_all_coloc_files.map { trait, files -> files },
-        ch_all_coloc_files.map { trait, files -> trait }
+        ch_heatmap_input.map { trait, files -> files },
+        ch_heatmap_input.map { trait, files -> trait }
     )
     ch_versions = ch_versions.mix(COLOC_ANCESTRY_HEATMAP.out.versions)
 
     emit:
-    // All colocalization results combined
-    coloc_results         = ch_coloc_all               // channel: [ meta, coloc_results ]
-    // Ancestry-stratified results only
-    coloc_ancestry        = ch_coloc_ancestry          // channel: [ meta, coloc_results ]
-    // Meta-analysis results only
-    coloc_meta            = ch_coloc_meta              // channel: [ meta, coloc_results ]
-    // Shared vs Divergent analysis
-    shared_coloc          = COLOC_DIVERGENCE_ANALYSIS.out.shared     // channel: [ shared_coloc.tsv ]
-    divergent_coloc       = COLOC_DIVERGENCE_ANALYSIS.out.divergent  // channel: [ divergent_coloc.tsv ]
-    meta_only_coloc       = COLOC_DIVERGENCE_ANALYSIS.out.meta_only  // channel: [ meta_only_coloc.tsv ]
-    divergence_summary    = COLOC_DIVERGENCE_ANALYSIS.out.summary    // channel: [ summary.tsv ]
-    divergence_plot       = COLOC_DIVERGENCE_ANALYSIS.out.plot       // channel: [ divergence.pdf ]
-    ancestry_heatmap      = COLOC_ANCESTRY_HEATMAP.out.heatmap       // channel: [ heatmap.pdf ]
-    // Summary statistics
-    summary               = COLOC_SUMMARY.out.summary  // channel: [ summary_file ]
-    pooled_qtl            = ch_qtl_pooled              // channel: [ type, pooled_qtl_file ]
-    versions              = ch_versions                // channel: [ versions.yml ]
+    coloc_results      = ch_all_results                           // channel: [ meta, results ] (all methods)
+    coloc_susie        = COLOC_RUN.out.coloc_susie                // channel: [ meta, coloc_susie.tsv ]
+    hyprcoloc          = COLOC_RUN.out.hyprcoloc                  // channel: [ meta, hyprcoloc.tsv ]
+    opera              = COLOC_RUN.out.opera                      // channel: [ meta, opera.tsv ]
+    combined           = COLOC_COMBINE.out.combined               // channel: [ meta(trait), combined ]
+    consensus          = COLOC_COMBINE.out.consensus              // channel: [ meta(trait), consensus ]
+    method_comparison  = COLOC_COMBINE.out.comparison
+    shared_coloc       = COLOC_DIVERGENCE_ANALYSIS.out.shared
+    divergent_coloc    = COLOC_DIVERGENCE_ANALYSIS.out.divergent
+    meta_only_coloc    = COLOC_DIVERGENCE_ANALYSIS.out.meta_only
+    divergence_summary = COLOC_DIVERGENCE_ANALYSIS.out.summary
+    ancestry_heatmap   = COLOC_ANCESTRY_HEATMAP.out.heatmap
+    pooled_qtl         = POOL_QTL_DATASETS.out.pooled             // channel: [ type, pooled_qtl ]
+    versions           = ch_versions
 }
-
-/*
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    USAGE NOTES
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    To use this workflow in main.nf:
-
-    COLOCALIZATION(
-        GWAS.out.ancestry_results,    // Per-ancestry GWAS (e.g., EUR, AFR, EAS separately)
-        META_ANALYSIS.out.results,    // Combined meta-analysis results
-        ch_qtl_datasets,              // QTL data from curated sources
-        params.coloc_method,
-        params.coloc_p1,
-        params.coloc_p2,
-        params.coloc_p12
-    )
-
-    Results interpretation:
-    - coloc_ancestry: Population-specific regulatory effects
-      Use for identifying ancestry-specific drug targets
-    - coloc_meta: Shared effects across populations
-      Higher confidence for universal mechanisms
-
-    For best results with diverse cohorts:
-    - Match QTL datasets to GWAS ancestry when possible
-    - Use multi-ancestry QTL sources (MESA, PAGE, etc.)
-    - Include ancestry-specific QTLs (GENOA for AFR, BBJ for EAS)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-*/
