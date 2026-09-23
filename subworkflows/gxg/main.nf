@@ -4,14 +4,17 @@
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     End-of-pipeline epistasis testing on GWAS hits.
 
-    1. Select hits from all GWAS outputs for the trait (Tractor, standard,
-       meta-analysis) plus known leukemia risk loci
-    2. Test every pairwise SNP x SNP interaction:
+    1. Select hits from all GWAS outputs for the trait (Tractor-GENESIS,
+       standard, meta-analysis) + default known leukemia risk loci (optional)
+       + a user-supplied GRCh38 variant list (optional)
+    2. LD-prune hits keeping the STRONGEST variant per LD cluster
+       (priority: custom > known > GWAS P)
+    3. Test every pairwise SNP x SNP interaction:
          - POOLED cohort
          - within each ancestry stratum (EUR, AAC, LAT1, LAT2, EAS/SAS if N>=30, OTHER)
        (one task per stratum -> SLURM array)
-    3. Ancestry modification: Cochran's Q across strata + pooled 3-way LRT
-    4. Combine into one summary table per trait
+    4. Ancestry modification: Cochran's Q across strata + pooled 3-way LRT
+    5. Combine into one summary table per trait
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 */
 
@@ -22,22 +25,23 @@ include { GXG_COMBINE                } from '../../modules/local/gxg_interaction
 
 workflow GXG_INTERACTION {
     take:
-    ch_sumstats        // channel: [ meta(trait, ancestry, binary, ...), sumstats ]  (all GWAS types)
+    ch_sumstats        // channel: [ meta(trait, ancestry, model, ...), sumstats ]  (all GWAS types)
     ch_genotypes       // channel: [ meta, bed, bim, fam ]  (full QC'd cohort, NOT stratified)
     ch_phenotypes      // channel: [ meta, phenotype_file ]
     ch_tractor_files   // channel: [ meta, tractor_dosage_files ] or empty
-    known_loci         // file or []
+    known_loci         // file: default known-risk-loci TSV, or [] to disable
+    custom_variants    // file: user GRCh38 variant list, or []
     strata             // list: ['POOLED','EUR','AAC','LAT1','LAT2','EAS','SAS','OTHER']
     p_threshold        // numeric: hit selection threshold
     max_hits           // integer
-    covariates         // string
+    covariates         // string: model covariates (any columns of the phenotype file)
     ancestry_col       // string
     min_stratum_n      // integer
 
     main:
     ch_versions = Channel.empty()
 
-    // Gather every sumstats file for a trait into one list
+    // Gather every sumstats file for a trait into one list; carry the trait's model
     ch_by_trait = ch_sumstats
         .map { meta, ss -> [[trait: meta.trait, binary: meta.binary ?: false,
                              survival: meta.survival ?: false,
@@ -45,7 +49,7 @@ workflow GXG_INTERACTION {
                              event_col: meta.event_col ?: params.event_col], ss] }
         .groupTuple(by: 0)
 
-    GXG_SELECT_HITS(ch_by_trait, known_loci, p_threshold, max_hits)
+    GXG_SELECT_HITS(ch_by_trait, known_loci, custom_variants, p_threshold, max_hits)
     ch_versions = ch_versions.mix(GXG_SELECT_HITS.out.versions)
 
     // Full-cohort genotypes + phenotype attached to each trait

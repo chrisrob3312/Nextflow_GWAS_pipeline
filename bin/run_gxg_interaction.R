@@ -51,6 +51,12 @@ option_list <- list(
                 help = "TSV of known risk loci to always include (columns: snp, gene, ...)"),
     make_option("--snp_list", type = "character", default = NULL,
                 help = "Explicit SNP list (one ID per line); skips hit selection if given"),
+    make_option("--custom_variants", type = "character", default = NULL,
+                help = "Custom GRCh38 variant list, one per line: rsID, chr:pos, or chr:pos:ref:alt. Always included, highest priority."),
+    make_option("--no_default_loci", action = "store_true", default = FALSE,
+                help = "Do not add the default known-risk-loci table given by --known_loci"),
+    make_option("--prune_mode", type = "character", default = "variant",
+                help = "variant = LD-prune hits keeping the STRONGEST per LD cluster [default]; pair = keep all hits, skip LD pairs"),
     make_option("--min_distance_kb", type = "numeric", default = 1000,
                 help = "Skip pairs on the same chromosome closer than this [default: 1000 kb]"),
     make_option("--max_pair_r2", type = "numeric", default = 0.2,
@@ -105,9 +111,11 @@ opt <- parse_args(OptionParser(option_list = option_list, prog = "run_gxg_intera
 
 if (is.null(opt$phenotype) || is.null(opt$trait)) stop("Required: --phenotype, --trait")
 if (is.null(opt$geno) && is.null(opt$gds)) stop("Required: --geno or --gds")
-if (is.null(opt$sumstats) && is.null(opt$snp_list) && is.null(opt$known_loci)) {
-    stop("Required: --sumstats and/or --known_loci and/or --snp_list")
+if (is.null(opt$sumstats) && is.null(opt$snp_list) && is.null(opt$custom_variants) &&
+    (is.null(opt$known_loci) || opt$no_default_loci)) {
+    stop("Required: --sumstats and/or --custom_variants and/or --snp_list and/or --known_loci")
 }
+if (!opt$prune_mode %in% c("variant", "pair")) stop("--prune_mode must be 'variant' or 'pair'")
 
 # SLURM detection
 slurm_cpus <- suppressWarnings(as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", "")))
@@ -149,6 +157,36 @@ find_col <- function(dt, candidates) {
     if (length(hit) == 0) NA_character_ else hit[1]
 }
 
+# Variant lookup (GRCh38) from the genotype file, used to resolve user-supplied
+# IDs given as rsID, chr:pos or chr:pos:ref:alt to the IDs actually in the data
+bim <- NULL
+if (!is.null(opt$geno) && file.exists(paste0(opt$geno, ".bim"))) {
+    bim <- fread(paste0(opt$geno, ".bim"), col.names = c("CHR", "ID", "CM", "POS", "A1", "A2"))
+    bim[, CHR := sub("^chr", "", as.character(CHR))]
+}
+resolve_ids <- function(ids, chr = NULL, pos = NULL) {
+    ids <- as.character(ids)
+    if (is.null(bim)) return(ids)                       # no lookup possible: use as given
+    out <- rep(NA_character_, length(ids))
+    direct <- ids %in% bim$ID
+    out[direct] <- ids[direct]
+    for (k in which(!direct)) {
+        parts <- strsplit(ids[k], "[:_]")[[1]]
+        c_ <- if (length(parts) >= 2) sub("^chr", "", parts[1]) else if (!is.null(chr)) sub("^chr", "", as.character(chr[k])) else NA
+        p_ <- if (length(parts) >= 2) suppressWarnings(as.integer(parts[2])) else if (!is.null(pos)) suppressWarnings(as.integer(pos[k])) else NA
+        if (is.na(c_) || is.na(p_)) next
+        cand <- bim[CHR == c_ & POS == p_]
+        if (nrow(cand) == 0) next
+        if (length(parts) >= 4) {                       # allele-aware match, either orientation
+            a1 <- toupper(parts[3]); a2 <- toupper(parts[4])
+            m <- cand[(toupper(A1) == a1 & toupper(A2) == a2) | (toupper(A1) == a2 & toupper(A2) == a1)]
+            if (nrow(m) > 0) cand <- m
+        }
+        out[k] <- cand$ID[1]
+    }
+    out
+}
+
 select_hits <- function() {
     hits <- data.table()
 
@@ -157,6 +195,23 @@ select_hits <- function() {
         ids <- ids[nzchar(ids)]
         hits <- data.table(ID = ids, CHR = NA_character_, POS = NA_integer_,
                            P = NA_real_, SOURCE = "snp_list")
+    }
+
+    # Custom GRCh38 variant list: always included, highest priority (P = -1)
+    if (!is.null(opt$custom_variants) && file.exists(opt$custom_variants)) {
+        raw <- readLines(opt$custom_variants)
+        raw <- trimws(raw); raw <- raw[nzchar(raw) & !grepl("^#", raw)]
+        raw <- sapply(strsplit(raw, "[ \t]+"), `[`, 1)       # first column only
+        resolved <- resolve_ids(raw)
+        n_unres <- sum(is.na(resolved))
+        if (n_unres > 0) {
+            cat("  WARNING:", n_unres, "custom variants not found in genotypes:",
+                paste(head(raw[is.na(resolved)], 10), collapse = ", "), "\n")
+        }
+        ok <- !is.na(resolved)
+        hits <- rbind(hits, data.table(ID = resolved[ok], CHR = NA_character_, POS = NA_integer_,
+                                       P = -1, SOURCE = paste0("custom:", raw[ok])), fill = TRUE)
+        cat("  Custom variants added:", sum(ok), "of", length(raw), "\n")
     }
 
     if (!is.null(opt$sumstats)) {
@@ -186,17 +241,27 @@ select_hits <- function() {
         }
     }
 
-    if (!is.null(opt$known_loci) && file.exists(opt$known_loci)) {
+    # Default known-risk-loci table (switch off with --no_default_loci); P = 0 so it
+    # ranks below custom variants but above GWAS hits when pruning
+    if (!opt$no_default_loci && !is.null(opt$known_loci) && file.exists(opt$known_loci)) {
         kl <- fread(opt$known_loci)
         id_col <- find_col(kl, c("snp", "SNP", "ID", "rsid", "variant_id"))
         if (!is.na(id_col)) {
-            known <- data.table(ID = as.character(kl[[id_col]]),
-                                CHR = if ("chr" %in% names(kl)) as.character(kl$chr) else NA_character_,
-                                POS = if ("pos_grch38" %in% names(kl)) as.integer(kl$pos_grch38) else NA_integer_,
-                                P = 0, SOURCE = paste0("known:", if ("gene" %in% names(kl)) kl$gene else "locus"))
+            kl_chr <- if ("chr" %in% names(kl)) as.character(kl$chr) else NULL
+            kl_pos <- if ("pos_grch38" %in% names(kl)) kl$pos_grch38 else NULL
+            resolved <- resolve_ids(kl[[id_col]], chr = kl_chr, pos = kl_pos)   # rsID, else GRCh38 chr:pos
+            ok <- !is.na(resolved)
+            if (any(!ok)) cat("  Known loci not in genotypes (skipped):",
+                              paste(kl[[id_col]][!ok], collapse = ", "), "\n")
+            known <- data.table(ID = resolved[ok],
+                                CHR = if (!is.null(kl_chr)) kl_chr[ok] else NA_character_,
+                                POS = if (!is.null(kl_pos)) as.integer(kl_pos[ok]) else NA_integer_,
+                                P = 0, SOURCE = paste0("known:", if ("gene" %in% names(kl)) kl$gene[ok] else "locus"))
             hits <- rbind(hits, known, fill = TRUE)
             cat("  Known risk loci added:", nrow(known), "\n")
         }
+    } else if (opt$no_default_loci) {
+        cat("  Default known-loci table disabled (--no_default_loci)\n")
     }
 
     if (nrow(hits) == 0) stop("No hit SNPs selected")
@@ -267,12 +332,12 @@ if (length(missing_ids) > 0) {
 G <- G[, hits$ID, drop = FALSE]
 cat("  Genotype matrix:", nrow(G), "samples x", ncol(G), "SNPs\n\n")
 
-# Fill CHR/POS from bim if missing
-if (!is.null(opt$geno) && any(is.na(hits$CHR))) {
-    bim <- fread(paste0(opt$geno, ".bim"), col.names = c("CHR", "ID", "CM", "POS", "A1", "A2"))
+# Fill CHR/POS from the genotype lookup if missing
+if (!is.null(bim) && any(is.na(hits$CHR) | is.na(hits$POS))) {
     hits[bim, on = "ID", `:=`(CHR = ifelse(is.na(CHR), as.character(i.CHR), CHR),
                               POS = ifelse(is.na(POS), i.POS, POS))]
 }
+hits[, CHR := sub("^chr", "", as.character(CHR))]
 
 # ============================================================================
 # 3. Phenotype, covariates, strata
@@ -328,6 +393,45 @@ if (opt$model == "survival") {
     keep <- !is.na(pheno[[opt$trait]])
 }
 pheno <- pheno[keep]; G <- G[keep, , drop = FALSE]
+
+# ============================================================================
+# 3b. LD-prune hits: keep the STRONGEST variant per LD cluster
+# ============================================================================
+# Priority order: custom list (P = -1) > known loci (P = 0) > GWAS hits by P.
+# Walking down that order, a hit is DROPPED when r2 > max_pair_r2 with a
+# variant already kept on the same chromosome; the kept variant is recorded
+# as its proxy in <prefix>.gxg.hits_pruned.tsv.
+# Proximity alone (< min_distance_kb, low r2) does NOT drop a variant: two
+# nearby independent signals both stay, they are just not tested against
+# each other (pair-level rule in step 4).
+if (opt$prune_mode == "variant" && ncol(G) > 1) {
+    r2_all <- suppressWarnings(cor(G, use = "pairwise.complete.obs")^2)
+    pri <- ifelse(grepl("^custom", hits$SOURCE), 0L, ifelse(grepl("^known", hits$SOURCE), 1L, 2L))
+    walk <- order(pri, hits$P)
+    kept <- character(0)
+    pruned_by <- rep(NA_character_, nrow(hits)); r2_proxy <- rep(NA_real_, nrow(hits))
+    for (k in walk) {
+        id <- hits$ID[k]
+        same_chr <- kept[hits$CHR[match(kept, hits$ID)] == hits$CHR[k]]
+        same_chr <- same_chr[!is.na(same_chr)]
+        if (length(same_chr) > 0) {
+            r2v <- r2_all[id, same_chr]
+            if (any(!is.na(r2v) & r2v > opt$max_pair_r2)) {
+                j <- which.max(r2v); pruned_by[k] <- same_chr[j]; r2_proxy[k] <- r2v[j]
+                next
+            }
+        }
+        kept <- c(kept, id)
+    }
+    hits[, `:=`(priority = pri, kept = ID %in% kept, pruned_by = pruned_by, r2_with_proxy = r2_proxy)]
+    fwrite(hits[order(priority, P)], paste0(opt$output_prefix, ".gxg.hits_pruned.tsv"), sep = "\t")
+    cat("LD pruning (r2 >", opt$max_pair_r2, "): kept", length(kept), "of", nrow(hits),
+        "hits (strongest per cluster; custom > known > GWAS P)\n")
+    hits <- hits[kept == TRUE]
+    G <- G[, hits$ID, drop = FALSE]
+} else if (opt$prune_mode == "pair") {
+    cat("prune_mode = pair: all hits retained; LD pairs skipped at the pair level\n")
+}
 
 # ============================================================================
 # 4. Build pair list (drop LD / proximal pairs)

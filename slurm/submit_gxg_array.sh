@@ -57,18 +57,29 @@ if [[ "${STRATUM}" == "POOLED" && -d "${DATA_DIR}/tractor" ]]; then
     TRACTOR_ARGS="--tractor_prefix ${DATA_DIR}/tractor/all_chr --ancestries EUR,AFR,AMR"
 fi
 
+# ---- customisable (env vars) ----------------------------------------------
+COVARIATES="${COVARIATES:-age,sex,PC1,PC2,PC3,PC4,PC5}"   # any phenotype columns
+ANCESTRY_COL="${ANCESTRY_COL:-GRAF_ANC}"
+KNOWN_LOCI="${KNOWN_LOCI:-${SCRIPT_DIR}/assets/known_leukemia_risk_loci.tsv}"
+LOCI_ARGS="--known_loci ${KNOWN_LOCI}"
+[[ "${GXG_USE_DEFAULT_LOCI:-true}" == "false" ]] && LOCI_ARGS="${LOCI_ARGS} --no_default_loci"
+[[ -n "${GXG_CUSTOM_VARIANTS:-}" ]] && LOCI_ARGS="${LOCI_ARGS} --custom_variants ${GXG_CUSTOM_VARIANTS}"   # GRCh38 list
+PRUNE_MODE="${GXG_PRUNE_MODE:-variant}"     # variant = keep strongest per LD cluster; pair = keep all
+# ---------------------------------------------------------------------------
+
 Rscript "${SCRIPT_DIR}/bin/run_gxg_interaction.R" \
     --sumstats "${SUMSTATS}" \
-    --p_threshold 1e-5 \
-    --max_hits 200 \
-    --known_loci "${SCRIPT_DIR}/assets/known_leukemia_risk_loci.tsv" \
+    --p_threshold "${GXG_P_THRESHOLD:-1e-5}" \
+    --max_hits "${GXG_MAX_HITS:-200}" \
+    ${LOCI_ARGS} \
+    --prune_mode "${PRUNE_MODE}" \
     --geno "${DATA_DIR}/genotypes/cohort" \
     --phenotype "${DATA_DIR}/phenotypes/phenotypes.tsv" \
     --trait "${TRAIT}" \
     --model "${MODEL}" \
     ${SURV_ARGS} \
-    --covariates "age,sex,PC1,PC2,PC3,PC4,PC5" \
-    --ancestry_col "GRAF_ANC" \
+    --covariates "${COVARIATES}" \
+    --ancestry_col "${ANCESTRY_COL}" \
     --ancestry_config "${SCRIPT_DIR}/bin/ancestry_config.R" \
     --stratum "${STRATUM}" \
     --min_stratum_n 30 \
@@ -87,12 +98,12 @@ if [[ "${SLURM_ARRAY_TASK_ID}" == "${SLURM_ARRAY_TASK_MAX}" ]]; then
            --output="${SCRIPT_DIR}/logs/gxg_het_${TRAIT}_%j.out" \
            --wrap="source ${SCRIPT_DIR}/bin/slurm_utils.sh; set_thread_env; \
                    Rscript ${SCRIPT_DIR}/bin/run_gxg_interaction.R \
-                     --sumstats '${SUMSTATS}' --p_threshold 1e-5 --max_hits 200 \
-                     --known_loci ${SCRIPT_DIR}/assets/known_leukemia_risk_loci.tsv \
+                     --sumstats '${SUMSTATS}' --p_threshold ${GXG_P_THRESHOLD:-1e-5} --max_hits ${GXG_MAX_HITS:-200} \
+                     ${LOCI_ARGS} --prune_mode ${PRUNE_MODE} \
                      --geno ${DATA_DIR}/genotypes/cohort \
                      --phenotype ${DATA_DIR}/phenotypes/phenotypes.tsv \
                      --trait ${TRAIT} --model ${MODEL} ${SURV_ARGS} \
-                     --covariates age,sex,PC1,PC2,PC3,PC4,PC5 --ancestry_col GRAF_ANC \
+                     --covariates ${COVARIATES} --ancestry_col ${ANCESTRY_COL} \
                      --ancestry_config ${SCRIPT_DIR}/bin/ancestry_config.R --min_stratum_n 30 \
                      --output_prefix ${RESULTS_DIR}/${TRAIT}.het --threads 16"
 fi

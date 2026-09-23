@@ -23,14 +23,25 @@ DRY_RUN="${1:-}"
 # Create log directory
 mkdir -p "${SCRIPT_DIR}/../logs"
 
-# Ancestry strata to analyze
-# LAT1/LAT2 run separately (>60% of cohort)
-# EUR, AAC run separately
-# OTHER = EAS + SAS + small groups (<30)
-STRATA=("EUR" "AAC" "LAT1" "LAT2" "OTHER")
+# ---------------------------------------------------------------------------
+# Customisable via environment variables (defaults for the leukemia cohort):
+#   STRATA_LIST="EUR,AAC,LAT1,LAT2,OTHER"   ancestry strata (LAT1/LAT2 separate; OTHER = EAS+SAS+small groups)
+#   TRAITS_LIST="OS,DFS,MRD"                any phenotype columns
+#   SURVIVAL_TRAITS="OS,DFS"                traits run as time-to-event (<trait>_time, <trait>_status);
+#                                           everything else is binary (0/1) - DFS (relapse OR death)
+#                                           avoids the need for a competing-risk model
+#   COVARIATES="age,sex,PC1,...,PC5"        any phenotype columns; used by GWAS and GxG
+#   GXG_CUSTOM_VARIANTS=/path/list.txt      optional GRCh38 variant list for GxG
+#   GXG_USE_DEFAULT_LOCI=true|false         include the default known-leukemia-loci table
+# ---------------------------------------------------------------------------
+IFS=',' read -ra STRATA <<< "${STRATA_LIST:-EUR,AAC,LAT1,LAT2,OTHER}"
+IFS=',' read -ra TRAITS <<< "${TRAITS_LIST:-OS,DFS,MRD}"
+SURVIVAL_TRAITS="${SURVIVAL_TRAITS:-OS,DFS}"
+export COVARIATES="${COVARIATES:-age,sex,PC1,PC2,PC3,PC4,PC5}"
+export GXG_CUSTOM_VARIANTS="${GXG_CUSTOM_VARIANTS:-}"
+export GXG_USE_DEFAULT_LOCI="${GXG_USE_DEFAULT_LOCI:-true}"
 
-# Traits to analyze
-TRAITS=("OS" "relapse" "MRD")
+trait_model() { [[ ",${SURVIVAL_TRAITS}," == *",$1,"* ]] && echo survival || echo binary; }
 
 # QTL types for colocalization
 QTL_TYPES=("eqtl" "sqtl" "pqtl" "mqtl" "caqtl" "hqtl")
@@ -60,10 +71,9 @@ submit_job() {
 echo ""
 echo "STEP 1: Submitting Tractor-GENESIS GWAS jobs..."
 declare -A GWAS_JOBS
-declare -A TRAIT_MODEL=( ["OS"]="survival" ["relapse"]="survival" ["MRD"]="binary" )
 
 for trait in "${TRAITS[@]}"; do
-    model="${TRAIT_MODEL[$trait]:-binary}"
+    model=$(trait_model "$trait")
     for stratum in "${STRATA[@]}"; do
         echo "  ${trait} (${model}) / ${stratum}: 22 chromosomes"
         cmd="sbatch --parsable ${SCRIPT_DIR}/submit_gwas_array.sh ${stratum} ${trait} ${model}"
@@ -268,10 +278,9 @@ echo ""
 echo "STEP 6: Submitting GxG interaction jobs..."
 
 declare -A GXG_JOBS
-declare -A TRAIT_MODEL=( ["OS"]="survival" ["relapse"]="binary" ["MRD"]="binary" )
 
 for trait in "${TRAITS[@]}"; do
-    model="${TRAIT_MODEL[$trait]:-binary}"
+    model=$(trait_model "$trait")
     echo "  Submitting GxG for ${trait} (${model}; POOLED + 7 strata)..."
 
     cmd="sbatch --parsable ${DEPEND_PRS} ${SCRIPT_DIR}/submit_gxg_array.sh ${trait} ${model}"

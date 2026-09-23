@@ -14,7 +14,8 @@ process GXG_SELECT_HITS {
 
     input:
     tuple val(meta), path(sumstats_files)
-    path known_loci
+    path known_loci        // default known-risk-loci TSV, or [] to disable
+    path custom_variants   // user GRCh38 list (rsID / chr:pos / chr:pos:ref:alt), or []
     val p_threshold
     val max_hits
 
@@ -54,8 +55,15 @@ process GXG_SELECT_HITS {
         hits <- rbind(hits, data.table(ID = as.character(known[[kc]]), P = 0,
                       SOURCE = paste0("known:", known\$gene)), fill = TRUE)
     }
+    # Custom GRCh38 list (rsID / chr:pos / chr:pos:ref:alt) - resolved to genotype IDs in GXG_TEST
+    if (nzchar("${custom_variants}") && file.exists("${custom_variants}")) {
+        cv <- trimws(readLines("${custom_variants}")); cv <- cv[nzchar(cv) & !grepl("^#", cv)]
+        cv <- sapply(strsplit(cv, "[ \\t]+"), `[`, 1)
+        hits <- rbind(hits, data.table(ID = cv, P = -1, SOURCE = "custom"), fill = TRUE)
+        cat("Custom variants:", length(cv), "\\n")
+    }
     hits <- hits[order(P)][, .SD[1], by = ID]
-    if (nrow(hits) > max_hits) hits <- hits[1:max_hits]
+    if (nrow(hits) > max_hits) hits <- hits[1:max_hits]    # custom (P=-1) and known (P=0) rank first
 
     writeLines(hits\$ID, "${prefix}.gxg_hits.txt")
     fwrite(hits, "${prefix}.gxg_hits.tsv", sep = "\\t")
@@ -112,6 +120,9 @@ process GXG_TEST {
         --ancestry_col ${ancestry_col} \\
         --stratum ${stratum} \\
         --min_stratum_n ${min_stratum_n} \\
+        --prune_mode ${params.gxg_prune_mode ?: 'variant'} \\
+        --min_distance_kb ${params.gxg_min_distance_kb ?: 1000} \\
+        --max_pair_r2 ${params.gxg_max_pair_r2 ?: 0.2} \\
         ${tractor_arg} \\
         --output_prefix ${prefix} \\
         --threads ${task.cpus} \\
@@ -171,12 +182,15 @@ process GXG_ANCESTRY_HETEROGENEITY {
         ${cov_arg} \\
         --ancestry_col ${ancestry_col} \\
         --min_stratum_n ${min_stratum_n} \\
+        --prune_mode ${params.gxg_prune_mode ?: 'variant'} \\
+        --min_distance_kb ${params.gxg_min_distance_kb ?: 1000} \\
+        --max_pair_r2 ${params.gxg_max_pair_r2 ?: 0.2} \\
         --output_prefix ${prefix} \\
         --threads ${task.cpus}
 
     cat <<-END_VERSIONS > versions.yml
     "${task.process}":
-        run_gxg_interaction: "1.0.0"
+        run_gxg_interaction: "1.1.0"
     END_VERSIONS
     """
 }

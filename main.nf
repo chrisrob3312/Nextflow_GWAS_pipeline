@@ -435,11 +435,12 @@ workflow {
             ch_qc_genotypes,
             ch_phenotypes_with_meta,
             params.run_tractor ? ch_local_ancestry : Channel.empty(),
-            params.gxg_known_loci ? file(params.gxg_known_loci) : [],
+            (params.gxg_use_default_loci && params.gxg_known_loci) ? file(params.gxg_known_loci) : [],
+            params.gxg_custom_variants ? file(params.gxg_custom_variants) : [],
             params.gxg_strata.split(',') as List,
             params.gxg_p_threshold,
             params.gxg_max_hits,
-            params.covariate_cols,
+            params.gxg_covariates ?: params.covariate_cols,
             params.gxg_ancestry_col,
             params.min_stratum_n
         )

@@ -74,7 +74,7 @@ Rscript "${SCRIPT_DIR}/bin/tractor_genesis_adapter.R" \
     --ancestries "${ANCESTRIES}" \
     --ref_ancestry "EUR" \
     --kinship "${KINSHIP}" \
-    --covariates "age,sex,PC1,PC2,PC3,PC4,PC5" \
+    --covariates "${COVARIATES:-age,sex,PC1,PC2,PC3,PC4,PC5}" \
     --stratum "${STRATUM}" \
     --min_stratum_n 30 \
     --ancestry_config "${SCRIPT_DIR}/bin/ancestry_config.R" \
