@@ -120,7 +120,8 @@ process GXG_TEST {
         --ancestry_col ${ancestry_col} \\
         --stratum ${stratum} \\
         --min_stratum_n ${min_stratum_n} \\
-        --prune_mode ${params.gxg_prune_mode ?: 'variant'} \\
+        --prune_mode ${params.gxg_prune_mode ?: 'conditional'} \\
+        --cond_p_threshold ${params.gxg_cond_p_threshold ?: 1e-4} \\
         --min_distance_kb ${params.gxg_min_distance_kb ?: 1000} \\
         --max_pair_r2 ${params.gxg_max_pair_r2 ?: 0.2} \\
         ${tractor_arg} \\
@@ -182,7 +183,8 @@ process GXG_ANCESTRY_HETEROGENEITY {
         ${cov_arg} \\
         --ancestry_col ${ancestry_col} \\
         --min_stratum_n ${min_stratum_n} \\
-        --prune_mode ${params.gxg_prune_mode ?: 'variant'} \\
+        --prune_mode ${params.gxg_prune_mode ?: 'conditional'} \\
+        --cond_p_threshold ${params.gxg_cond_p_threshold ?: 1e-4} \\
         --min_distance_kb ${params.gxg_min_distance_kb ?: 1000} \\
         --max_pair_r2 ${params.gxg_max_pair_r2 ?: 0.2} \\
         --output_prefix ${prefix} \\

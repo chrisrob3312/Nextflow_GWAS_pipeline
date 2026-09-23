@@ -79,7 +79,7 @@ process PRS_LA_PARTIAL {
         'your-registry/prs-admixed:latest' }"
 
     input:
-    tuple val(meta), val(ancestries), path(weights), path(tractor_dosages, stageAs: 'tractor/*'), path(phenotype)
+    tuple val(meta), val(ancestries), path(tractor_sumstats), path(prscsx_weights, stageAs: 'prscsx/*'), path(tractor_dosages, stageAs: 'tractor/*'), path(phenotype)
 
     output:
     tuple val(meta), path("${prefix}.la_partial.scores.tsv"),  emit: scores
@@ -94,10 +94,12 @@ process PRS_LA_PARTIAL {
     def anc_list = ancestries instanceof List ? ancestries : [ancestries]
     def dos = tractor_dosages instanceof List ? tractor_dosages : [tractor_dosages]
     def tractor_prefix = "tractor/" + dos[0].name.replaceAll(/\.(ancdose|dosage)\..*$/, '')
+    // Prefer PRS-CSx shrunk per-ancestry posterior weights; fall back to Tractor-GENESIS betas
+    def weights_arg = prscsx_weights ? "prscsx" : "${tractor_sumstats}"
     """
     calculate_prs_admixed.R \\
         --method la_partial \\
-        --weights ${weights} \\
+        --weights ${weights_arg} \\
         --tractor_prefix ${tractor_prefix} \\
         --ancestries ${anc_list.join(',')} \\
         --phenotype ${phenotype} \\

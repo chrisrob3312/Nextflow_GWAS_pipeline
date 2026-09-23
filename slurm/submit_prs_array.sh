@@ -87,4 +87,29 @@ Rscript "${SCRIPT_DIR}/bin/calculate_prs_admixed.R" \
     --threads "${SLURM_CPUS_PER_TASK}" \
     --verbose
 
+# ----------------------------------------------------------------------------
+# Local-ancestry PARTIAL scores: run in the PRS-CSx task once its shrunk
+# per-ancestry posterior weights exist (preferred); fall back to Tractor-GENESIS
+# betas from results/gwas/<trait>/POOLED.sumstats.gz if PRS-CSx produced none.
+# ----------------------------------------------------------------------------
+if [[ "${METHOD}" == "prs_csx" && -d "${DATA_DIR}/tractor" ]]; then
+    if ls "${RESULTS_DIR}"/prs_csx*.weights.tsv.gz >/dev/null 2>&1; then
+        LA_WEIGHTS="${RESULTS_DIR}"                  # directory of <..>.<anc>.weights.tsv.gz
+        echo "LA partial scores: using PRS-CSx per-ancestry weights"
+    else
+        LA_WEIGHTS="${SCRIPT_DIR}/results/gwas/${TRAIT}/POOLED.sumstats.gz"
+        echo "LA partial scores: PRS-CSx weights not found, falling back to Tractor-GENESIS betas (no shrinkage)"
+    fi
+    Rscript "${SCRIPT_DIR}/bin/calculate_prs_admixed.R" \
+        --method la_partial \
+        --weights "${LA_WEIGHTS}" \
+        --tractor_prefix "${DATA_DIR}/tractor/all_chr" \
+        --ancestries "EUR,AFR,AMR" \
+        --phenotype "${PHENO}" \
+        --trait "${TRAIT}" \
+        --output_prefix "${RESULTS_DIR}/${TRAIT}" \
+        --threads "${SLURM_CPUS_PER_TASK}" \
+        --verbose
+fi
+
 echo "Completed PRS method ${METHOD} for trait ${TRAIT}"

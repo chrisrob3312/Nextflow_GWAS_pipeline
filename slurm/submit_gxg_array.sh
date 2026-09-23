@@ -68,7 +68,8 @@ KNOWN_LOCI="${KNOWN_LOCI:-${SCRIPT_DIR}/assets/known_leukemia_risk_loci.tsv}"
 LOCI_ARGS="--known_loci ${KNOWN_LOCI}"
 [[ "${GXG_USE_DEFAULT_LOCI:-true}" == "false" ]] && LOCI_ARGS="${LOCI_ARGS} --no_default_loci"
 [[ -n "${GXG_CUSTOM_VARIANTS:-}" ]] && LOCI_ARGS="${LOCI_ARGS} --custom_variants ${GXG_CUSTOM_VARIANTS}"   # GRCh38 list
-PRUNE_MODE="${GXG_PRUNE_MODE:-variant}"     # variant = keep strongest per LD cluster; pair = keep all
+PRUNE_MODE="${GXG_PRUNE_MODE:-conditional}" # conditional = test LD-correlated hits conditional on kept hits; variant = strongest only; pair = keep all
+COND_P="${GXG_COND_P:-1e-4}"                # conditional P below which an LD-correlated hit is an independent signal
 # ---------------------------------------------------------------------------
 
 Rscript "${SCRIPT_DIR}/bin/run_gxg_interaction.R" \
@@ -77,6 +78,7 @@ Rscript "${SCRIPT_DIR}/bin/run_gxg_interaction.R" \
     --max_hits "${GXG_MAX_HITS:-200}" \
     ${LOCI_ARGS} \
     --prune_mode "${PRUNE_MODE}" \
+    --cond_p_threshold "${COND_P}" \
     --geno "${DATA_DIR}/genotypes/cohort" \
     --phenotype "${PHENO}" \
     --trait "${TRAIT}" \
@@ -103,7 +105,7 @@ if [[ "${SLURM_ARRAY_TASK_ID}" == "${SLURM_ARRAY_TASK_MAX}" ]]; then
            --wrap="source ${SCRIPT_DIR}/bin/slurm_utils.sh; set_thread_env; \
                    Rscript ${SCRIPT_DIR}/bin/run_gxg_interaction.R \
                      --sumstats '${SUMSTATS}' --p_threshold ${GXG_P_THRESHOLD:-1e-5} --max_hits ${GXG_MAX_HITS:-200} \
-                     ${LOCI_ARGS} --prune_mode ${PRUNE_MODE} \
+                     ${LOCI_ARGS} --prune_mode ${PRUNE_MODE} --cond_p_threshold ${COND_P} \
                      --geno ${DATA_DIR}/genotypes/cohort \
                      --phenotype ${PHENO} \
                      --trait ${TRAIT} --model ${MODEL} ${SURV_ARGS} \

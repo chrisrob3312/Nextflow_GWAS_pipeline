@@ -525,12 +525,46 @@ run_la_partial <- function(weights_file, tractor_prefix, ancestries, output_pref
     if (is.null(weights_file) || !file.exists(weights_file)) stop("--weights required for la_partial")
     if (is.null(tractor_prefix)) stop("--tractor_prefix required for la_partial")
 
-    w <- fread(weights_file)
+    # --weights may be:
+    #   (a) a directory or comma-separated list of PRS-CSx per-ancestry weight
+    #       files (<...>.<anc>.weights.tsv.gz; columns CHR SNP BP A1 A2 BETA)
+    #       -> PREFERRED: shrunk posterior effects, one per ancestry
+    #   (b) a Tractor-GENESIS sumstats file (BETA_<anc>, ALT, P_JOINT)
+    #       -> raw betas, thresholded on P_JOINT (no shrinkage)
+    #   (c) any table with ID, A1, BETA_<anc>
+    load_weights <- function(spec, ancestries) {
+        files <- if (dir.exists(spec)) list.files(spec, pattern = "weights\\.tsv(\\.gz)?$", full.names = TRUE, recursive = TRUE)
+                 else strsplit(spec, ",")[[1]]
+        per_anc <- list()
+        for (a in ancestries) {
+            f <- files[grepl(paste0("[._]", a, "[._]"), basename(files))]
+            if (length(f) >= 1) per_anc[[a]] <- f[1]
+        }
+        if (length(per_anc) > 0) {
+            cat("  Per-ancestry (PRS-CSx-style) weights:", paste(names(per_anc), collapse = ", "), "\n")
+            tabs <- lapply(names(per_anc), function(a) {
+                d <- fread(per_anc[[a]])
+                if (all(grepl("^V[0-9]+$", names(d))) && ncol(d) >= 6) setnames(d, 1:6, c("CHR", "SNP", "BP", "A1", "A2", "BETA"))
+                idc <- intersect(c("SNP", "ID", "rsid", "variant_id"), names(d))[1]
+                bc  <- intersect(c("BETA", "beta", "weight", "effect"), names(d))[1]
+                ac  <- intersect(c("A1", "ALT", "effect_allele", "EA"), names(d))[1]
+                out <- data.table(ID = as.character(d[[idc]]), A1 = toupper(as.character(d[[ac]])), b = as.numeric(d[[bc]]))
+                setnames(out, "b", paste0("BETA_", a)); out
+            })
+            w <- Reduce(function(x, y) merge(x, y, by = c("ID", "A1"), all = TRUE), tabs)
+            return(list(w = w, source = "prscsx"))
+        }
+        if (length(files) == 1 && file.exists(files)) return(list(w = fread(files), source = "table"))
+        stop("Cannot interpret --weights: ", spec)
+    }
+    lw <- load_weights(weights_file, ancestries)
+    w <- lw$w
     idc <- intersect(c("ID", "SNP", "variant_id", "rsid"), names(w))[1]
     if (is.na(idc)) stop("weights file needs an ID column")
     setnames(w, idc, "ID")
     ea_col <- intersect(c("ALT", "A1", "effect_allele", "EA"), names(w))[1]
     is_tractor <- "P_JOINT" %in% names(w)
+    if (lw$source == "prscsx") cat("  Using shrunk per-ancestry posterior weights (", nrow(w), " variants)\n", sep = "")
     if (is_tractor) {
         n0 <- nrow(w); w <- w[!is.na(P_JOINT) & P_JOINT < opt$la_p_threshold]
         cat("  Tractor-GENESIS weights: kept", nrow(w), "of", n0, "variants at P_JOINT <", opt$la_p_threshold, "\n")

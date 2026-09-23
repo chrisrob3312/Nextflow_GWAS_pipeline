@@ -116,7 +116,7 @@ flowchart TD
     CV["custom GRCh38 list<br/>rsID | chr:pos | chr:pos:ref:alt<br/>(gxg_custom_variants)"]
     SEL["GXG_SELECT_HITS<br/>P < gxg_p_threshold, cap gxg_max_hits<br/>priority: custom > known > GWAS"]
     G["full-cohort genotypes<br/>plink2 --export A on the hit list"]
-    PR["LD prune (gxg_prune_mode = variant)<br/>walk custom > known > best P;<br/>drop a hit if r2 > 0.2 with a kept hit on the same chr<br/>-> hits_pruned.tsv records the proxy"]
+    PR["Independent-signal selection (gxg_prune_mode = conditional)<br/>walk GWAS hits by P > custom > known;<br/>a hit in LD (r2 > 0.2) with kept hits is tested CONDITIONAL on them<br/>(y ~ hit + kept partners + covariates, LRT); kept if cond P < 1e-4<br/>-> hits_pruned.tsv records status, proxy, conditional P"]
     PAIRS["pair list<br/>skip same-chr pairs < 1 Mb apart"]
     T0["POOLED<br/>y ~ g1 + g2 + g1:g2 + covariates + stratum"]
     T1["per stratum (N >= 30)<br/>EUR, AAC, LAT1, LAT2, EAS, SAS, OTHER"]
@@ -153,7 +153,7 @@ Each pair reports Wald and LRT p-values with Bonferroni over pairs and BH FDR.
 | Strata rules | `min_stratum_n`, `bin/ancestry_config.R` | `STRATA_LIST`, `bin/ancestry_config.R` | N < 30 pools to OTHER |
 | Known loci | `gxg_known_loci`, `gxg_use_default_loci` | `KNOWN_LOCI`, `GXG_USE_DEFAULT_LOCI` | default table is a starting point; verify positions |
 | Custom variants | `gxg_custom_variants` | `GXG_CUSTOM_VARIANTS` | GRCh38, one per line |
-| Pair filtering | `gxg_prune_mode`, `gxg_max_pair_r2`, `gxg_min_distance_kb` | `GXG_PRUNE_MODE` | variant = keep strongest per LD cluster |
+| Hit selection among LD-correlated hits | `gxg_prune_mode`, `gxg_cond_p_threshold`, `gxg_max_pair_r2`, `gxg_min_distance_kb` | `GXG_PRUNE_MODE`, `GXG_COND_P` | conditional (default): LD-correlated hit tested conditional on kept hits, kept if cond P < 1e-4; precedence GWAS > custom > known |
 | Tractor | `tractor_aac_pops`, `tractor_lat_pops`, `tractor_ref_ancestry`, `tractor_mac_min` | `ANCESTRIES` case in `submit_gwas_array.sh` | |
 
 ## 6. SLURM orchestration (`slurm/submit_full_pipeline.sh`)

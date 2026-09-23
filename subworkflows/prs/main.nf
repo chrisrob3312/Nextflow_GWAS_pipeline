@@ -65,11 +65,19 @@ workflow PRS_WORKFLOW {
     // ------------------------------------------------------------------
     // Local-ancestry partial scores (Tractor dosages x Tractor-GENESIS betas)
     // ------------------------------------------------------------------
+    // Weights: PRS-CSx shrunk per-ancestry posterior weights when that method
+    // ran (preferred), else Tractor-GENESIS betas thresholded on P_JOINT
+    ch_prscsx_weights = ch_scores
+        .filter { meta, files -> meta.method == 'prs_csx' }
+        .map { meta, files -> [[trait: meta.trait], (files instanceof List ? files : [files]).findAll { it.name =~ /weights\.tsv/ }] }
+
     ch_la_input = ch_tractor_sumstats
         .map { meta, ss -> [[trait: meta.trait], meta.tractor_pops ?: params.tractor_lat_pops, ss] }
+        .join(ch_prscsx_weights, remainder: true)
+        .map { meta, ancs, ss, w -> [meta, ancs, ss, w ?: []] }
         .combine(ch_tractor_dosages.map { m, f -> f }.collect().map { [it] })
         .combine(ch_pheno_single)
-        .map { meta, ancs, ss, dos, pheno -> [meta, ancs.tokenize(','), ss, dos, pheno] }
+        .map { meta, ancs, ss, w, dos, pheno -> [meta, ancs.tokenize(','), ss, w, dos, pheno] }
 
     PRS_LA_PARTIAL(ch_la_input)
     ch_versions = ch_versions.mix(PRS_LA_PARTIAL.out.versions)

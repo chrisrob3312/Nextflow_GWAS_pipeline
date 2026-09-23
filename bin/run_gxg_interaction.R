@@ -55,8 +55,10 @@ option_list <- list(
                 help = "Custom GRCh38 variant list, one per line: rsID, chr:pos, or chr:pos:ref:alt. Always included, highest priority."),
     make_option("--no_default_loci", action = "store_true", default = FALSE,
                 help = "Do not add the default known-risk-loci table given by --known_loci"),
-    make_option("--prune_mode", type = "character", default = "variant",
-                help = "variant = LD-prune hits keeping the STRONGEST per LD cluster [default]; pair = keep all hits, skip LD pairs"),
+    make_option("--prune_mode", type = "character", default = "conditional",
+                help = "conditional = test each LD-correlated hit CONDITIONAL on the hits already kept; keep it if it stays significant [default]; variant = keep only the strongest per LD cluster; pair = keep all hits, skip LD pairs"),
+    make_option("--cond_p_threshold", type = "numeric", default = 1e-4,
+                help = "Conditional P below which an LD-correlated hit is kept as an independent signal [default: 1e-4]"),
     make_option("--min_distance_kb", type = "numeric", default = 1000,
                 help = "Skip pairs on the same chromosome closer than this [default: 1000 kb]"),
     make_option("--max_pair_r2", type = "numeric", default = 0.2,
@@ -115,7 +117,7 @@ if (is.null(opt$sumstats) && is.null(opt$snp_list) && is.null(opt$custom_variant
     (is.null(opt$known_loci) || opt$no_default_loci)) {
     stop("Required: --sumstats and/or --custom_variants and/or --snp_list and/or --known_loci")
 }
-if (!opt$prune_mode %in% c("variant", "pair")) stop("--prune_mode must be 'variant' or 'pair'")
+if (!opt$prune_mode %in% c("conditional", "variant", "pair")) stop("--prune_mode must be 'conditional', 'variant' or 'pair'")
 
 # SLURM detection
 slurm_cpus <- suppressWarnings(as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", "")))
@@ -395,38 +397,85 @@ if (opt$model == "survival") {
 pheno <- pheno[keep]; G <- G[keep, , drop = FALSE]
 
 # ============================================================================
-# 3b. LD-prune hits: keep the STRONGEST variant per LD cluster
+# 3b. Independent-signal selection among hits: CONDITIONAL testing, not LD-drop
 # ============================================================================
-# Priority order: custom list (P = -1) > known loci (P = 0) > GWAS hits by P.
-# Walking down that order, a hit is DROPPED when r2 > max_pair_r2 with a
-# variant already kept on the same chromosome; the kept variant is recorded
-# as its proxy in <prefix>.gxg.hits_pruned.tsv.
-# Proximity alone (< min_distance_kb, low r2) does NOT drop a variant: two
-# nearby independent signals both stay, they are just not tested against
-# each other (pair-level rule in step 4).
-if (opt$prune_mode == "variant" && ncol(G) > 1) {
+# Precedence: GWAS hits by P first, then the custom list, then the default
+# known loci. Walking down that order, a candidate in LD (r2 > max_pair_r2)
+# with variants already kept is NOT dropped outright. It is tested
+# CONDITIONAL on those kept LD partners in the pooled cohort:
+#     y ~ candidate + kept LD partners + covariates (+ stratum)
+# and kept as an independent signal if its conditional P < cond_p_threshold
+# (likelihood-ratio test). Otherwise it is recorded with its proxy. This is
+# an individual-level stepwise conditional / joint analysis, the thing
+# GCTA-COJO approximates from summary statistics and reference LD.
+# Proximity alone (< min_distance_kb, low r2) never removes a variant.
+# prune_mode = variant restores plain "keep the strongest per LD cluster".
+fit_conditional_p <- function(g_cand, G_part, ph, covs, model) {
+    d <- data.frame(cand = g_cand, G_part, ph[, c(covs, "STRATUM",
+                    intersect(c(opt$trait, opt$time_col, opt$event_col), names(ph))), with = FALSE])
+    part_names <- colnames(G_part)
+    cov_str <- if (length(covs) > 0) paste("+", paste(covs, collapse = " + ")) else ""
+    strat_str <- if (length(unique(d$STRATUM)) > 1) "+ STRATUM" else ""
+    rhs0 <- paste(c(part_names, "1"), collapse = " + ")
+    f0 <- as.formula(paste("Y ~", rhs0, cov_str, strat_str))
+    f1 <- as.formula(paste("Y ~ cand +", rhs0, cov_str, strat_str))
+    tryCatch({
+        if (model == "survival") {
+            d$Y <- Surv(d[[opt$time_col]], d[[opt$event_col]])
+            anova(coxph(f0, data = d), coxph(f1, data = d))[2, "Pr(>|Chi|)"]
+        } else if (model == "binary") {
+            d$Y <- d[[opt$trait]]
+            anova(glm(f0, data = d, family = binomial()), glm(f1, data = d, family = binomial()), test = "LRT")[2, "Pr(>Chi)"]
+        } else {
+            d$Y <- d[[opt$trait]]
+            anova(lm(f0, data = d), lm(f1, data = d))[2, "Pr(>F)"]
+        }
+    }, error = function(e) NA_real_)
+}
+
+if (opt$prune_mode %in% c("conditional", "variant") && ncol(G) > 1) {
     r2_all <- suppressWarnings(cor(G, use = "pairwise.complete.obs")^2)
-    pri <- ifelse(grepl("^custom", hits$SOURCE), 0L, ifelse(grepl("^known", hits$SOURCE), 1L, 2L))
+    # precedence: 0 = GWAS hit, 1 = custom list, 2 = default known loci
+    pri <- ifelse(grepl("^custom", hits$SOURCE), 1L, ifelse(grepl("^known", hits$SOURCE), 2L, 0L))
     walk <- order(pri, hits$P)
     kept <- character(0)
-    pruned_by <- rep(NA_character_, nrow(hits)); r2_proxy <- rep(NA_real_, nrow(hits))
+    status <- rep(NA_character_, nrow(hits)); pruned_by <- rep(NA_character_, nrow(hits))
+    r2_proxy <- rep(NA_real_, nrow(hits)); cond_p <- rep(NA_real_, nrow(hits)); cond_on <- rep(NA_character_, nrow(hits))
+    n_cond <- 0L
     for (k in walk) {
         id <- hits$ID[k]
         same_chr <- kept[hits$CHR[match(kept, hits$ID)] == hits$CHR[k]]
         same_chr <- same_chr[!is.na(same_chr)]
+        partners <- character(0)
         if (length(same_chr) > 0) {
             r2v <- r2_all[id, same_chr]
-            if (any(!is.na(r2v) & r2v > opt$max_pair_r2)) {
-                j <- which.max(r2v); pruned_by[k] <- same_chr[j]; r2_proxy[k] <- r2v[j]
-                next
-            }
+            partners <- same_chr[!is.na(r2v) & r2v > opt$max_pair_r2]
         }
-        kept <- c(kept, id)
+        if (length(partners) == 0) { kept <- c(kept, id); status[k] <- "kept_independent"; next }
+        j <- which.max(r2_all[id, partners]); pruned_by[k] <- partners[j]; r2_proxy[k] <- r2_all[id, partners[j]]
+        if (opt$prune_mode == "variant") { status[k] <- "dropped_ld"; next }
+        # conditional test on all kept LD partners
+        n_cond <- n_cond + 1L
+        p_c <- fit_conditional_p(G[, id], G[, partners, drop = FALSE], pheno, covs, opt$model)
+        cond_p[k] <- p_c; cond_on[k] <- paste(partners, collapse = ";")
+        if (!is.na(p_c) && p_c < opt$cond_p_threshold) {
+            kept <- c(kept, id); status[k] <- "kept_conditional"
+        } else {
+            status[k] <- "dropped_conditional"
+        }
     }
-    hits[, `:=`(priority = pri, kept = ID %in% kept, pruned_by = pruned_by, r2_with_proxy = r2_proxy)]
+    hits[, `:=`(priority = pri, status = status, kept = ID %in% kept, proxy = pruned_by,
+                r2_with_proxy = r2_proxy, conditional_on = cond_on, conditional_p = cond_p)]
     fwrite(hits[order(priority, P)], paste0(opt$output_prefix, ".gxg.hits_pruned.tsv"), sep = "\t")
-    cat("LD pruning (r2 >", opt$max_pair_r2, "): kept", length(kept), "of", nrow(hits),
-        "hits (strongest per cluster; custom > known > GWAS P)\n")
+    cat("Independent-signal selection (r2 >", opt$max_pair_r2, "; GWAS > custom > known):\n")
+    cat("  kept without LD partner:", sum(status == "kept_independent", na.rm = TRUE), "\n")
+    if (opt$prune_mode == "conditional") {
+        cat("  conditional tests run:", n_cond, "| kept as independent (cond P <", opt$cond_p_threshold, "):",
+            sum(status == "kept_conditional", na.rm = TRUE), "| dropped (explained by partner):",
+            sum(status == "dropped_conditional", na.rm = TRUE), "\n")
+    } else {
+        cat("  dropped (LD with stronger hit):", sum(status == "dropped_ld", na.rm = TRUE), "\n")
+    }
     hits <- hits[kept == TRUE]
     G <- G[, hits$ID, drop = FALSE]
 } else if (opt$prune_mode == "pair") {
