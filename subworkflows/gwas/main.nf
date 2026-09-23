@@ -22,7 +22,7 @@ include { GENESIS_ASSOC       } from '../../modules/local/genesis'
 include { SPA_COX_STEP1       } from '../../modules/local/spa_cox'
 include { SPA_COX_STEP2       } from '../../modules/local/spa_cox'
 include { TRACTOR_EXTRACT_TRACTS } from '../../modules/local/tractor'
-include { TRACTOR_ASSOC       } from '../../modules/local/tractor'
+include { TRACTOR_GENESIS     } from '../../modules/local/tractor_genesis_adapter'
 include { GWAS_FILTER         } from '../../modules/local/gwas_filter'
 include { CLUMP_REGIONS       } from '../../modules/local/clump_regions'
 include { PLINK2_TO_GDS       } from '../../modules/local/plink2_to_gds'
@@ -191,145 +191,105 @@ workflow GWAS_WORKFLOW {
     //   These are combined for better statistical power in Tractor analysis
     // Decomposes genetic effects by ancestral origin
 
+    // ALL traits go through Tractor-GENESIS (bin/tractor_genesis_adapter.R) so
+    // MRD (binary), relapse and OS (time-to-event) are directly comparable:
+    // one conditional score test, kinship in the null model for every trait.
+    // meta.model / meta.time_col / meta.event_col are set per trait in main.nf.
+    //
+    // Each Tractor process is invoked ONCE on a mixed AAC + Latino channel
+    // (DSL2 forbids calling the same process twice without an alias).
+
     if (run_tractor && ch_local_ancestry) {
         // =====================================================================
-        // AFRICAN AMERICAN (AAC) - 2-way admixture
+        // AFRICAN AMERICAN (AAC) - 2-way admixture (EUR, AFR)
         // =====================================================================
         ch_aac = ch_genotypes
-            .filter { meta, bed, bim, fam ->
-                meta.ancestry == 'AAC'
-            }
+            .filter { meta, bed, bim, fam -> meta.ancestry == 'AAC' }
             .join(ch_local_ancestry)
-
-        // Convert PLINK to VCF for Tractor (AAC)
-        PLINK_TO_VCF(
-            ch_aac.map { meta, bed, bim, fam, la -> [meta, bed, bim, fam] },
-            'aac'
-        )
-
-        ch_tractor_aac_input = PLINK_TO_VCF.out.vcf
-            .join(ch_aac.map { meta, bed, bim, fam, la -> [meta, la] })
-            .map { meta, vcf, vcf_idx, la_files ->
-                [meta + [tractor_pops: tractor_aac_pops, tractor_group: 'AAC'], vcf, la_files]
+            .map { meta, bed, bim, fam, la ->
+                [meta + [tractor_pops: tractor_aac_pops, tractor_group: 'AAC',
+                         ref_ancestry: params.tractor_ref_ancestry ?: 'EUR'], bed, bim, fam, la]
             }
 
-        // Extract ancestry-specific tract dosages (AAC)
-        TRACTOR_EXTRACT_TRACTS(
-            ch_tractor_aac_input,
-            tractor_aac_pops
-        )
-        ch_versions = ch_versions.mix(TRACTOR_EXTRACT_TRACTS.out.versions.first())
-
-        // Run Tractor association (AAC)
-        ch_tractor_aac_assoc = TRACTOR_EXTRACT_TRACTS.out.ancestry_dosages
-            .combine(ch_phenotypes.map { meta, pheno -> pheno })
-
-        TRACTOR_ASSOC(
-            ch_tractor_aac_assoc,
-            covariate_cols
-        )
-        ch_tractor_results = ch_tractor_results.mix(TRACTOR_ASSOC.out.joint_results)
-        ch_versions = ch_versions.mix(TRACTOR_ASSOC.out.versions.first())
-
         // =====================================================================
-        // LATINO (LAT1 + LAT2 COMBINED) - 3-way admixture
+        // LATINO (LAT1 + LAT2 COMBINED) - 3-way admixture (EUR, AFR, NAT/AMR)
         // =====================================================================
-        // Combine LAT1 and LAT2 samples for Tractor analysis
-        // This provides better statistical power for 3-way admixture modeling
-
+        // LAT1 and LAT2 are merged for the Tractor decomposition (power for the
+        // 3-way model); stratified LAT1/LAT2 results come from the standard
+        // per-ancestry GWAS above and from the SLURM per-stratum scripts.
         ch_latino_separate = ch_genotypes
-            .filter { meta, bed, bim, fam ->
-                meta.ancestry in ['LAT1', 'LAT2', 'AHI']
-            }
+            .filter { meta, bed, bim, fam -> meta.ancestry in ['LAT1', 'LAT2', 'AHI'] }
             .join(ch_local_ancestry)
 
-        // Merge LAT1 and LAT2 PLINK files into single "LATINO" group
-        // Group by study ID (samples from same cohort get merged)
         ch_latino_for_merge = ch_latino_separate
             .map { meta, bed, bim, fam, la ->
                 def merge_key = meta.id.replaceAll(/\.(LAT1|LAT2|AHI)$/, '')
-                [[merge_id: merge_key, ancestry: 'LATINO'], meta, bed, bim, fam, la]
+                [[merge_id: merge_key, trait: meta.trait], meta, bed, bim, fam, la]
             }
             .groupTuple(by: 0)
             .map { merge_meta, metas, beds, bims, fams, las ->
-                // Collect all files for merging
-                [merge_meta, beds, bims, fams, las, metas.collect { it.ancestry }]
+                def base = metas[0].findAll { k, v -> !(k in ['id', 'ancestry']) }
+                def new_meta = base + [id: "${merge_meta.merge_id}.LATINO", ancestry: 'LATINO',
+                                       original_ancestries: metas.collect { it.ancestry }.join(','),
+                                       tractor_pops: tractor_lat_pops, tractor_group: 'LATINO',
+                                       ref_ancestry: params.tractor_ref_ancestry ?: 'EUR']
+                [new_meta, beds, bims, fams, las]
             }
 
-        // Check if we have data to merge
         ch_latino_for_merge
             .branch {
-                single: it[1].size() == 1
+                single:   it[1].size() == 1
                 multiple: it[1].size() > 1
             }
             .set { ch_latino_branched }
 
-        // For single ancestry (no merge needed)
         ch_latino_single = ch_latino_branched.single
-            .map { merge_meta, beds, bims, fams, las, ancestries ->
-                def new_meta = [
-                    id: "${merge_meta.merge_id}.LATINO",
-                    ancestry: 'LATINO',
-                    original_ancestries: ancestries.join(','),
-                    n_samples: 0  // Will be computed
-                ]
-                [new_meta, beds[0], bims[0], fams[0], las[0]]
-            }
+            .map { meta, beds, bims, fams, las -> [meta, beds[0], bims[0], fams[0], las[0]] }
 
-        // For multiple ancestries - merge PLINK files
         MERGE_PLINK_FILES(
-            ch_latino_branched.multiple
-                .map { merge_meta, beds, bims, fams, las, ancestries ->
-                    [[id: "${merge_meta.merge_id}.LATINO", ancestry: 'LATINO',
-                      original_ancestries: ancestries.join(',')],
-                     beds, bims, fams]
-                }
+            ch_latino_branched.multiple.map { meta, beds, bims, fams, las -> [meta, beds, bims, fams] }
+        )
+        ch_latino_merged_la = ch_latino_branched.multiple.map { meta, beds, bims, fams, las -> [meta, las] }
+
+        ch_latino_combined = ch_latino_single.mix(
+            MERGE_PLINK_FILES.out.merged
+                .join(ch_latino_merged_la)
+                .map { meta, bed, bim, fam, las -> [meta, bed, bim, fam, las[0]] }  // LA files combined upstream
         )
 
-        // Combine merged local ancestry files for Latino
-        ch_latino_merged_la = ch_latino_branched.multiple
-            .map { merge_meta, beds, bims, fams, las, ancestries ->
-                [[id: "${merge_meta.merge_id}.LATINO"], las]
-            }
+        // =====================================================================
+        // AAC + LATINO -> one channel -> each process called once
+        // =====================================================================
+        ch_tractor_groups = ch_aac.mix(ch_latino_combined)
 
-        // Combine single and merged Latino data
-        ch_latino_combined = ch_latino_single
-            .mix(
-                MERGE_PLINK_FILES.out.merged
-                    .join(ch_latino_merged_la)
-                    .map { meta, bed, bim, fam, las ->
-                        // Use first LA file (should be combined upstream if needed)
-                        [meta, bed, bim, fam, las[0]]
-                    }
-            )
-
-        // Convert PLINK to VCF for Tractor (Latino)
         PLINK_TO_VCF(
-            ch_latino_combined.map { meta, bed, bim, fam, la -> [meta, bed, bim, fam] },
-            'latino'
+            ch_tractor_groups.map { meta, bed, bim, fam, la -> [meta, bed, bim, fam] },
+            'tractor'
         )
 
-        ch_tractor_latino_input = PLINK_TO_VCF.out.vcf
-            .join(ch_latino_combined.map { meta, bed, bim, fam, la -> [meta, la] })
-            .map { meta, vcf, vcf_idx, la_files ->
-                [meta + [tractor_pops: tractor_lat_pops, tractor_group: 'LATINO'], vcf, la_files]
-            }
+        ch_tractor_extract_input = PLINK_TO_VCF.out.vcf
+            .join(ch_tractor_groups.map { meta, bed, bim, fam, la -> [meta, la] })
+            .map { meta, vcf, vcf_idx, la_files -> [meta, vcf, la_files] }
 
-        // Extract ancestry-specific tract dosages (Latino)
+        // Ancestry-specific dosages + haplotype counts (populations read from meta.tractor_pops)
         TRACTOR_EXTRACT_TRACTS(
-            ch_tractor_latino_input,
+            ch_tractor_extract_input,
             tractor_lat_pops
         )
+        ch_versions = ch_versions.mix(TRACTOR_EXTRACT_TRACTS.out.versions.first())
 
-        // Run Tractor association (Latino)
-        ch_tractor_latino_assoc = TRACTOR_EXTRACT_TRACTS.out.ancestry_dosages
+        // Tractor-GENESIS for every trait: binary, quantitative and time-to-event
+        ch_tractor_genesis_input = TRACTOR_EXTRACT_TRACTS.out.ancestry_dosages
+            .join(TRACTOR_EXTRACT_TRACTS.out.haplotype_counts)
             .combine(ch_phenotypes.map { meta, pheno -> pheno })
 
-        TRACTOR_ASSOC(
-            ch_tractor_latino_assoc,
+        TRACTOR_GENESIS(
+            ch_tractor_genesis_input,
+            kinship_matrix,
             covariate_cols
         )
-        ch_tractor_results = ch_tractor_results.mix(TRACTOR_ASSOC.out.joint_results)
+        ch_tractor_results = ch_tractor_results.mix(TRACTOR_GENESIS.out.sumstats)
+        ch_versions = ch_versions.mix(TRACTOR_GENESIS.out.versions.first())
     }
 
     // =========================================================================

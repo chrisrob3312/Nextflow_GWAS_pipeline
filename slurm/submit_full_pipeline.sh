@@ -53,78 +53,89 @@ submit_job() {
 }
 
 # ============================================================================
-# STEP 1: GWAS for each ancestry stratum (parallelized by chromosome)
+# STEP 1: Tractor-GENESIS GWAS for every trait x stratum (array over chromosomes)
 # ============================================================================
+# ALL traits use the same adapter so they are comparable:
+#   MRD -> binary (logistic null), relapse/OS -> survival (Cox null + kinship)
 echo ""
-echo "STEP 1: Submitting GWAS jobs..."
+echo "STEP 1: Submitting Tractor-GENESIS GWAS jobs..."
 declare -A GWAS_JOBS
+declare -A TRAIT_MODEL=( ["OS"]="survival" ["relapse"]="survival" ["MRD"]="binary" )
 
-for stratum in "${STRATA[@]}"; do
-    echo "  Submitting GWAS for ${stratum} (22 chromosomes)..."
-
-    cmd="sbatch --parsable ${SCRIPT_DIR}/submit_gwas_array.sh ${stratum}"
-    if [[ "$DRY_RUN" != "--dry-run" ]]; then
-        GWAS_JOBS[$stratum]=$(eval "$cmd")
-        echo "    Job ID: ${GWAS_JOBS[$stratum]}"
-    else
-        echo "    [DRY-RUN] $cmd"
-    fi
+for trait in "${TRAITS[@]}"; do
+    model="${TRAIT_MODEL[$trait]:-binary}"
+    for stratum in "${STRATA[@]}"; do
+        echo "  ${trait} (${model}) / ${stratum}: 22 chromosomes"
+        cmd="sbatch --parsable ${SCRIPT_DIR}/submit_gwas_array.sh ${stratum} ${trait} ${model}"
+        if [[ "$DRY_RUN" != "--dry-run" ]]; then
+            GWAS_JOBS["${trait}.${stratum}"]=$(eval "$cmd")
+            echo "    Job ID: ${GWAS_JOBS["${trait}.${stratum}"]}"
+        else
+            echo "    [DRY-RUN] $cmd"
+        fi
+    done
 done
 
 # ============================================================================
-# STEP 2: Combine chromosomes and meta-analyze (depends on GWAS)
+# STEP 2: Combine chromosomes per trait x stratum, meta-analyse strata -> POOLED
 # ============================================================================
 echo ""
-echo "STEP 2: Submitting chromosome combine jobs..."
+echo "STEP 2: Submitting combine + meta-analysis jobs (one per trait)..."
 
-# Build dependency string
-GWAS_DEP=""
-for stratum in "${STRATA[@]}"; do
-    if [[ -n "${GWAS_JOBS[$stratum]:-}" ]]; then
-        GWAS_DEP="${GWAS_DEP}:${GWAS_JOBS[$stratum]}"
-    fi
-done
+declare -A COMBINE_JOBS
+STRATA_CSV=$(IFS=,; echo "${STRATA[*]}")
 
-if [[ -n "$GWAS_DEP" ]]; then
-    DEPEND_GWAS="--dependency=afterok${GWAS_DEP}"
-else
-    DEPEND_GWAS=""
-fi
+for trait in "${TRAITS[@]}"; do
+    dep=""
+    for stratum in "${STRATA[@]}"; do
+        j="${GWAS_JOBS["${trait}.${stratum}"]:-}"
+        [[ -n "$j" ]] && dep="${dep}:${j}"
+    done
+    DEPEND_GWAS=""; [[ -n "$dep" ]] && DEPEND_GWAS="--dependency=afterok${dep}"
 
-# Submit combine job
-COMBINE_CMD="sbatch --parsable ${DEPEND_GWAS} << 'EOF'
+    COMBINE_CMD="sbatch --parsable ${DEPEND_GWAS} << 'EOF'
 #!/bin/bash
-#SBATCH --job-name=combine_gwas
+#SBATCH --job-name=combine_${trait}
 #SBATCH --partition=normal
 #SBATCH --time=4:00:00
 #SBATCH --mem=32G
 #SBATCH --cpus-per-task=8
-#SBATCH --output=logs/combine_gwas_%j.out
+#SBATCH --output=logs/combine_${trait}_%j.out
 
 SCRIPT_DIR=\"${SCRIPT_DIR}/..\"
+GWAS_DIR=\"\${SCRIPT_DIR}/results/gwas/${trait}\"
 
-# Combine chromosomes for each stratum
-for stratum in EUR AAC LAT1 LAT2 OTHER; do
-    echo \"Combining \${stratum}...\"
-    cat \${SCRIPT_DIR}/results/gwas/\${stratum}/chr*.sumstats.tsv | \\
-        awk 'NR==1 || !/^CHR/' | sort -k1,1 -k2,2n | \\
-        gzip > \${SCRIPT_DIR}/results/gwas/\${stratum}.sumstats.gz
+# Concatenate chromosomes per stratum (genomic order files -> one sumstats per stratum)
+for stratum in ${STRATA[*]}; do
+    files=(\${GWAS_DIR}/\${stratum}/chr*.tractor_genesis.genomic_order.tsv.gz)
+    [[ -e \"\${files[0]}\" ]] || { echo \"No results for \${stratum} (skipped: N < 30?)\"; continue; }
+    echo \"Combining ${trait} / \${stratum}...\"
+    { zcat \"\${files[0]}\" | head -1; for f in \"\${files[@]}\"; do zcat \"\$f\" | tail -n +2; done; } | \\
+        gzip > \${GWAS_DIR}/\${stratum}.sumstats.gz
 done
 
-# Meta-analyze OTHER with primary strata for pooled results
-echo \"Meta-analyzing for pooled results...\"
+# Meta-analyse across strata (same ancestry background pooled across strata)
+echo \"Meta-analysing ${trait} across strata...\"
 Rscript \${SCRIPT_DIR}/bin/meta_analyze_strata.R \\
-    --input_dir \${SCRIPT_DIR}/results/gwas \\
-    --strata EUR,AAC,LAT1,LAT2,OTHER \\
-    --output \${SCRIPT_DIR}/results/gwas/POOLED.sumstats.gz
+    --input_dir \${GWAS_DIR} \\
+    --strata ${STRATA_CSV} \\
+    --output \${GWAS_DIR}/POOLED.sumstats.gz \\
+    --threads 8
 EOF"
 
-if [[ "$DRY_RUN" != "--dry-run" ]]; then
-    COMBINE_JOB=$(eval "$COMBINE_CMD")
-    echo "  Combine Job ID: ${COMBINE_JOB}"
-else
-    echo "  [DRY-RUN] Submit combine job with dependencies"
-fi
+    if [[ "$DRY_RUN" != "--dry-run" ]]; then
+        COMBINE_JOBS[$trait]=$(eval "$COMBINE_CMD")
+        echo "  ${trait} combine Job ID: ${COMBINE_JOBS[$trait]}"
+    else
+        echo "  [DRY-RUN] Submit combine job for ${trait}"
+    fi
+done
+
+# Single dependency handle for downstream steps (all traits combined)
+COMBINE_JOB=""
+for trait in "${TRAITS[@]}"; do
+    [[ -n "${COMBINE_JOBS[$trait]:-}" ]] && COMBINE_JOB="${COMBINE_JOB:+${COMBINE_JOB}:}${COMBINE_JOBS[$trait]}"
+done
 
 # ============================================================================
 # STEP 3: PRS for each trait (depends on GWAS combine)

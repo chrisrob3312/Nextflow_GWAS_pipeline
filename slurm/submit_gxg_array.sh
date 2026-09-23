@@ -39,7 +39,7 @@ echo "Trait: ${TRAIT}   Model: ${MODEL}   Stratum: ${STRATUM}"
 echo "=============================================="
 
 DATA_DIR="${SCRIPT_DIR}/data"
-GWAS_DIR="${SCRIPT_DIR}/results/gwas"
+GWAS_DIR="${SCRIPT_DIR}/results/gwas/${TRAIT}"     # Tractor-GENESIS output for this trait (all strata + POOLED)
 RESULTS_DIR="${SCRIPT_DIR}/results/gxg/${TRAIT}"
 mkdir -p "${RESULTS_DIR}"
 

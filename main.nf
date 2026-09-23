@@ -150,11 +150,22 @@ workflow {
     ch_phenotypes = Channel.fromPath(params.phenotype_file)
     ch_versions = ch_versions.mix(INPUT_CHECK.out.versions)
 
-    // Parse traits
+    // Parse traits and assign each one a Tractor-GENESIS model so every trait
+    // goes through the same adapter (MRD -> binary; OS, relapse -> survival)
+    def survival_traits = params.survival_traits ? params.survival_traits.split(',') as List : []
+    def surv_time_cols  = params.survival_time_cols  ? params.survival_time_cols.split(',')  as List : []
+    def surv_event_cols = params.survival_event_cols ? params.survival_event_cols.split(',') as List : []
+
     ch_traits = Channel.of(params.phenotype_cols.split(','))
         .map { trait ->
-            def is_binary = params.binary_traits?.split(',')?.contains(trait) ?: false
-            [trait: trait, binary: is_binary]
+            def is_binary   = params.binary_traits?.split(',')?.contains(trait) ?: false
+            def is_survival = survival_traits.contains(trait)
+            def idx         = survival_traits.indexOf(trait)
+            def time_col    = is_survival ? (idx < surv_time_cols.size()  ? surv_time_cols[idx]  : "${trait}_time")   : null
+            def event_col   = is_survival ? (idx < surv_event_cols.size() ? surv_event_cols[idx] : "${trait}_status") : null
+            def model       = is_survival ? 'survival' : (is_binary ? 'binary' : 'quantitative')
+            [trait: trait, binary: is_binary, survival: is_survival, model: model,
+             time_col: time_col, event_col: event_col]
         }
 
     // =========================================================================
@@ -415,8 +426,9 @@ workflow {
             .mix(params.run_tractor ? ch_tractor_results : Channel.empty())
             .mix(params.meta_analysis ? ch_meta_results : Channel.empty())
             .mix(params.survival_analysis ? ch_survival_results : Channel.empty())
-            .map { meta, ss -> [meta + [survival: params.survival_analysis && (meta.survival ?: false),
-                                        time_col: params.time_col, event_col: params.event_col], ss] }
+            .map { meta, ss -> [meta + [survival: meta.survival ?: false,
+                                        time_col: meta.time_col ?: params.time_col,
+                                        event_col: meta.event_col ?: params.event_col], ss] }
 
         GXG_INTERACTION(
             ch_gxg_sumstats,

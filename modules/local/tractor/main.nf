@@ -165,7 +165,7 @@ process TRACTOR_EXTRACT_TRACTS {
     python extract_tractor_tracts.py \\
         --vcf ${vcf} \\
         --msp ${local_ancestry_msp} \\
-        --populations ${ancestral_pops} \\
+        --populations ${meta.tractor_pops ?: ancestral_pops} \\
         --output-prefix ${prefix} \\
         $args
 
