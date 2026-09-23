@@ -126,6 +126,7 @@ include { HERITABILITY        } from './subworkflows/heritability'
 include { FUNCTIONAL_ANNOT    } from './subworkflows/functional'
 include { VISUALIZATION       } from './subworkflows/visualization'
 include { REPORTING           } from './subworkflows/reporting'
+include { GXG_INTERACTION     } from './subworkflows/gxg'
 
 // Utility modules
 include { SOFTWARE_VERSIONS   } from './modules/local/software_versions'
@@ -400,6 +401,39 @@ workflow {
         )
         ch_functional_results = FUNCTIONAL_ANNOT.out.annotation_results
         ch_versions = ch_versions.mix(FUNCTIONAL_ANNOT.out.versions)
+    }
+
+    // =========================================================================
+    // GxG (EPISTASIS) INTERACTION TESTING ON GWAS HITS - END OF PIPELINE
+    // =========================================================================
+    // Takes hits from ALL GWAS variants (per-ancestry, Tractor, meta-analysis)
+    // plus known leukemia risk loci; tests pairwise SNP x SNP interactions in
+    // the pooled cohort and within each ancestry stratum, then tests whether
+    // the interaction itself differs by ancestry background.
+    if (params.gxg_interaction) {
+        ch_gxg_sumstats = ch_gwas_results
+            .mix(params.run_tractor ? ch_tractor_results : Channel.empty())
+            .mix(params.meta_analysis ? ch_meta_results : Channel.empty())
+            .mix(params.survival_analysis ? ch_survival_results : Channel.empty())
+            .map { meta, ss -> [meta + [survival: params.survival_analysis && (meta.survival ?: false),
+                                        time_col: params.time_col, event_col: params.event_col], ss] }
+
+        GXG_INTERACTION(
+            ch_gxg_sumstats,
+            ch_qc_genotypes,
+            ch_phenotypes_with_meta,
+            params.run_tractor ? ch_local_ancestry : Channel.empty(),
+            params.gxg_known_loci ? file(params.gxg_known_loci) : [],
+            params.gxg_strata.split(',') as List,
+            params.gxg_p_threshold,
+            params.gxg_max_hits,
+            params.covariate_cols,
+            params.gxg_ancestry_col,
+            params.min_stratum_n
+        )
+        ch_gxg_summary = GXG_INTERACTION.out.summary
+        ch_gxg_top = GXG_INTERACTION.out.top
+        ch_versions = ch_versions.mix(GXG_INTERACTION.out.versions)
     }
 
     // =========================================================================

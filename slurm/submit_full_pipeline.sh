@@ -249,6 +249,30 @@ else
 fi
 
 # ============================================================================
+# STEP 6: GxG interaction tests on GWAS hits (END OF PIPELINE)
+# ============================================================================
+# Needs only the combined GWAS sumstats (not PRS/coloc), so it runs in
+# parallel with steps 3-5. One array task per stratum, per trait.
+echo ""
+echo "STEP 6: Submitting GxG interaction jobs..."
+
+declare -A GXG_JOBS
+declare -A TRAIT_MODEL=( ["OS"]="survival" ["relapse"]="binary" ["MRD"]="binary" )
+
+for trait in "${TRAITS[@]}"; do
+    model="${TRAIT_MODEL[$trait]:-binary}"
+    echo "  Submitting GxG for ${trait} (${model}; POOLED + 7 strata)..."
+
+    cmd="sbatch --parsable ${DEPEND_PRS} ${SCRIPT_DIR}/submit_gxg_array.sh ${trait} ${model}"
+    if [[ "$DRY_RUN" != "--dry-run" ]]; then
+        GXG_JOBS[$trait]=$(eval "$cmd")
+        echo "    Job ID: ${GXG_JOBS[$trait]}"
+    else
+        echo "    [DRY-RUN] $cmd"
+    fi
+done
+
+# ============================================================================
 # Summary
 # ============================================================================
 echo ""
@@ -258,6 +282,7 @@ echo "=============================================="
 echo "GWAS jobs: ${#STRATA[@]} strata × 22 chromosomes"
 echo "PRS jobs: ${#TRAITS[@]} traits × 6 methods"
 echo "Colocalization: ${#QTL_TYPES[@]} QTL types × 3 methods"
+echo "GxG interaction: ${#TRAITS[@]} traits × 8 strata (+ ancestry heterogeneity)"
 echo ""
 echo "Monitor with: squeue -u \$USER"
 echo "Cancel all: scancel -u \$USER"

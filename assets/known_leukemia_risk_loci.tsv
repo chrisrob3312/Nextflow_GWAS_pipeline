@@ -1,0 +1,21 @@
+snp	gene	chr	pos_grch38	risk_allele	phenotype	population_note	reference
+rs10821936	ARID5B	10	61986367	C	ALL susceptibility	Strongest in Hispanic/Latino; higher risk allele frequency in AMR ancestry	Papaemmanuil 2009; Xu 2013
+rs7089424	ARID5B	10	61990782	G	ALL susceptibility	Hispanic effect larger than European	Trevino 2009
+rs4132601	IKZF1	7	50435519	G	ALL susceptibility	Consistent across ancestries	Papaemmanuil 2009
+rs11978267	IKZF1	7	50432296	G	ALL susceptibility	Consistent across ancestries	Trevino 2009
+rs2239633	CEBPE	14	23120210	A	ALL susceptibility	Weaker in African American	Papaemmanuil 2009
+rs3731217	CDKN2A	9	21984661	C	ALL susceptibility	Consistent across ancestries	Sherborne 2010
+rs3731249	CDKN2A	9	21970916	T	ALL susceptibility (missense p.A148T)	Higher frequency in European	Xu 2015; Walsh 2015
+rs7088318	PIP4K2A	10	22571631	A	ALL susceptibility	Larger effect in Hispanic and African American	Xu 2013; Migliorini 2013
+rs3824662	GATA3	10	8062245	A	Ph-like ALL, relapse	Strongly enriched in Hispanic; associated with relapse	Perez-Andreu 2013
+rs35837782	LHPP	10	124597007	A	ALL susceptibility	Consistent across ancestries	Vijayakrishnan 2017
+rs4762284	ELK3	12	96177069	T	ALL susceptibility	Consistent across ancestries	Vijayakrishnan 2017
+rs8130960	ERG	21	38401254	C	ALL susceptibility	Hispanic/Latino-specific association (Native American ancestry)	Qian 2019
+rs2290400	IKZF3	17	39909987	T	ALL susceptibility	Consistent across ancestries	Vijayakrishnan 2018
+rs17505102	TP63	3	189608200	C	ALL susceptibility	Consistent across ancestries	Ellinghaus 2012
+rs11591377	BMI1-PIP4K2A	10	22378860	G	ALL susceptibility	Consistent across ancestries	Xu 2013
+rs74010351	USP7	16	8975648	T	ALL susceptibility (T-ALL enriched)	African American-specific association	Qian 2019
+rs77728904	CDKN2B	9	22006040	A	ALL susceptibility	African American	Hungate 2016
+rs12402181	MIR3117	1	67209009	A	ALL susceptibility	Hispanic	Hungate 2016
+rs6428370	IGF2BP1	1	113900000	T	ALL susceptibility	Hispanic; from admixture mapping	Walsh 2013
+rs1945213	CEBPE	14	23125000	C	ALL susceptibility	Hispanic	Walsh 2013
