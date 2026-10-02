@@ -1,5 +1,5 @@
 process MAGMA_GENE {
-    tag "$meta.trait"
+    tag "${meta.id ?: meta.trait} - ${meta.trait}"
     label 'process_medium'
 
     conda "bioconda::magma=1.10"
@@ -8,7 +8,9 @@ process MAGMA_GENE {
         'quay.io/biocontainers/magma:1.10--h9f5acd7_0' }"
 
     input:
-    tuple val(meta), path(annotated_sumstats)
+    tuple val(meta), path(pval_file), path(genes_annot)   // SNP/P file + .genes.annot from MAGMA_ANNOTATE
+    path magma_reference, stageAs: 'ref/*'                // <prefix>.bed/bim/fam LD reference (ancestry-matched)
+    val n_samples
 
     output:
     tuple val(meta), path("${prefix}.genes.out"), emit: genes
@@ -20,15 +22,15 @@ process MAGMA_GENE {
 
     script:
     def args = task.ext.args ?: ''
-    prefix = task.ext.prefix ?: "${meta.trait}"
+    prefix = task.ext.prefix ?: "${meta.id ?: meta.trait}.${meta.trait}"
+    def n = meta.n ?: n_samples
     """
-    # MAGMA gene-level analysis
-    # Aggregates SNP-level associations to gene-level
+    BFILE=\$(ls ref/*.bed | head -1 | sed 's/\\.bed\$//')
 
     magma \\
-        --bfile /opt/magma/g1000_eur \\
-        --pval ${annotated_sumstats} N=\${N_SAMPLES:-10000} \\
-        --gene-annot ${annotated_sumstats.baseName}.genes.annot \\
+        --bfile \$BFILE \\
+        --pval ${pval_file} N=${n} \\
+        --gene-annot ${genes_annot} \\
         --out ${prefix} \\
         $args
 

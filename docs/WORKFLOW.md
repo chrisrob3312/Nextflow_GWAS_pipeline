@@ -5,6 +5,29 @@ Boxes are Nextflow subworkflows or processes; every arrow is a file handed from
 one module to the next. The same steps exist as SLURM array scripts under
 `slurm/` (section 6), which call the same `bin/` scripts.
 
+## 0. Inputs: what the pipeline expects at the start
+
+| Input | Param | Format | Notes |
+|---|---|---|---|
+| Samplesheet | `input` | CSV, header. Required column `sample_id` (one row per genotype set, e.g. per cohort), plus ONE of: `bed,bim,fam` / `pgen,pvar,psam` / `bgen,sample[,bgi]` / `vcf[,vcf_index]`; optional `cohort` | Validated by `bin/check_samplesheet.py`; non-PLINK1 sets are converted to bed/bim/fam in QC |
+| Phenotype file | `phenotype_file` | TSV, header. **`FID` and `IID` must be the first two columns** (REGENIE, SAIGE, SPA-Cox require it; the R scripts accept `IID` or `sample_id`). `IID` must match the genotype sample IDs | Nothing is inferred from the file |
+| Traits | `phenotype_cols` | comma list of column names | **Traits are exactly these columns.** `binary_traits` (0/1) and `survival_traits` (needs `<trait>_time`, `<trait>_status`) pick the model; anything else is quantitative |
+| Covariates | `covariate_cols` | comma list of column names | **Covariates are exactly these columns.** List `PC1..PCn` here; with `run_pcair = true` they are replaced by PC-AiR PCs before any model runs |
+| Ancestry labels | `gxg_ancestry_col` (default `GRAF_ANC`) | a column of the phenotype file | GRAF-ANC codes or labels; used by GxG and PRS validation to stratify |
+| Ancestry calls | `ancestry_calls_file` (when `run_ancestry_inference = false`) | TSV/CSV: `sample_id`, `ancestry` (codes or labels) | Normalised by `ANCESTRY_CALLS_PREPARE`; defines the per-ancestry strata (N ≥ `min_ancestry_n`) |
+| Local ancestry | `local_ancestry_files` | glob of RFMix `.msp.tsv` files | Required for Tractor (`run_tractor`); RFMix / G-Nomix are not bundled |
+| Kinship / GRM | none needed | produced by `GENESIS_PCAIR_PCRELATE` | `kinship_matrix` is only read when `run_pcair = false` |
+| LD reference | `ld_reference_dir` | directory with `<ancestry>.bed/bim/fam` (cohort-specific from `calculate_cohort_ld.R`, or a panel) | SuSiE-RSS, PRS, coloc |
+| QTL datasets | `custom_qtl_datasets` / `eqtl_datasets` | CSV: `name,type,path[,ancestry,tissue]` | plus the curated megaset via `download_qtl_datasets.R` |
+
+Example phenotype file:
+
+```
+FID   IID   OS_time  OS_status  DFS_time  DFS_status  MRD  age  sex  PC1 ... PC5  GRAF_ANC
+```
+with `phenotype_cols = 'OS,DFS,MRD'`, `survival_traits = 'OS,DFS'`, `binary_traits = 'MRD'`,
+`covariate_cols = 'age,sex,PC1,PC2,PC3,PC4,PC5'`.
+
 ## 1. End-to-end overview
 
 ```mermaid

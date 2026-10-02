@@ -154,7 +154,9 @@ if (!is.null(opt$phenotype) && file.exists(opt$phenotype)) {
     ph[[idc]] <- as.character(ph[[idc]])
     old_pcs <- grep("^PC[0-9]+$", names(ph), value = TRUE)
     if (length(old_pcs) > 0) { cat("  Replacing existing", length(old_pcs), "PC columns with PC-AiR PCs\n"); ph[, (old_pcs) := NULL] }
+    orig_order <- names(ph)                                   # keep FID / IID first (REGENIE, SAIGE, SPA-Cox need that)
     ph <- merge(ph, pcs, by.x = idc, by.y = "sample_id", all.x = TRUE, sort = FALSE)
+    setcolorder(ph, c(orig_order, paste0("PC", 1:opt$n_pcs)))
     out_ph <- paste0(opt$output_prefix, ".phenotypes.with_pcs.tsv")
     fwrite(ph, out_ph, sep = "\t")
     cat("  Phenotype with PC-AiR PCs:", out_ph, "(", sum(!is.na(ph$PC1)), "of", nrow(ph), "samples with PCs )\n")

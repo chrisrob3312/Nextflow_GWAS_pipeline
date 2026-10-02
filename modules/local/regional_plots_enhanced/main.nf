@@ -186,7 +186,9 @@ process MIAMI_PLOT {
 
     script:
     def args = task.ext.args ?: ''
-    prefix = task.ext.prefix ?: "${meta.trait}.${label1}_vs_${label2}"
+    def l1 = meta.anc1 ?: label1      // per-pair labels from meta when present
+    def l2 = meta.anc2 ?: label2
+    prefix = task.ext.prefix ?: "${meta.trait}.${l1}_vs_${l2}"
     """
     #!/usr/bin/env Rscript
 
@@ -232,11 +234,11 @@ process MIAMI_PLOT {
         scale_color_manual(values = c("#1f77b4", "#aec7e8"), guide = "none") +
         scale_x_continuous(breaks = chr_centers\$center, labels = chr_centers\$CHR) +
         annotate("text", x = max(combined\$cum_pos) * 0.02, y = max(gwas1\$log10p) * 0.9,
-                 label = "${label1}", hjust = 0, fontface = "bold", size = 4) +
+                 label = "${l1}", hjust = 0, fontface = "bold", size = 4) +
         annotate("text", x = max(combined\$cum_pos) * 0.02, y = min(gwas2\$log10p) * 0.9,
-                 label = "${label2}", hjust = 0, fontface = "bold", size = 4) +
+                 label = "${l2}", hjust = 0, fontface = "bold", size = 4) +
         labs(title = "Miami Plot: ${meta.trait}",
-             subtitle = "${label1} (top) vs ${label2} (bottom)",
+             subtitle = "${l1} (top) vs ${l2} (bottom)",
              x = "Chromosome",
              y = expression(-log[10](P))) +
         theme_bw() +

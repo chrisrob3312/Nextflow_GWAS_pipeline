@@ -210,10 +210,13 @@ workflow {
     // =========================================================================
     ANCESTRY_INFERENCE(
         ch_qc_genotypes,
+        params.run_ancestry_inference,
         params.ancestry_method,
         params.graf_reference ? file(params.graf_reference) : [],
-        params.local_ancestry,
-        params.local_ancestry_method
+        params.ancestry_calls_file,          // pre-computed GRAF-ANC calls (sample_id, ancestry)
+        params.min_ancestry_n,
+        params.local_ancestry || params.run_tractor,
+        params.local_ancestry_files          // RFMix MSP files (glob); required for Tractor
     )
     ch_ancestry_calls = ANCESTRY_INFERENCE.out.ancestry_calls
     ch_stratified_genotypes = ANCESTRY_INFERENCE.out.stratified_genotypes

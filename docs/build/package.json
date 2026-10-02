@@ -1,0 +1,15 @@
+{
+  "name": "gwas-pipeline-workflow-docs",
+  "private": true,
+  "description": "Renders the workflow diagrams (Mermaid in headless Chromium) and builds docs/GWAS_pipeline_workflow.docx",
+  "scripts": {
+    "render": "node render_diagrams.js",
+    "docx": "node build_docx.js ../GWAS_pipeline_workflow.docx",
+    "build": "npm run render && npm run docx"
+  },
+  "dependencies": {
+    "docx": "^9.0.0",
+    "mermaid": "^11.0.0",
+    "playwright-core": "^1.45.0"
+  }
+}

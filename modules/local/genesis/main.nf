@@ -34,13 +34,20 @@ process GENESIS_NULL_MODEL {
     library(SeqArray)
     library(SeqVarTools)
 
-    # Load phenotype data
-    pheno <- read.table("${phenotype}", header=TRUE, stringsAsFactors=FALSE)
+    # Load phenotype data (TSV; sample ID column sample_id / IID -> scanID for GENESIS)
+    pheno <- read.table("${phenotype}", header=TRUE, sep="\\t", stringsAsFactors=FALSE, check.names=FALSE)
+    idc <- intersect(c("sample_id", "IID", "ID", "sample"), names(pheno))[1]
+    if (is.na(idc)) stop("Phenotype file needs a sample_id or IID column")
+    pheno\$scanID <- as.character(pheno[[idc]])
+    pheno <- pheno[, c("scanID", setdiff(names(pheno), "scanID"))]
 
-    # Load kinship matrix if provided
+    # Load kinship / GRM if provided (PC-Relate GRM from GENESIS_PCAIR_PCRELATE, or user file)
     kinship <- NULL
     if (file.exists("${kinship_matrix}")) {
         kinship <- readRDS("${kinship_matrix}")
+        common <- intersect(rownames(kinship), pheno\$scanID)
+        pheno <- pheno[pheno\$scanID %in% common, ]
+        kinship <- kinship[pheno\$scanID, pheno\$scanID]
     }
 
     # Create AnnotatedDataFrame
