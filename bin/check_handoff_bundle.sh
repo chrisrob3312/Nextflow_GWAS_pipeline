@@ -85,7 +85,7 @@ fi
 head -1 ancestry/strata.tsv | grep -qP '^sample_id\tstratum' || fail "strata.tsv header must start sample_id<TAB>stratum"
 awk -F'\t' 'NR>1{print $1}' ancestry/strata.tsv | LC_ALL=C sort > .st_id
 cmp -s .fam_iid .st_id || fail "strata.tsv sample set differs from .fam IID set"
-head -1 structure/cohort.pcair.pcs.tsv | grep -qP '^sample_id\tPC1\t' || fail "cohort.pcair.pcs.tsv header must start sample_id<TAB>PC1"
+head -1 structure/cohort.pcair.pcs.tsv | grep -qP '^sample_id\tPC1(\t|$)' || fail "cohort.pcair.pcs.tsv header must start sample_id<TAB>PC1"
 awk -F'\t' 'NR>1{print $1}' structure/cohort.pcair.pcs.tsv | LC_ALL=C sort > .pc_id
 cmp -s .fam_iid .pc_id || fail "cohort.pcair.pcs.tsv sample set differs from .fam IID set"
 awk -F'\t' 'NR>1{print $2}' ancestry/strata.tsv | LC_ALL=C sort -u | while read -r S; do
