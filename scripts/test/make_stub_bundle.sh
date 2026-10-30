@@ -11,7 +11,7 @@ set -euo pipefail
 OUT="${1:?out_dir}"; shift || true
 CHROM_SPEC="1-22"
 while [[ $# -gt 0 ]]; do case "$1" in --chromosomes) CHROM_SPEC="$2"; shift 2;; *) echo "unknown arg $1" >&2; exit 1;; esac; done
-CHROMS=(); for part in ${CHROM_SPEC//,/ }; do if [[ "$part" =~ ^([0-9]+)-([0-9]+)$ ]]; then CHROMS+=($(seq "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}")); else CHROMS+=("$part"); fi; done
+CHROMS=(); for part in ${CHROM_SPEC//,/ }; do if [[ "$part" =~ ^([0-9]+)-([0-9]+)$ ]]; then CHROMS+=($(seq "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}")); elif [[ "$part" =~ ^[0-9]+$ ]]; then CHROMS+=("$part"); else echo "bad --chromosomes value: $part" >&2; exit 1; fi; done
 rm -rf "$OUT"; mkdir -p "$OUT"/{genotypes,ancestry,structure/strata,local_ancestry/flare,phenotypes,qc,run_record}
 cd "$OUT"
 
@@ -49,21 +49,28 @@ printf 'anc_index\tlabel\n0\tEUR\n1\tAFR\n2\tAMR\n' > local_ancestry/flare_index
 for n in "${CHROMS[@]}"; do printf 'placeholder flare vcf chr%s\n' "$n" | gzip -c > "local_ancestry/flare/chr${n}.anc.vcf.gz"; printf 'csi' > "local_ancestry/flare/chr${n}.anc.vcf.gz.csi"; done
 
 # phenotypes: MRD (binary), EFS and OS (time, event), four covariates
-{ printf 'FID\tIID\tsample_id\tmrd\tefs_time\tefs_event\tos_time\tos_event\tsex\tage_at_diagnosis\tcd19_pos_pct\tstorage_days\n'
-  i=0; for s in "${SAMPLES[@]}"; do printf 'F_%s\t%s\t%s\t%d\t%s\t%d\t%s\t%d\t%d\t%d\t%s\t%d\n' "$s" "$s" "$s" $((i % 2)) "$((300 + i * 10)).5" $((i % 2)) "$((400 + i * 10))" $(( (i + 1) % 2 )) $((1 + i % 2)) $((5 + i)) "9$i.5" $((100 + i)); i=$((i + 1)); done; } > phenotypes/phenotypes.tsv
+{ printf 'FID\tIID\tsample_id\tmrd\tefs_time\tefs_event\tos_time\tos_event\tprotocol\tsex\tage_at_diagnosis\tcd19_pos_pct\tstorage_days\n'
+  i=0; protos=(P1 P2 P3); for s in "${SAMPLES[@]}"; do printf 'F_%s\t%s\t%s\t%d\t%s\t%d\t%s\t%d\t%s\t%d\t%d\t%s\t%d\n' "$s" "$s" "$s" $((i % 2)) "$((300 + i * 10)).5" $((i % 2)) "$((400 + i * 10))" $(( (i + 1) % 2 )) "${protos[$((i % 3))]}" $((1 + i % 2)) $((5 + i)) "9$i.5" $((100 + i)); i=$((i + 1)); done; } > phenotypes/phenotypes.tsv
 printf 'sex\nage_at_diagnosis\ncd19_pos_pct\nstorage_days\n' > phenotypes/covariates.txt
 
 # qc and run record
-printf 'sample_id\tkept_of\treason\n' > qc/removed_duplicates.tsv
-printf 'stage\tn_in\tn_out\n01_intake\t8\t8\n11_final_datasets\t8\t8\n' > qc/sample_accounting.tsv
+printf 'kept_iid\tremoved_iid\tkinship\treason\n' > qc/removed_duplicates.tsv   # header-only: nothing removed
+printf 'step\tn_in\tn_out\tn_removed\treason\n01_intake\t8\t8\t0\t-\n11_final_datasets\t8\t8\t0\t-\n' > qc/sample_accounting.tsv
 printf 'id\tverdict\tn\tmessage\nM6_callrate_95\tPASS\t8\tall samples >= 0.95\nM6_mrsqx_applied\tPASS\t6\tMagicalRsq-X applied after each pass\n' > qc/qc_assertions.tsv
 printf 'param\tvalue\nrun_lai\ttrue\nlai_methods\tflare\nimputation_quality_method\tmagicalrsqx\n' > run_record/params.tsv
 printf 'task_id\tname\tstatus\n1\tMODULE1:harmonize\tCOMPLETED\n' > run_record/trace.tsv
 
 # manifest in the documented format
-role() { case "$1" in genotypes/cohort.hardcall.maf01.*) echo hardcall_maf01_gwas_input;; genotypes/cohort.hardcall.nomaf.*) echo hardcall_nomaf;;
-  genotypes/*) echo dosage_vcf;; ancestry/*) echo ancestry;; structure/*) echo structure;; local_ancestry/*) echo local_ancestry;;
-  phenotypes/*) echo phenotypes;; qc/*) echo qc;; run_record/*) echo run_record;; *) echo other;; esac; }
+role() { case "$1" in
+  genotypes/cohort.hardcall.nomaf.*) echo hardcall_nomaf;; genotypes/cohort.hardcall.maf01.*) echo hardcall_maf01;; genotypes/chr*.phased.dose.vcf.gz) echo dosage_vcf;;
+  genotypes/chr*.phased.dose.vcf.gz.csi) echo dosage_vcf_index;; ancestry/ancestry_calls.tsv) echo ancestry_calls;; ancestry/strata.tsv) echo strata;; ancestry/strata_rule.txt) echo strata_rule;;
+  structure/strata/*.pcair.pcs.tsv) echo stratum_pcs;; structure/cohort.pcair.pcs.tsv) echo cohort_pcs;; structure/cohort.pcrelate.*.rds) echo structure_rds;;
+  ancestry/grafanc_raw.txt) echo grafanc_raw;; local_ancestry/flare/chr*.anc.vcf.gz) echo flare_anc;;
+  local_ancestry/flare/chr*.anc.vcf.gz.csi) echo flare_anc_index;; local_ancestry/flare_panels.txt) echo flare_panels;;
+  local_ancestry/ancestry_labels.txt) echo ancestry_labels;; local_ancestry/flare_index_map.tsv) echo flare_index_map;; phenotypes/phenotypes.tsv) echo phenotypes;;
+  phenotypes/covariates.txt) echo covariates;; qc/removed_duplicates.tsv) echo removed_duplicates;;
+  qc/sample_accounting.tsv) echo sample_accounting;; qc/qc_assertions.tsv) echo qc_assertions;;
+  run_record/*) echo run_record;; *) echo other;; esac; }
 { printf '# run_id\tstub-run\n# upstream_git_sha\t0000000\n# imputation_server\ttopmed\n# duplicates_removed\tno\n# build\thg38\n'
   printf 'path\tsha256\tbytes\trole\n'
   find genotypes ancestry structure local_ancestry phenotypes qc run_record -type f | LC_ALL=C sort | while read -r p; do

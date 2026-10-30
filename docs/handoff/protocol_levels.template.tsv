@@ -1,0 +1,2 @@
+code	meaning
+# one row per treatment protocol code used in phenotypes.tsv `protocol`; the first listed is the env-MR-MEGA reference level
