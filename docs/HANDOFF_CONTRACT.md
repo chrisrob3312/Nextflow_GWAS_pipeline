@@ -9,8 +9,8 @@ exactly as written; the chromosome placeholder `{N}` is 1–22 with no `chr` pre
 | File | Role downstream | Format and required content | Produced by |
 |---|---|---|---|
 | `manifest.tsv` | the contract itself | tab-separated, header `path sha256 bytes role`; one row per file below; header lines `# run_id`, `# upstream_git_sha`, `# imputation_server` (topmed \| michigan \| anvil), `# duplicates_removed` (yes \| no), `# build` (hg38) | `make_handoff_manifest.sh` |
-| `genotypes/cohort.hardcall.nomaf.bed/.bim/.fam` | the GWAS set: stratum keep-files, the per-stratum MAC gate, GrafAnc audit | PLINK 1 trio; hg38; QC-complete, **no MAF filter** — the minor-allele-count gate is applied per stratum downstream; `.fam` IID is the sample key used everywhere else; `.bim` IDs `chr:pos:ref:alt` | Module 6 `11_final_datasets` (`*_final_nomaf.*`) |
-| `genotypes/cohort.hardcall.maf01.bed/.bim/.fam` | the same QC-complete set at cohort MAF ≥ 1 %, for anyone wanting a common-variant dataset without re-running QC | PLINK 1 trio; identical `.fam` to the nomaf set; a subset of its sites | Module 6 `11_final_datasets` (`*_final_maf01.*`) |
+| `genotypes/cohort.hardcall.maf01.bed/.bim/.fam` | **the GWAS input**: the cohort at MAF ≥ 1 %; stratum keep-files, the per-stratum MAC gate, GrafAnc audit | PLINK 1 trio; hg38; QC-complete with the cohort MAF ≥ 1 % filter applied upstream; the minor-allele-count gate (MAC ≥ 20) is still applied per stratum downstream; `.fam` IID is the sample key used everywhere else; `.bim` IDs `chr:pos:ref:alt` | Module 6 `11_final_datasets` (`*_final_maf01.*`) |
+| `genotypes/cohort.hardcall.nomaf.bed/.bim/.fam` | the full QC-complete set with **no MAF filter**: rare-variant association, and anyone who wants QC-ready data without re-running QC | PLINK 1 trio; identical `.fam` to the maf01 set; a superset of its sites — every maf01 site is in it | Module 6 `11_final_datasets` (`*_final_nomaf.*`) |
 | `genotypes/chr{N}.phased.dose.vcf.gz` + `.csi` | FLARE input (phased GT); SeqVarGDS source; Tractor extraction | bgzipped VCF, hg38, `chr{N}` contigs, phased `GT` (`|`), `FORMAT/DS` present, INFO carries the per-service quality field and the MagicalRsq-X score as `INFO/MRSQX`; sample order identical to `.fam` | Module 6 per-chromosome filtered VCFs |
 | `ancestry/ancestry_calls.tsv` | stratification, per-stratum MAC gate, the label on every result, the 21 continuous scores as covariates or figures | tab-separated, 24 columns exactly: `sample_id AncGroupID MajorGroup GD1 GD2 GD3 EA1 EA2 EA3 EA4 AF1 AF2 AF3 EU1 EU2 EU3 SA1 SA2 IC1 IC2 IC3 Pe Pf Pa`. `AncGroupID` is one of GrafAnc 1.0.0's 46 three-digit codes; `MajorGroup` is derived from its hundreds digit (1 AFR, 2 MEN, 3 EUR, 4 SAS, 5 EAS, 6 AMR, 7 OCN, 8 MIX) — GrafAnc emits no text group itself. One row per `.fam` IID, no duplicates. Made by `grafanc_to_calls.sh`, which also survives GrafAnc's multi-round output (later rounds are *appended* with a repeated header) and strips an `FID_` prefix from `Sample` if that is what the `.fam` matches | Module 7 `01_grafanc`, from `*_grafanc_results.txt` |
 | `ancestry/grafanc_raw.txt` | audit only | GrafAnc's own 27-column output, untouched: `Sample #SNPs GD1-3 EA1-4 AF1-3 EU1-3 SA1-2 IC1-3 Pe Pf Pa RawPe RawPf RawPa AncGroupID` (tab-delimited with a header, inferred from the author's own reader) | Module 7 |
@@ -43,9 +43,10 @@ final data, and never redone.
 1. **One key.** The sample key is the `.fam` IID. `phenotypes.tsv` `sample_id`, every VCF header,
    `ancestry_calls.tsv`, and the FLARE VCFs must carry exactly that set, in the same order where order
    matters (VCFs). The checker fails on the first mismatch.
-2. **Two hard-call sets, one sample set.** `nomaf` is the GWAS input; `maf01` is the same QC-complete
-   cohort at MAF ≥ 1 % for anyone who wants a common-variant dataset without re-running QC. Same `.fam`,
-   byte-exact. The checker refuses a bundle where they differ.
+2. **Two hard-call sets, one sample set.** `maf01` is the GWAS input — the cohort at MAF ≥ 1 %, QC-complete.
+   `nomaf` is the same QC-complete cohort with no MAF filter, for rare-variant association and for anyone who
+   wants QC-ready data without re-running QC. Same `.fam`, byte-exact, and every `maf01` site is in `nomaf`.
+   The checker refuses a bundle where either fails.
 3. **The bundle is complete or it is not a bundle.** `manifest.tsv` lists every file; the checker fails on
    the first listed path that is missing or zero bytes, and on any `.fam` IID absent from the phenotypes.
 4. **Structure is computed once, upstream, on the whole cohort — and shipped.** PC-AiR and PC-Relate run
@@ -62,7 +63,9 @@ final data, and never redone.
 
 The adapter is called per **trait × stratum × chromosome**, so the work fans out as SLURM arrays:
 `mrd` (binary), `efs` and `os` (time-to-event via `--time_col efs_time --event_col efs_event`, likewise
-`os_*`). Structure is shared — one GRM, one PC set per scale, from this bundle — so the only per-trait
+`os_*`). Hard calls come from `maf01`; the dosage VCFs are restricted to the `maf01` site list (its `.bim`) before
+extraction, so every test runs on one site set at cohort MAF ≥ 1 % with the per-stratum MAC ≥ 20 gate on top.
+Structure is shared — one GRM, one PC set per scale, from this bundle — so the only per-trait
 work is the null model (3 × K, in parallel) and the score tests (3 × K × 22, in parallel), bounded by the
 cluster's `MaxArraySize` and QOS recorded in `docs/HPC_SITE.md`.
 
@@ -73,4 +76,5 @@ cluster's `MaxArraySize` and QOS recorded in `docs/HPC_SITE.md`.
 make_handoff_manifest.sh handoff/<run_id> --run-id <run_id> --git-sha <sha> --server topmed --dups yes
 # downstream, before anything runs
 check_handoff_bundle.sh handoff/<run_id>          # exit 0 = accepted; non-zero names the first failure; no stage flag
+check_handoff_bundle.sh ladder/<rung> --chromosomes 21,22   # a module-ladder bundle built on two chromosomes
 ```
