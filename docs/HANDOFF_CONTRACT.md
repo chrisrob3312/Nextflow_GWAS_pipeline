@@ -1,0 +1,81 @@
+# Handoff contract — harmonization pipeline → GWAS pipeline
+
+**One directory, one manifest, no guessing.** The harmonization pipeline writes everything the GWAS
+pipeline needs into `handoff/<run_id>/`, lists it in `manifest.tsv`, and `check_handoff_bundle.sh`
+refuses the bundle if anything is missing, empty, mis-shaped, or mis-keyed. Every file below is named
+exactly as written; the chromosome placeholder `{N}` is 1–22 with no `chr` prefix in the file name
+(contigs *inside* VCFs are `chr`-prefixed, hg38).
+
+| File | Role downstream | Format and required content | Produced by |
+|---|---|---|---|
+| `manifest.tsv` | the contract itself | tab-separated, header `path sha256 bytes role`; one row per file below (every required path must be listed); header lines `# run_id`, `# upstream_git_sha`, `# imputation_server` (topmed \| michigan \| anvil), `# duplicates_removed` (yes \| no), `# build` (hg38). `role` is the producer's vocabulary (`hardcall_maf01`, `hardcall_nomaf`, `dosage_vcf`, `ancestry_calls`, `strata`, `cohort_pcs`, `stratum_pcs`, `structure_rds`, `flare_anc`, `phenotypes`, `covariates`, `qc_*`, `run_record`, …); the checker verifies the two hard-call roles | `make_handoff_manifest.sh` |
+| `genotypes/cohort.hardcall.maf01.bed/.bim/.fam` | **the GWAS input**: the cohort at MAF ≥ 1 %; stratum keep-files, the per-stratum MAC gate, GrafAnc audit | PLINK 1 trio; hg38; QC-complete with the cohort MAF ≥ 1 % filter applied upstream; the minor-allele-count gate (MAC ≥ 20) is still applied per stratum downstream; `.fam` IID is the sample key used everywhere else; `.bim` IDs `chr:pos:ref:alt` | Module 6 `11_final_datasets` (`*_final_maf01.*`) |
+| `genotypes/cohort.hardcall.nomaf.bed/.bim/.fam` | the full QC-complete set with **no MAF filter**: rare-variant association, and anyone who wants QC-ready data without re-running QC | PLINK 1 trio; identical `.fam` to the maf01 set; a superset of its sites — every maf01 site is in it | Module 6 `11_final_datasets` (`*_final_nomaf.*`) |
+| `genotypes/chr{N}.phased.dose.vcf.gz` + `.csi` | FLARE input (phased GT); SeqVarGDS source; Tractor extraction | bgzipped VCF, hg38, `chr{N}` contigs, phased `GT` (`|`), `FORMAT/DS` present, INFO carries the per-service quality field and the MagicalRsq-X score as `INFO/MRSQX`; sample order identical to `.fam` | Module 6 per-chromosome filtered VCFs |
+| `ancestry/ancestry_calls.tsv` | stratification, per-stratum MAC gate, the label on every result, the 21 continuous scores as covariates or figures | tab-separated, 24 columns exactly: `sample_id AncGroupID MajorGroup GD1 GD2 GD3 EA1 EA2 EA3 EA4 AF1 AF2 AF3 EU1 EU2 EU3 SA1 SA2 IC1 IC2 IC3 Pe Pf Pa`. `AncGroupID` is one of GrafAnc 1.0.0's 46 three-digit codes; `MajorGroup` is derived from its hundreds digit (1 AFR, 2 MEN, 3 EUR, 4 SAS, 5 EAS, 6 AMR, 7 OCN, 8 MIX) — GrafAnc emits no text group itself. One row per `.fam` IID, no duplicates. Made by `grafanc_to_calls.sh`, which also survives GrafAnc's multi-round output (later rounds are *appended* with a repeated header) and strips an `FID_` prefix from `Sample` if that is what the `.fam` matches | Module 7 `01_grafanc`, from `*_grafanc_results.txt` |
+| `ancestry/grafanc_raw.txt` | audit only | GrafAnc's own 27-column output, untouched: `Sample #SNPs GD1-3 EA1-4 AF1-3 EU1-3 SA1-2 IC1-3 Pe Pf Pa RawPe RawPf RawPa AncGroupID` (tab-delimited with a header, inferred from the author's own reader) | Module 7 |
+| `ancestry/strata.tsv` | the analysis unit for every downstream result | tab-separated, header `sample_id stratum`; one row per `.fam` IID; strata already bundled by the rule in `strata_rule.txt`, MIX retained as its own stratum | Module 7, `ASSIGN_STRATA` |
+| `ancestry/strata_rule.txt` | so a stratum set is reproducible | the floor, the bundling rule applied, and the list of groups bundled or dropped | Module 7 |
+| `structure/cohort.pcair.pcs.tsv` | the whole-cohort PCs for the pooled analysis and as covariates | header `sample_id PC1 … PCn`; one row per `.fam` IID | Module 6/7 PC-AiR, cohort scale |
+| `structure/strata/<stratum>.pcair.pcs.tsv` | the within-stratum PCs for each stratified GENESIS run | one file per stratum in `strata.tsv`, same header, rows = that stratum's members | Module 6/7 PC-AiR, stratum scale |
+| `structure/cohort.pcrelate.grm.rds`, `structure/cohort.pcrelate.kinship.rds` | the relatedness term in every null model | R matrices with **dimnames = `.fam` IID**; KING-robust divergence used throughout the PC-AiR / PC-Relate iteration | Module 6/7 PC-Relate |
+| `local_ancestry/flare/chr{N}.anc.vcf.gz` + `.csi` | Tractor extraction (`extract_tracts_flare.py`) | FLARE output per chromosome, **indexed by upstream** (FLARE does not index); samples identical to `.fam` | Module 7 `FLARE_LAI` |
+| `local_ancestry/flare_panels.txt` | provenance of the LAI reference | the exact FLARE `ref-panel=` sample map used: `sample<TAB>label` | Module 7 (copied from `params.flare_panel_file`) |
+| `local_ancestry/ancestry_labels.txt` | the ancestry list the adapter is given (`--ancestries`) | one label per line, **alphabetical** — the order the Tractor-GENESIS adapter reads and reports in, so a column is always identifiable by name | derived from the panel file |
+| `local_ancestry/flare_index_map.tsv` | the bridge from FLARE's numbering to those labels | header `anc_index label`; rows `0,1,2…` in the panel file's order of first appearance, which is how FLARE numbers `anc0…ancK-1`; the extraction step renames by this map so every downstream file is keyed by label | derived from the panel file |
+| `phenotypes/phenotypes.tsv` | the three GWAS outcomes, the null models, the Cox branch, covariates | tab-separated, header `FID IID sample_id mrd efs_time efs_event os_time os_event protocol <covariates…>`; `sample_id == IID` on every row (checked); `mrd` coded (0/1 or the agreed categories), `*_time` numeric, `*_event` 0/1, `NA` where unknown; `protocol` is a short code for the treatment protocol the participant was enrolled on (never free text; `NA` where unknown) — the study-level environmental covariate for env-MR-MEGA (`docs/ENV_MRMEGA.md`); **no free-text columns** (no `comments`, `cyto_text`, `death_cause`…, no `mrn`, no `dob` — derive age upstream) | the study, placed here by the harmonization run |
+| `phenotypes/covariates.txt` | what the model adjusts for | one column name per line, every name present in `phenotypes.tsv` | the study |
+| `qc/removed_duplicates.tsv` | answers "were duplicates removed upstream" | header `kept_iid removed_iid kinship reason`; header-only when nothing was removed (never a 0-byte file); consistent with `# duplicates_removed` | Module 6 kinship step |
+| `qc/sample_accounting.tsv` | n at every join | header `step n_in n_out n_removed reason` from first intake to this bundle | every Module |
+| `qc/qc_assertions.tsv` | the upstream verdicts | header `id verdict n message`; verdict is `PASS`, `FAIL` or `INFO`; any `FAIL` is refused, and a bundle with no `PASS` row is refused — "did not run" is not "passed" | every Module's `qc_assert` fragments, concatenated by Module 9 |
+| `run_record/params.tsv`, `run_record/trace.tsv` | provenance | the upstream run's resolved parameters and execution trace | Nextflow run |
+
+## One bundle, complete
+
+The bundle is delivered **once**, at M-COHORT, and it is complete: both imputation passes, MagicalRsq-X
+after each, QC, GrafAnc, strata, PC-AiR and PC-Relate at both scales, FLARE local ancestry, phenotypes.
+Nothing downstream runs on a partial bundle, so there is no stage flag — an unqualified
+`check_handoff_bundle.sh` demands everything. PC-AiR and stratification are computed once, on the
+final data, and never redone.
+
+## Six rules
+
+1. **One key.** The sample key is the `.fam` IID. `phenotypes.tsv` `sample_id`, every VCF header,
+   `ancestry_calls.tsv`, and the FLARE VCFs must carry exactly that set, in the same order where order
+   matters (VCFs). The checker fails on the first mismatch.
+2. **Two hard-call sets, one sample set.** `maf01` is the GWAS input — the cohort at MAF ≥ 1 %, QC-complete.
+   `nomaf` is the same QC-complete cohort with no MAF filter, for rare-variant association and for anyone who
+   wants QC-ready data without re-running QC. Same `.fam`, byte-exact, and every `maf01` site is in `nomaf`.
+   The checker refuses a bundle where either fails.
+3. **The bundle is complete or it is not a bundle.** `manifest.tsv` lists every file; the checker fails on
+   the first listed path that is missing or zero bytes, and on any `.fam` IID absent from the phenotypes.
+4. **Structure is computed once, upstream, on the whole cohort — and shipped.** PC-AiR and PC-Relate run
+   in the harmonization pipeline at both scales (cohort and within stratum), because the stratified runs
+   depend on quantities that need everyone together. The bundle carries the PCs at both scales and the
+   GRM; downstream ingests them and re-derives one stratum only to *verify*, never to replace. Strata are
+   assigned upstream too. Downstream computes only what is per-run: the MAC gate and the Tractor extraction.
+5. **Quality filtering happened upstream, once per imputation, with MagicalRsq-X.** The bundle carries
+   the score in `INFO/MRSQX` so the downstream can report it; it does not re-filter on raw `R2`/`DR2`.
+6. **Nothing identifiable beyond the sample ID.** Study sample IDs are fine. Free-text clinical fields,
+   MRNs and dates of birth are refused by the checker by column name.
+
+## How the GWAS consumes it — three outcomes, in parallel
+
+The adapter is called per **trait × stratum × chromosome**, so the work fans out as SLURM arrays:
+`mrd` (binary), `efs` and `os` (time-to-event via `--time_col efs_time --event_col efs_event`, likewise
+`os_*`). Hard calls come from `maf01`; the dosage VCFs are restricted to the `maf01` site list (its `.bim`) before
+extraction, so every test runs on one site set at cohort MAF ≥ 1 % with the per-stratum MAC ≥ 20 gate on top.
+Structure is shared — one GRM, one PC set per scale, from this bundle — so the only per-trait
+work is the null model (3 × K, in parallel) and the score tests (3 × K × 22, in parallel), bounded by the
+cluster's `MaxArraySize` and QOS recorded in `docs/HPC_SITE.md`.
+
+## How to use it
+
+```
+# upstream, at the end of a harmonization run
+make_handoff_manifest.sh handoff/<run_id> --run-id <run_id> --git-sha <sha> --server topmed --dups yes
+# downstream, before anything runs
+check_handoff_bundle.sh handoff/<run_id>          # exit 0 = accepted; non-zero names the first failure; no stage flag
+check_handoff_bundle.sh ladder/<rung> --chromosomes 21,22   # a module-ladder bundle built on two chromosomes
+# bcftools and Rscript must be on PATH for the VCF and GRM checks; --allow-missing-tools accepts a bundle without them and names what was SKIPPED
+```

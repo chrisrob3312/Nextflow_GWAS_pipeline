@@ -1,0 +1,4 @@
+sex
+age_at_diagnosis
+cd19_pos_pct
+storage_days
