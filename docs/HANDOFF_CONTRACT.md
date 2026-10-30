@@ -38,7 +38,7 @@ Nothing downstream runs on a partial bundle, so there is no stage flag — an un
 `check_handoff_bundle.sh` demands everything. PC-AiR and stratification are computed once, on the
 final data, and never redone.
 
-## Five rules## Five rules
+## Six rules
 
 1. **One key.** The sample key is the `.fam` IID. `phenotypes.tsv` `sample_id`, every VCF header,
    `ancestry_calls.tsv`, and the FLARE VCFs must carry exactly that set, in the same order where order
@@ -46,16 +46,16 @@ final data, and never redone.
 2. **Two hard-call sets, one sample set.** `nomaf` is the GWAS input; `maf01` is the same QC-complete
    cohort at MAF ≥ 1 % for anyone who wants a common-variant dataset without re-running QC. Same `.fam`,
    byte-exact. The checker refuses a bundle where they differ.
-2b. **The bundle is complete or it is not a bundle.** `manifest.tsv` lists every file; the checker fails on
+3. **The bundle is complete or it is not a bundle.** `manifest.tsv` lists every file; the checker fails on
    the first listed path that is missing or zero bytes, and on any `.fam` IID absent from the phenotypes.
-3. **Structure is computed once, upstream, on the whole cohort — and shipped.** PC-AiR and PC-Relate run
+4. **Structure is computed once, upstream, on the whole cohort — and shipped.** PC-AiR and PC-Relate run
    in the harmonization pipeline at both scales (cohort and within stratum), because the stratified runs
    depend on quantities that need everyone together. The bundle carries the PCs at both scales and the
    GRM; downstream ingests them and re-derives one stratum only to *verify*, never to replace. Strata are
    assigned upstream too. Downstream computes only what is per-run: the MAC gate and the Tractor extraction.
-4. **Quality filtering happened upstream, once per imputation, with MagicalRsq-X.** The bundle carries
+5. **Quality filtering happened upstream, once per imputation, with MagicalRsq-X.** The bundle carries
    the score in `INFO/MRSQX` so the downstream can report it; it does not re-filter on raw `R2`/`DR2`.
-5. **Nothing identifiable beyond the sample ID.** Study sample IDs are fine. Free-text clinical fields,
+6. **Nothing identifiable beyond the sample ID.** Study sample IDs are fine. Free-text clinical fields,
    MRNs and dates of birth are refused by the checker by column name.
 
 ## How the GWAS consumes it — three outcomes, in parallel
