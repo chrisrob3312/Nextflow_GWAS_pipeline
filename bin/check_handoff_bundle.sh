@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
 # Refuse a handoff bundle that is incomplete, mis-shaped, or mis-keyed. Exits non-zero naming the FIRST
 # failure, so the message is always one thing to fix. Run downstream before anything else.
-# usage: check_handoff_bundle.sh <bundle_dir> [--stage cohort|tractor] [--no-sha]
-#   --stage cohort   the January bundle: genotypes, ancestry calls, phenotypes, QC, run record (no local ancestry)
-#   --stage tractor  the March bundle: everything above PLUS local_ancestry/ (default)
-#   --no-sha         skip the slow checksum pass
+# usage: check_handoff_bundle.sh <bundle_dir> [--no-sha]
+#   One bundle, complete: second-pass imputation, QC, ancestry, strata, structure, local ancestry, phenotypes.
+#   --no-sha   skip the slow checksum pass
 set -euo pipefail
-B="${1:?bundle dir}"; shift; STAGE=tractor; NOSHA=""
-while [[ $# -gt 0 ]]; do case "$1" in --stage) STAGE="$2"; shift 2;; --no-sha) NOSHA="--no-sha"; shift;; *) echo "unknown arg $1" >&2; exit 1;; esac; done
-[[ "$STAGE" =~ ^(cohort|tractor)$ ]] || { echo "--stage must be cohort|tractor" >&2; exit 1; }
+B="${1:?bundle dir}"; shift; NOSHA=""
+while [[ $# -gt 0 ]]; do case "$1" in --no-sha) NOSHA="--no-sha"; shift;; *) echo "unknown arg $1" >&2; exit 1;; esac; done
 fail() { echo "HANDOFF REFUSED: $*" >&2; exit 2; }
 need() { [[ -s "$B/$1" ]] || fail "$1 is missing or empty"; }
 cd "$B" 2>/dev/null || fail "$B is not a directory"
@@ -36,10 +34,8 @@ for f in ancestry/ancestry_calls.tsv ancestry/grafanc_raw.txt ancestry/strata.ts
          qc/sample_accounting.tsv qc/qc_assertions.tsv run_record/params.tsv run_record/trace.tsv; do need "$f"; done
 [[ -e qc/removed_duplicates.tsv ]] || fail "qc/removed_duplicates.tsv must exist (may be header-only)"
 for n in $(seq 1 22); do need "genotypes/chr${n}.phased.dose.vcf.gz"; need "genotypes/chr${n}.phased.dose.vcf.gz.csi"; done
-if [[ "$STAGE" == tractor ]]; then
-  need local_ancestry/flare_panels.txt; need local_ancestry/ancestry_labels.txt
-  for n in $(seq 1 22); do need "local_ancestry/flare/chr${n}.anc.vcf.gz"; need "local_ancestry/flare/chr${n}.anc.vcf.gz.csi"; done
-fi
+need local_ancestry/flare_panels.txt; need local_ancestry/ancestry_labels.txt
+for n in $(seq 1 22); do need "local_ancestry/flare/chr${n}.anc.vcf.gz"; need "local_ancestry/flare/chr${n}.anc.vcf.gz.csi"; done
 
 # 4. both PLINK trios are internally consistent: bed bytes == 3 + ceil(n_samples/4) * n_variants,
 #    and they carry the same samples (nomaf is the superset of sites; maf01 is the same people)
@@ -55,7 +51,14 @@ NS=$(wc -l < genotypes/cohort.hardcall.nomaf.fam); NV=$(wc -l < genotypes/cohort
 # 5. one key: .fam IID == phenotypes sample_id == ancestry_calls sample_id == every VCF header
 awk '{print $2}' genotypes/cohort.hardcall.nomaf.fam | LC_ALL=C sort > .fam_iid
 H=$(head -1 phenotypes/phenotypes.tsv)
-for c in FID IID sample_id time event; do grep -qP "(^|\t)${c}(\t|$)" <<<"$H" || fail "phenotypes.tsv lacks column '$c'"; done
+for c in FID IID sample_id mrd efs_time efs_event os_time os_event; do grep -qP "(^|\t)${c}(\t|$)" <<<"$H" || fail "phenotypes.tsv lacks column '$c' (the GWAS runs MRD, EFS and OS)"; done
+# event columns are 0/1 or NA; time columns numeric or NA
+for pair in efs os; do
+  tc=$(awk -F'\t' -v n="${pair}_time" 'NR==1{for(i=1;i<=NF;i++) if($i==n) print i}' phenotypes/phenotypes.tsv)
+  ec=$(awk -F'\t' -v n="${pair}_event" 'NR==1{for(i=1;i<=NF;i++) if($i==n) print i}' phenotypes/phenotypes.tsv)
+  awk -F'\t' -v t="$tc" -v e="$ec" 'NR>1 && $e !~ /^(0|1|NA)$/ {exit 1}' phenotypes/phenotypes.tsv || fail "phenotypes.tsv ${pair}_event has a value other than 0, 1 or NA"
+  awk -F'\t' -v t="$tc" 'NR>1 && $t !~ /^(NA|[0-9]+(\.[0-9]+)?)$/ {exit 1}' phenotypes/phenotypes.tsv || fail "phenotypes.tsv ${pair}_time has a non-numeric value"
+done
 for bad in mrn dob comments cyto_text oth_features death_cause relapse_site_oth; do
   grep -qiP "(^|\t)${bad}(\t|$)" <<<"$H" && fail "phenotypes.tsv carries forbidden column '$bad'"; done
 SC=$(awk -F'\t' 'NR==1{for(i=1;i<=NF;i++) if($i=="sample_id") print i}' phenotypes/phenotypes.tsv)
@@ -101,7 +104,7 @@ fi
 
 # 6. covariates named exist; ancestry labels are ALPHABETICAL and the index map is explicit; duplicates answer is consistent
 while read -r cv; do [[ -z "$cv" ]] && continue; grep -qP "(^|\t)${cv}(\t|$)" <<<"$H" || fail "covariate '$cv' not in phenotypes.tsv"; done < phenotypes/covariates.txt
-if [[ "$STAGE" == tractor ]]; then
+if true; then
   need local_ancestry/flare_index_map.tsv
   awk '{print $2}' local_ancestry/flare_panels.txt | LC_ALL=C sort -u > .panel_labels
   LC_ALL=C sort -c local_ancestry/ancestry_labels.txt 2>/dev/null || fail "ancestry_labels.txt is not in alphabetical order"
@@ -116,4 +119,4 @@ NR_DUP=$(($(wc -l < qc/removed_duplicates.tsv) - 1))
 [[ "$DUPS" == "yes" || "$NR_DUP" -eq 0 ]] || fail "duplicates_removed=no but removed_duplicates.tsv lists $NR_DUP removals"
 grep -qP '\tPASS\t' qc/qc_assertions.tsv || fail "qc_assertions.tsv has no PASS rows — 'did not run' is not 'passed'"
 rm -f .fam_iid .ph_id .anc_id .st_id .pc_id .st_members .panel_labels .first_seen
-echo "HANDOFF ACCEPTED ($STAGE stage): $B  ($NS samples, $NV hardcall variants, server=$SERVER, duplicates_removed=$DUPS)"
+echo "HANDOFF ACCEPTED: $B  ($NS samples, $NV hardcall variants, server=$SERVER, duplicates_removed=$DUPS)"

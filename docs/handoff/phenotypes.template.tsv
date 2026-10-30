@@ -1,1 +1,1 @@
-FID	IID	sample_id	time	event	sex	age_at_diagnosis	cd19_pos_pct	storage_days
+FID\tIID\tsample_id\tmrd\tefs_time\tefs_event\tos_time\tos_event\tsex\tage_at_diagnosis\tcd19_pos_pct\tstorage_days\n

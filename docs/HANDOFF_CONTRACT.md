@@ -23,27 +23,22 @@ exactly as written; the chromosome placeholder `{N}` is 1–22 with no `chr` pre
 | `local_ancestry/flare_panels.txt` | provenance of the LAI reference | the exact FLARE `ref-panel=` sample map used: `sample<TAB>label` | Module 7 (copied from `params.flare_panel_file`) |
 | `local_ancestry/ancestry_labels.txt` | the ancestry list the adapter is given (`--ancestries`) | one label per line, **alphabetical** — the order the Tractor-GENESIS adapter reads and reports in, so a column is always identifiable by name | derived from the panel file |
 | `local_ancestry/flare_index_map.tsv` | the bridge from FLARE's numbering to those labels | header `anc_index label`; rows `0,1,2…` in the panel file's order of first appearance, which is how FLARE numbers `anc0…ancK-1`; the extraction step renames by this map so every downstream file is keyed by label | derived from the panel file |
-| `phenotypes/phenotypes.tsv` | null model, Cox branch, covariates | tab-separated, header `FID IID sample_id time event <traits…> <covariates…>`; `sample_id == IID`; `time` numeric, `event` 0/1; **no free-text columns** (no `comments`, `cyto_text`, `death_cause`…, no `mrn`, no `dob` — derive age upstream) | the study, placed here by the harmonization run |
+| `phenotypes/phenotypes.tsv` | the three GWAS outcomes, the null models, the Cox branch, covariates | tab-separated, header `FID IID sample_id mrd efs_time efs_event os_time os_event <covariates…>`; `sample_id == IID`; `mrd` coded (0/1 or the agreed categories), `*_time` numeric, `*_event` 0/1, `NA` where unknown; **no free-text columns** (no `comments`, `cyto_text`, `death_cause`…, no `mrn`, no `dob` — derive age upstream) | the study, placed here by the harmonization run |
 | `phenotypes/covariates.txt` | what the model adjusts for | one column name per line, every name present in `phenotypes.tsv` | the study |
 | `qc/removed_duplicates.tsv` | answers "were duplicates removed upstream" | header `kept_iid removed_iid kinship reason`; may be empty but must exist; consistent with `# duplicates_removed` | Module 6 kinship step |
 | `qc/sample_accounting.tsv` | n at every join | header `step n_in n_out n_removed reason` from first intake to this bundle | every Module |
 | `qc/qc_assertions.tsv` | the upstream verdicts | `id verdict n message`; a bundle with no PASS rows is refused | `qc_assert()` |
 | `run_record/params.tsv`, `run_record/trace.tsv` | provenance | the upstream run's resolved parameters and execution trace | Nextflow run |
 
-## Two bundles, one contract
+## One bundle, complete
 
-The bundle is delivered twice. **`--stage cohort`** (January, at M-COHORT) carries everything except
-`local_ancestry/` — including `structure/` and `strata.tsv` — and is enough for the per-stratum and
-pooled GENESIS runs. January is **first-pass** imputation; the second pass lands in the March re-run. **`--stage tractor`** (March, at M-COHORT-FINAL) is the same bundle regenerated on second-pass
-imputation, plus the FLARE calls, the panel file, the alphabetical label list and the index map — what
-the Tractor extraction consumes. The checker takes `--stage`; the default
-is `tractor`, so an unqualified call demands everything.
+The bundle is delivered **once**, at M-COHORT, and it is complete: both imputation passes, MagicalRsq-X
+after each, QC, GrafAnc, strata, PC-AiR and PC-Relate at both scales, FLARE local ancestry, phenotypes.
+Nothing downstream runs on a partial bundle, so there is no stage flag — an unqualified
+`check_handoff_bundle.sh` demands everything. PC-AiR and stratification are computed once, on the
+final data, and never redone.
 
-**On GrafAnc's `Sample` column.** The documentation does not say whether it carries the PLINK IID or
-`FID_IID`. Rule 1 holds either way because the normaliser maps it onto the `.fam` IID and refuses a row it
-cannot place; confirm the behaviour on the first real run and record it in `strata_rule.txt`.
-
-## Five rules
+## Five rules## Five rules
 
 1. **One key.** The sample key is the `.fam` IID. `phenotypes.tsv` `sample_id`, every VCF header,
    `ancestry_calls.tsv`, and the FLARE VCFs must carry exactly that set, in the same order where order
@@ -63,11 +58,19 @@ cannot place; confirm the behaviour on the first real run and record it in `stra
 5. **Nothing identifiable beyond the sample ID.** Study sample IDs are fine. Free-text clinical fields,
    MRNs and dates of birth are refused by the checker by column name.
 
+## How the GWAS consumes it — three outcomes, in parallel
+
+The adapter is called per **trait × stratum × chromosome**, so the work fans out as SLURM arrays:
+`mrd` (binary), `efs` and `os` (time-to-event via `--time_col efs_time --event_col efs_event`, likewise
+`os_*`). Structure is shared — one GRM, one PC set per scale, from this bundle — so the only per-trait
+work is the null model (3 × K, in parallel) and the score tests (3 × K × 22, in parallel), bounded by the
+cluster's `MaxArraySize` and QOS recorded in `docs/HPC_SITE.md`.
+
 ## How to use it
 
 ```
 # upstream, at the end of a harmonization run
 make_handoff_manifest.sh handoff/<run_id> --run-id <run_id> --git-sha <sha> --server topmed --dups yes
 # downstream, before anything runs
-check_handoff_bundle.sh handoff/<run_id>          # exit 0 = accepted; non-zero names the first failure
+check_handoff_bundle.sh handoff/<run_id>          # exit 0 = accepted; non-zero names the first failure; no stage flag
 ```
