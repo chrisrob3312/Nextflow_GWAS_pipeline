@@ -9,6 +9,8 @@
 #   --allow-missing-tools accept a bundle even when bcftools / Rscript are absent: their checks are then
 #                         SKIPPED and named in the ACCEPTED line. Without it a missing tool is a refusal,
 #                         because "did not run" must never read as "passed".
+#   The dosage VCFs must carry per-haplotype dosages: every chromosome's header declares FORMAT/HDS with
+#   Number=2, and on a sample of records (first and last chromosome) |HDS1 + HDS2 - DS| <= 0.01.
 set -euo pipefail
 B="${1:?bundle dir}"; shift; NOSHA=""
 CHROM_SPEC="1-22"; ALLOW_MISSING=0
@@ -116,14 +118,48 @@ MSG=$(awk -F'\t' -v codes="$GRAF_CODES" 'BEGIN{split("AFR MEN EUR SAS EAS AMR OC
 [[ -z "$MSG" ]] || fail "ancestry_calls.tsv: $MSG"
 head -1 ancestry/grafanc_raw.txt | grep -qP '^Sample\t' || fail "grafanc_raw.txt does not start with GrafAnc's header (first column Sample)"
 if command -v bcftools >/dev/null; then
-  for n in "${CHROMS[0]}" "${CHROMS[-1]}"; do   # first and last are enough to catch a wrong sample set or order; the full check is a run-time job
-    bcftools query -l "genotypes/chr${n}.phased.dose.vcf.gz" | cmp -s - "$T/fam_order" || fail "chr${n}.phased.dose.vcf.gz samples differ from the .fam IID list or are in a different order"
-    bcftools view -h "genotypes/chr${n}.phased.dose.vcf.gz" | grep -q '^##FORMAT=<ID=DS' || fail "chr${n}.phased.dose.vcf.gz has no FORMAT/DS"
-    bcftools view -h "genotypes/chr${n}.phased.dose.vcf.gz" | grep -q '^##INFO=<ID=MRSQX' || fail "chr${n}.phased.dose.vcf.gz has no INFO/MRSQX (MagicalRsq-X score)"
+  # Every chromosome's header (a header read is cheap): FORMAT/DS, INFO/MRSQX, and the per-haplotype dosages
+  # FORMAT/HDS declared Number=2. The header is read once into a file, so a grep that stops early cannot
+  # SIGPIPE bcftools into a false miss under pipefail.
+  for n in "${CHROMS[@]}"; do
+    v="genotypes/chr${n}.phased.dose.vcf.gz"
+    bcftools view -h "$v" > "$T/vcf_hdr" 2>/dev/null || fail "chr${n}.phased.dose.vcf.gz is not a readable VCF (bcftools view -h failed)"
+    grep -q '^##FORMAT=<ID=DS[,>]' "$T/vcf_hdr" || fail "chr${n}.phased.dose.vcf.gz has no FORMAT/DS"
+    grep -q '^##INFO=<ID=MRSQX[,>]' "$T/vcf_hdr" || fail "chr${n}.phased.dose.vcf.gz has no INFO/MRSQX (MagicalRsq-X score)"
+    grep -q '^##FORMAT=<ID=HDS[,>]' "$T/vcf_hdr" || fail "chr${n}.phased.dose.vcf.gz has no FORMAT/HDS header line: the contract requires per-haplotype dosages (an All of Us return carries them as FORMAT/AP1,AP2, which upstream Module 6 writes as HDS)"
+    grep -qE '^##FORMAT=<ID=HDS,([^"]*,)?Number=2[,>]' "$T/vcf_hdr" \
+      || fail "chr${n}.phased.dose.vcf.gz declares FORMAT/HDS with Number=$(sed -nE 's/^##FORMAT=<ID=HDS,([^"]*,)?Number=([^,>]*).*/\2/p' "$T/vcf_hdr"), not Number=2 (two haplotype ALT dosages per sample)"
+  done
+  # First and last chromosome: the sample set and order, and HDS against DS on the first $HDS_RECORDS records
+  # (enough to catch a wrong sample set, a wrong order or a broken conversion; the full check is a run-time job).
+  # |HDS1 + HDS2 - DS| <= 0.01 per sample value (servers round each number to 2-3 decimals; 1e-6 of slack absorbs
+  # binary floating point). DS and HDS both missing is accepted; one without the other, or HDS not two values, is not.
+  HDS_RECORDS=200
+  HDS_AWK='BEGIN { FS = "\t"; tol = 0.01 + 1e-6 }
+    { n++
+      for (i = 2; i + 2 <= NF; i += 3) {
+        smp = $i; d = $(i + 1); h = $(i + 2)
+        if (d == "." && h == ".") { miss++; continue }
+        k = split(h, a, ",")
+        if (d == "." || d == "" || k != 2 || a[1] == "." || a[2] == "." || a[1] == "" || a[2] == "") {
+          bad++; if (first == "") first = $1 " sample " smp " (DS " d ", HDS " h ": not two haplotype values against one DS)"; continue }
+        diff = a[1] + a[2] - d; if (diff < 0) diff = -diff
+        vals++; if (diff > maxd) maxd = diff
+        if (diff > tol) { bad++; if (first == "") first = $1 " sample " smp " (HDS " h " sums to " (a[1] + a[2]) ", DS " d ")" }
+      }
+      if (n >= max) exit }
+    END { printf "%d %d %d %d %.4f %s\n", n, vals, miss, bad, maxd, (first == "" ? "-" : first) }'
+  for n in "${CHROMS[0]}" "${CHROMS[-1]}"; do
+    v="genotypes/chr${n}.phased.dose.vcf.gz"
+    bcftools query -l "$v" | cmp -s - "$T/fam_order" || fail "chr${n}.phased.dose.vcf.gz samples differ from the .fam IID list or are in a different order"
+    # the reader stops after $HDS_RECORDS records; '|| true' absorbs the writer's SIGPIPE, and a reader that saw no record fails
+    read -r h_rec h_vals h_miss h_bad h_max h_first <<<"$( { bcftools query -f '%CHROM:%POS[\t%SAMPLE\t%DS\t%HDS]\n' "$v" 2>/dev/null || true; } | awk -v max="$HDS_RECORDS" "$HDS_AWK")"
+    [[ "$h_rec" -gt 0 ]] || fail "chr${n}.phased.dose.vcf.gz: no record could be read for the FORMAT/HDS-against-FORMAT/DS check"
+    [[ "$h_bad" -eq 0 ]] || fail "chr${n}.phased.dose.vcf.gz: FORMAT/HDS disagrees with FORMAT/DS (|HDS1+HDS2-DS| must be <= 0.01) at $h_first; $h_bad bad of the sample values in the first $h_rec records"
   done
 else
-  [[ "$ALLOW_MISSING" -eq 1 ]] || fail "bcftools is not on PATH, so the VCF sample-order, FORMAT/DS and INFO/MRSQX checks cannot run (pass --allow-missing-tools to accept the bundle with those checks SKIPPED)"
-  SKIPPED+=("VCF sample order / FORMAT/DS / INFO/MRSQX (no bcftools)")
+  [[ "$ALLOW_MISSING" -eq 1 ]] || fail "bcftools is not on PATH, so the VCF sample-order, FORMAT/DS, FORMAT/HDS and INFO/MRSQX checks cannot run (pass --allow-missing-tools to accept the bundle with those checks SKIPPED)"
+  SKIPPED+=("VCF sample order / FORMAT/DS / FORMAT/HDS / INFO/MRSQX (no bcftools)")
 fi
 
 # 5b. strata and structure: every sample has a stratum; cohort PCs and one PC file per stratum; GRM dimnames

@@ -4,7 +4,7 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; REPO="$(cd "$HERE/../.." && pwd)"
 CHECK="$REPO/bin/check_handoff_bundle.sh"; MK="$HERE/make_stub_bundle.sh"
-W="${1:-$(mktemp -d)}"; mkdir -p "$W"; pass=0; failn=0
+W="${1:-$(mktemp -d)}"; mkdir -p "$W"; pass=0; failn=0; skipn=0
 ok()   { echo "  ok   $1"; pass=$((pass + 1)); }
 bad()  { echo "  FAIL $1"; failn=$((failn + 1)); }
 TOOLS=(); command -v bcftools >/dev/null && command -v Rscript >/dev/null || TOOLS=(--allow-missing-tools)
@@ -89,4 +89,32 @@ b=$(fresh bad_role); sed -i $'s/\thardcall_maf01$/\thardcall/' "$b/manifest.tsv"
                                                            expect_refuse "wrong manifest role on a hard-call row" "$b" "manifest role of a hard-call file"
 b=$(fresh clean_on_refuse); printf 'x' >> "$b/run_record/params.tsv"; "$CHECK" "$b" "${TOOLS[@]}" >/dev/null 2>&1 || true
                                                            if ls -A "$b" | grep -q '^\.'; then bad "refused bundle left scratch dotfiles"; else ok "refused bundle left no scratch files"; fi
-echo "passed $pass, failed $failn"; [[ $failn -eq 0 ]]
+
+# Per-haplotype dosages (FORMAT/HDS). These edit the stub's real dosage VCFs, so they need bcftools; without it
+# the stub's VCFs are placeholders, the checker SKIPS its VCF checks, and these cases are reported as skipped.
+vcf_filter() { # bundle, chr, filter command...: VCF text through the filter, re-bgzipped and re-indexed in place
+  local v="$1/genotypes/chr$2.phased.dose.vcf.gz"; shift 2
+  bcftools view "$v" | "$@" | bcftools view -Oz -o "$v.tmp" - && mv "$v.tmp" "$v" && bcftools index -f -c "$v"; }
+s003_first() { # replace DS:HDS of sample S003 (column 12) on the first record; GT kept
+  awk -v cell="$1" 'BEGIN { FS = OFS = "\t" } !/^#/ && !done { split($12, a, ":"); $12 = a[1] ":" cell; done = 1 } { print }'; }
+HDS_CASES=("dosage VCF without FORMAT/HDS (chr1)" "dosage VCF without FORMAT/HDS on a middle chromosome (chr12)" "FORMAT/HDS declared Number=1"
+           "FORMAT/HDS inconsistent with FORMAT/DS (chr22)" "FORMAT/HDS missing where FORMAT/DS is present" "FORMAT/HDS off FORMAT/DS by exactly 0.01 (rounding)")
+if command -v bcftools >/dev/null; then
+  b=$(fresh no_hds); vcf_filter "$b" 1 bcftools annotate -x FORMAT/HDS -; remanifest "$b"
+                                                           expect_refuse "${HDS_CASES[0]}" "$b" "chr1.phased.dose.vcf.gz has no FORMAT/HDS header line"
+  b=$(fresh no_hds_mid); vcf_filter "$b" 12 bcftools annotate -x FORMAT/HDS -; remanifest "$b"
+                                                           expect_refuse "${HDS_CASES[1]}" "$b" "chr12.phased.dose.vcf.gz has no FORMAT/HDS header line"
+  b=$(fresh hds_number1); v="$b/genotypes/chr1.phased.dose.vcf.gz"
+  bcftools view -h "$v" | sed 's/^##FORMAT=<ID=HDS,Number=2,/##FORMAT=<ID=HDS,Number=1,/' > "$W/hds_number1.hdr"
+  bcftools reheader -h "$W/hds_number1.hdr" -o "$v.tmp" "$v" && mv "$v.tmp" "$v" && bcftools index -f -c "$v"; remanifest "$b"
+                                                           expect_refuse "${HDS_CASES[2]}" "$b" "chr1.phased.dose.vcf.gz declares FORMAT/HDS with Number=1, not Number=2"
+  b=$(fresh hds_vs_ds); vcf_filter "$b" 22 s003_first '0.500:0.250,0.750'; remanifest "$b"
+                                                           expect_refuse "${HDS_CASES[3]}" "$b" "chr22.phased.dose.vcf.gz: FORMAT/HDS disagrees with FORMAT/DS (|HDS1+HDS2-DS| must be <= 0.01) at chr22:10000 sample S003 (HDS 0.25,0.75 sums to 1, DS 0.5)"
+  b=$(fresh hds_missing); vcf_filter "$b" 1 s003_first '0.500:.'; remanifest "$b"
+                                                           expect_refuse "${HDS_CASES[4]}" "$b" "at chr1:10000 sample S003 (DS 0.5, HDS .: not two haplotype values against one DS)"
+  b=$(fresh hds_rounding); vcf_filter "$b" 1 s003_first '0.500:0.250,0.240'; remanifest "$b"
+                                                           expect_accept "${HDS_CASES[5]}" "$b"
+else
+  for c in "${HDS_CASES[@]}"; do echo "  skip $c: needs bcftools"; skipn=$((skipn + 1)); done
+fi
+echo "passed $pass, failed $failn$( [[ $skipn -gt 0 ]] && echo ", skipped $skipn (need bcftools)")"; [[ $failn -eq 0 ]]

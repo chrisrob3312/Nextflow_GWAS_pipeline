@@ -11,7 +11,7 @@ exactly as written; the chromosome placeholder `{N}` is 1–22 with no `chr` pre
 | `manifest.tsv` | the contract itself | tab-separated, header `path sha256 bytes role`; one row per file below (every required path must be listed); header lines `# run_id`, `# upstream_git_sha`, `# imputation_server` (topmed \| michigan \| anvil), `# duplicates_removed` (yes \| no), `# build` (hg38). `role` is the producer's vocabulary (`hardcall_maf01`, `hardcall_nomaf`, `dosage_vcf`, `ancestry_calls`, `strata`, `cohort_pcs`, `stratum_pcs`, `structure_rds`, `flare_anc`, `phenotypes`, `covariates`, `qc_*`, `run_record`, …); the checker verifies the two hard-call roles | `make_handoff_manifest.sh` |
 | `genotypes/cohort.hardcall.maf01.bed/.bim/.fam` | **the GWAS input**: the cohort at MAF ≥ 1 %; stratum keep-files, the per-stratum MAC gate, GrafAnc audit | PLINK 1 trio; hg38; QC-complete with the cohort MAF ≥ 1 % filter applied upstream; the minor-allele-count gate (MAC ≥ 20) is still applied per stratum downstream; `.fam` IID is the sample key used everywhere else; `.bim` IDs `chr:pos:ref:alt` | Module 6 `11_final_datasets` (`*_final_maf01.*`) |
 | `genotypes/cohort.hardcall.nomaf.bed/.bim/.fam` | the full QC-complete set with **no MAF filter**: rare-variant association, and anyone who wants QC-ready data without re-running QC | PLINK 1 trio; identical `.fam` to the maf01 set; a superset of its sites — every maf01 site is in it | Module 6 `11_final_datasets` (`*_final_nomaf.*`) |
-| `genotypes/chr{N}.phased.dose.vcf.gz` + `.csi` | FLARE input (phased GT); SeqVarGDS source; Tractor extraction | bgzipped VCF, hg38, `chr{N}` contigs, phased `GT` (`|`), `FORMAT/DS` present, INFO carries the per-service quality field and the MagicalRsq-X score as `INFO/MRSQX`; sample order identical to `.fam` | Module 6 per-chromosome filtered VCFs |
+| `genotypes/chr{N}.phased.dose.vcf.gz` + `.csi` | FLARE input (phased GT); SeqVarGDS source; Tractor extraction (per-haplotype dosages) | bgzipped VCF, hg38, `chr{N}` contigs, phased `GT` (`|`), `FORMAT/DS` present, **`FORMAT/HDS` declared `Number=2`**: per sample the expected ALT count on haplotype 1 and on haplotype 2 of the phased `GT`, with HDS1 + HDS2 = DS within 0.01 (rule 7); INFO carries the per-service quality field and the MagicalRsq-X score as `INFO/MRSQX`; sample order identical to `.fam` | Module 6 per-chromosome filtered VCFs (`FINAL_DOSAGE_VCF`, which writes an All of Us return's `FORMAT/AP1`,`AP2` as `FORMAT/HDS`) |
 | `ancestry/ancestry_calls.tsv` | stratification, per-stratum MAC gate, the label on every result, the 21 continuous scores as covariates or figures | tab-separated, 24 columns exactly: `sample_id AncGroupID MajorGroup GD1 GD2 GD3 EA1 EA2 EA3 EA4 AF1 AF2 AF3 EU1 EU2 EU3 SA1 SA2 IC1 IC2 IC3 Pe Pf Pa`. `AncGroupID` is one of GrafAnc 1.0.0's 46 three-digit codes; `MajorGroup` is derived from its hundreds digit (1 AFR, 2 MEN, 3 EUR, 4 SAS, 5 EAS, 6 AMR, 7 OCN, 8 MIX) — GrafAnc emits no text group itself. One row per `.fam` IID, no duplicates. Made by `grafanc_to_calls.sh`, which also survives GrafAnc's multi-round output (later rounds are *appended* with a repeated header) and strips an `FID_` prefix from `Sample` if that is what the `.fam` matches | Module 7 `01_grafanc`, from `*_grafanc_results.txt` |
 | `ancestry/grafanc_raw.txt` | audit only | GrafAnc's own 27-column output, untouched: `Sample #SNPs GD1-3 EA1-4 AF1-3 EU1-3 SA1-2 IC1-3 Pe Pf Pa RawPe RawPf RawPa AncGroupID` (tab-delimited with a header, inferred from the author's own reader) | Module 7 |
 | `ancestry/strata.tsv` | the analysis unit for every downstream result | tab-separated, header `sample_id stratum`; one row per `.fam` IID; strata already bundled by the rule in `strata_rule.txt`, MIX retained as its own stratum | Module 9, `ASSIGN_STRATA` |
@@ -38,7 +38,7 @@ Nothing downstream runs on a partial bundle, so there is no stage flag — an un
 `check_handoff_bundle.sh` demands everything. PC-AiR and stratification are computed once, on the
 final data, and never redone.
 
-## Six rules
+## Seven rules
 
 1. **One key.** The sample key is the `.fam` IID. `phenotypes.tsv` `sample_id`, every VCF header,
    `ancestry_calls.tsv`, and the FLARE VCFs must carry exactly that set, in the same order where order
@@ -58,6 +58,21 @@ final data, and never redone.
    the score in `INFO/MRSQX` so the downstream can report it; it does not re-filter on raw `R2`/`DR2`.
 6. **Nothing identifiable beyond the sample ID.** Study sample IDs are fine. Free-text clinical fields,
    MRNs and dates of birth are refused by the checker by column name.
+7. **Per-haplotype dosages ship with the dosages.** Every `chr{N}.phased.dose.vcf.gz` declares
+   `##FORMAT=<ID=HDS,Number=2,Type=Float,…>`: per sample, the expected ALT allele count on haplotype 1 and
+   on haplotype 2, in the order of the phased `GT`. Local-ancestry-aware association (Tractor) credits an
+   allele to the local ancestry of the haplotype carrying it, which needs HDS; without it the only fallback
+   is the phased hard calls. **HDS ≈ DS:** for every sample, `|HDS1 + HDS2 − DS| ≤ 0.01` (the servers round
+   each number on its own, minimac4 to 3 decimals and Beagle to 2, so a correct sum can differ from DS by up
+   to 0.01 and no more); DS present with HDS missing, or HDS not two values, breaks the rule. TOPMed and
+   Michigan (minimac4) write HDS themselves. **All of Us** (Beagle 5) writes the same two numbers as
+   `FORMAT/AP1` and `FORMAT/AP2`, and only when Beagle runs with `ap=true`, which the All of Us submission
+   tool cannot request, so whether All of Us returns them is unknown. When it does, upstream Module 6 writes
+   `FORMAT/HDS = AP1,AP2` and drops AP1/AP2; when it does not, upstream Module 5 stops the run, and TOPMed or
+   Michigan has to be chosen for pass two. Upstream asserts HDS on every final dosage VCF and HDS ≈ DS on its
+   first 10,000 records. The checker refuses a dosage VCF with no HDS header line or with HDS not declared
+   `Number=2` (every chromosome), and one whose HDS disagrees with DS on the first 200 records (first and
+   last chromosome).
 
 ## How the GWAS consumes it — three outcomes, in parallel
 
@@ -77,5 +92,6 @@ make_handoff_manifest.sh handoff/<run_id> --run-id <run_id> --git-sha <sha> --se
 # downstream, before anything runs
 check_handoff_bundle.sh handoff/<run_id>          # exit 0 = accepted; non-zero names the first failure; no stage flag
 check_handoff_bundle.sh ladder/<rung> --chromosomes 21,22   # a module-ladder bundle built on two chromosomes
-# bcftools and Rscript must be on PATH for the VCF and GRM checks; --allow-missing-tools accepts a bundle without them and names what was SKIPPED
+# bcftools and Rscript must be on PATH for the VCF checks (sample order, FORMAT/DS, FORMAT/HDS, HDS vs DS, INFO/MRSQX) and the GRM checks;
+# --allow-missing-tools accepts a bundle without them and names what was SKIPPED
 ```

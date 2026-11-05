@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # Build a small, internally consistent stub handoff bundle for exercising bin/check_handoff_bundle.sh.
 # usage: make_stub_bundle.sh <out_dir> [--chromosomes 1-22|21,22]
-# Nothing in it is real data: 8 samples, 6 unfiltered sites of which 4 pass MAF >= 1 %. The dosage and
-# FLARE VCFs are placeholder bytes (bcftools-level checks only run where bcftools is installed), and the
-# .rds files are placeholders for the same reason. What the stub DOES exercise is every structural rule in
-# the contract: the one key, the two hard-call sets, the subset rule, the 24-column ancestry table, strata
-# and per-stratum PCs, the alphabetical label list and the panel-order index map, the phenotype header
-# for MRD/EFS/OS, the covariate list, the QC verdicts and the manifest.
+# Nothing in it is real data: 8 samples, 6 unfiltered sites of which 4 pass MAF >= 1 %. Where bcftools is on
+# PATH the dosage VCFs are real bgzipped VCFs with a .csi: contig chr{N}, the 8 samples in .fam order, phased
+# GT, FORMAT/DS, FORMAT/HDS (Number=2, HDS1 + HDS2 = DS), INFO/R2 and INFO/MRSQX, so the checker's VCF checks
+# run on them; without bcftools they are placeholder bytes (those checks are then SKIPPED). Where Rscript is
+# on PATH the two .rds files are matrices with dimnames = the .fam IIDs; otherwise placeholders. The FLARE
+# VCFs are always placeholder bytes (the checker reads only their presence). What the stub exercises is every
+# structural rule in the contract: the one key, the two hard-call sets, the subset rule, the 24-column
+# ancestry table, strata and per-stratum PCs, the alphabetical label list and the panel-order index map, the
+# phenotype header for MRD/EFS/OS, the covariate list, the QC verdicts and the manifest.
 set -euo pipefail
 OUT="${1:?out_dir}"; shift || true
 CHROM_SPEC="1-22"
@@ -25,7 +28,28 @@ grep -v -e 'chr1:30000' -e 'chr2:30000' genotypes/cohort.hardcall.nomaf.bim > ge
 # .bed: 3 magic bytes + ceil(8/4)=2 bytes per variant
 mkbed() { local nv=$1 out=$2; { printf '\x6c\x1b\x01'; head -c $((2 * nv)) /dev/zero; } > "$out"; }
 mkbed 6 genotypes/cohort.hardcall.nomaf.bed; mkbed 4 genotypes/cohort.hardcall.maf01.bed
-for n in "${CHROMS[@]}"; do printf 'placeholder dosage vcf chr%s\n' "$n" | gzip -c > "genotypes/chr${n}.phased.dose.vcf.gz"; printf 'csi' > "genotypes/chr${n}.phased.dose.vcf.gz.csi"; done
+# dosage VCFs: three records per chromosome; per sample HDS = two haplotype ALT dosages, DS = their sum (3 dp),
+# GT = each haplotype's dosage rounded, phased
+mkdose() { local n=$1
+  { printf '##fileformat=VCFv4.2\n##contig=<ID=chr%s>\n' "$n"
+    printf '##INFO=<ID=R2,Number=1,Type=Float,Description="Estimated imputation accuracy (stub)">\n'
+    printf '##INFO=<ID=MRSQX,Number=1,Type=Float,Description="MagicalRsq-X recalibrated imputation quality (stub)">\n'
+    printf '##FORMAT=<ID=GT,Number=1,Type=String,Description="Phased genotype">\n'
+    printf '##FORMAT=<ID=DS,Number=1,Type=Float,Description="Estimated ALT dose">\n'
+    printf '##FORMAT=<ID=HDS,Number=2,Type=Float,Description="Estimated ALT dose on haplotype 1 and haplotype 2">\n'
+    printf '#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT'; printf '\t%s' "${SAMPLES[@]}"; printf '\n'
+    awk -v c="chr$n" -v ns="${#SAMPLES[@]}" 'BEGIN { split("A G C T G A", al, " ")
+      for (r = 1; r <= 3; r++) {
+        printf "%s\t%d\t%s:%d:%s:%s\t%s\t%s\t.\tPASS\tR2=0.9%d;MRSQX=0.8%d\tGT:DS:HDS", c, r * 10000, c, r * 10000, al[2*r-1], al[2*r], al[2*r-1], al[2*r], r, r
+        for (s = 1; s <= ns; s++) { h1 = ((s * 7 + r * 3) % 10) / 10; h2 = ((s * 3 + r * 5) % 10) / 10
+          printf "\t%d|%d:%.3f:%.3f,%.3f", (h1 >= 0.5), (h2 >= 0.5), h1 + h2, h1, h2 }
+        printf "\n" } }'; } ; }
+for n in "${CHROMS[@]}"; do
+  if command -v bcftools >/dev/null; then
+    mkdose "$n" | bcftools view -Oz -o "genotypes/chr${n}.phased.dose.vcf.gz" - && bcftools index -f -c "genotypes/chr${n}.phased.dose.vcf.gz"
+  else
+    printf 'placeholder dosage vcf chr%s\n' "$n" | gzip -c > "genotypes/chr${n}.phased.dose.vcf.gz"; printf 'csi' > "genotypes/chr${n}.phased.dose.vcf.gz.csi"
+  fi; done
 
 # ancestry: 24 columns; codes from GrafAnc 1.0.0; MajorGroup = hundreds digit
 { printf 'sample_id\tAncGroupID\tMajorGroup'; for c in GD1 GD2 GD3 EA1 EA2 EA3 EA4 AF1 AF2 AF3 EU1 EU2 EU3 SA1 SA2 IC1 IC2 IC3 Pe Pf Pa; do printf '\t%s' "$c"; done; printf '\n'
@@ -40,7 +64,11 @@ printf 'MajorGroup from GrafAnc AncGroupID hundreds digit; floor 50 per stratum 
 { printf 'sample_id\tPC1\tPC2\tPC3\n'; for s in "${SAMPLES[@]}"; do printf '%s\t0.01\t0.02\t0.03\n' "$s"; done; } > structure/cohort.pcair.pcs.tsv
 for S in $(awk -F'\t' 'NR>1{print $2}' ancestry/strata.tsv | sort -u); do
   { printf 'sample_id\tPC1\tPC2\n'; awk -F'\t' -v s="$S" 'NR>1 && $2==s {printf "%s\t0.01\t0.02\n", $1}' ancestry/strata.tsv; } > "structure/strata/${S}.pcair.pcs.tsv"; done
-printf 'placeholder rds' > structure/cohort.pcrelate.grm.rds; printf 'placeholder rds' > structure/cohort.pcrelate.kinship.rds
+if command -v Rscript >/dev/null; then
+  IDS="${SAMPLES[*]}" Rscript --vanilla -e 'ids <- strsplit(Sys.getenv("IDS"), " ")[[1]]; m <- diag(length(ids)); dimnames(m) <- list(ids, ids); saveRDS(m, "structure/cohort.pcrelate.grm.rds"); saveRDS(m / 2, "structure/cohort.pcrelate.kinship.rds")'
+else
+  printf 'placeholder rds' > structure/cohort.pcrelate.grm.rds; printf 'placeholder rds' > structure/cohort.pcrelate.kinship.rds
+fi
 
 # local ancestry: panel file in first-appearance order EUR, AFR, AMR -> index map 0,1,2; labels sorted
 printf 'REF001\tEUR\nREF002\tAFR\nREF003\tEUR\nREF004\tAMR\nREF005\tAFR\n' > local_ancestry/flare_panels.txt
