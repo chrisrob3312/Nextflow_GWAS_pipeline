@@ -138,10 +138,22 @@ writeLines(pca$unrels, paste0(opt$output_prefix, ".unrelated.txt"))
 
 # Relatedness summary
 kin_up <- kin_mat[upper.tri(kin_mat)]
+# Degree boundaries (Manichaikul et al. 2010): kinship 2^(-3/2) = 0.3536 between
+# duplicate/MZ and 1st degree, 2^(-5/2) = 0.1768 between 1st and 2nd, 2^(-7/2) = 0.0884
+# between 2nd and 3rd, 2^(-9/2) = 0.0442 below 3rd. The counts were shifted one degree
+# (1st counted above 0.3536); the labels are now printed from the constants the counts use,
+# as in the harmonization pipeline's Module 9.
+b_dup <- 2^(-3/2); b_1st <- 2^(-5/2); b_2nd <- 2^(-7/2); b_3rd <- 2^(-9/2)
+bnd <- function(x) sprintf("%.4f", x)
 rel_summary <- data.table(
-    degree = c("1st (>0.177)", "2nd (0.088-0.177)", "3rd (0.044-0.088)"),
-    n_pairs = c(sum(kin_up > 2^(-3/2)), sum(kin_up > 2^(-5/2) & kin_up <= 2^(-3/2)),
-                sum(kin_up > 2^(-7/2) & kin_up <= 2^(-5/2)))
+    degree  = c(paste0("duplicate_or_MZ (> ", bnd(b_dup), ")"),
+                paste0("1st (", bnd(b_1st), "-", bnd(b_dup), "]"),
+                paste0("2nd (", bnd(b_2nd), "-", bnd(b_1st), "]"),
+                paste0("3rd (", bnd(b_3rd), "-", bnd(b_2nd), "]")),
+    n_pairs = c(sum(kin_up > b_dup),
+                sum(kin_up > b_1st & kin_up <= b_dup),
+                sum(kin_up > b_2nd & kin_up <= b_1st),
+                sum(kin_up > b_3rd & kin_up <= b_2nd))
 )
 fwrite(rel_summary, paste0(opt$output_prefix, ".pcrelate.relatedness_summary.tsv"), sep = "\t")
 print(rel_summary)
