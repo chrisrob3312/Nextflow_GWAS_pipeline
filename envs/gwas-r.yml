@@ -1,0 +1,38 @@
+# gwas-r: every R step of the SLURM path (Tractor-GENESIS adapter, PC-AiR / PC-Relate,
+# strata meta-analysis, GxG, plots). Build and record it as in docs/HPC_SITE.md, "Building the envs".
+#
+# Versions. Every pin below was checked on 2026-11-09 against the channel repodata
+# (bioconda: full repodata.json; conda-forge: current_repodata.json): the version exists and
+# has a build for r-base 4.5. The five Bioconductor packages are one Bioconductor release
+# (GENESIS 2.40.0 requires exactly these minor versions of the other four) and are built for
+# R 4.5 only, which is why r-base is pinned to the 4.5 series. No conda solve was run where
+# this file was written; `conda env create` on the cluster is the first full solve.
+#
+# coxme and metafor are not optional for this pipeline: without coxme the Cox null model is
+# fitted without the kinship frailty, and without metafor the strata meta-analysis falls back
+# to fixed-effect IVW, both with only a warning. bin/check_envs.sh fails if either is missing.
+#
+# Not in this env, because only steps that are off by default need them: coloc, susieR,
+# hyprcoloc (RUN_COLOC) and pROC (optional, RUN_PRS).
+name: gwas-r
+channels:
+  - conda-forge
+  - bioconda
+  - nodefaults
+dependencies:
+  - r-base=4.5
+  - bioconductor-genesis=2.40.0
+  - bioconductor-seqarray=1.50.1
+  - bioconductor-seqvartools=1.48.0
+  - bioconductor-snprelate=1.44.0
+  - bioconductor-gwastools=1.56.0
+  - r-coxme=2.2_22
+  - r-survival=3.8_12
+  - r-metafor=5.0_1
+  - r-data.table=1.18.6.1
+  - r-r.utils=2.13.0      # data.table::fread needs R.utils to read any .gz (it decompresses into TMPDIR)
+  - r-optparse=1.8.2
+  - r-argparse=2.3.3
+  - r-qqman=0.1.9
+  - r-ggplot2=4.0.3
+  - r-matrix=1.7_6

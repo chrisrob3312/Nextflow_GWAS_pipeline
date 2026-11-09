@@ -198,6 +198,7 @@ for trait in "${TRAITS[@]}"; do
 # Combine chromosomes per stratum, then meta-analyse the strata -> POOLED
 set -eu    # no pipefail: 'zcat | head -1' below stops zcat early (SIGPIPE) by design
 SCRIPT_DIR="${GWAS_REPO}"
+source "${SCRIPT_DIR}/bin/activate_env.sh" gwas-r
 GWAS_DIR="${SCRIPT_DIR}/results/gwas/${GWAS_TRAIT}"
 IFS=',' read -ra STRATA <<< "${STRATA_LIST}"
 
@@ -262,6 +263,7 @@ submit "colocalization (6 QTL types)" ${DEPEND_COMBINE:+"$DEPEND_COMBINE"} \
 #!/bin/bash
 set -euo pipefail
 SCRIPT_DIR="${GWAS_REPO}"
+source "${SCRIPT_DIR}/bin/activate_env.sh" gwas-r
 
 # Map array ID to QTL type
 QTL_TYPES=("eqtl" "sqtl" "pqtl" "mqtl" "caqtl" "hqtl")
@@ -312,6 +314,7 @@ submit "PRS validation" ${DEPEND_VAL:+"$DEPEND_VAL"} \
 #!/bin/bash
 set -eu
 SCRIPT_DIR="${GWAS_REPO}"
+source "${SCRIPT_DIR}/bin/activate_env.sh" gwas-r
 
 echo "Comparing PRS methods across strata..."
 

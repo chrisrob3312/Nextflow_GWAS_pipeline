@@ -40,6 +40,7 @@ done
 
 # Load utilities
 source "${SCRIPT_DIR}/bin/slurm_utils.sh"
+source "${SCRIPT_DIR}/bin/activate_env.sh" gwas-r     # conda env gwas-r, TMPDIR on disk (docs/HPC_SITE.md)
 
 # Print job info
 print_slurm_info

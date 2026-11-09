@@ -33,6 +33,7 @@ for SCRIPT_DIR in "${GWAS_REPO:-}" "${SLURM_SUBMIT_DIR:-}" "$(cd "$(dirname "${B
 done
 [[ -f "${SCRIPT_DIR}/bin/slurm_utils.sh" ]] || { echo "ERROR: cannot find the repo (submit from the repo root, or export GWAS_REPO)" >&2; exit 1; }
 source "${SCRIPT_DIR}/bin/slurm_utils.sh"
+source "${SCRIPT_DIR}/bin/activate_env.sh" gwas-r     # conda env gwas-r, TMPDIR on disk (docs/HPC_SITE.md)
 print_slurm_info
 set_thread_env
 
@@ -118,6 +119,7 @@ set -euo pipefail
 # This job is not an array task: drop the array variables inherited from the task that submitted it.
 unset SLURM_ARRAY_JOB_ID SLURM_ARRAY_TASK_ID SLURM_ARRAY_TASK_COUNT SLURM_ARRAY_TASK_MIN SLURM_ARRAY_TASK_MAX SLURM_ARRAY_TASK_STEP
 source "${SCRIPT_DIR}/bin/slurm_utils.sh"
+source "${SCRIPT_DIR}/bin/activate_env.sh" gwas-r
 set_thread_env
 Rscript "${SCRIPT_DIR}/bin/run_gxg_interaction.R" \\
     --sumstats '${SUMSTATS}' --p_threshold ${GXG_P_THRESHOLD:-1e-5} --max_hits ${GXG_MAX_HITS:-200} \\
