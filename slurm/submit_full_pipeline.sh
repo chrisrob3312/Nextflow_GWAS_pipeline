@@ -85,6 +85,22 @@ if [[ "${RUN_VALIDATION}" == true && "${RUN_PRS}" != true ]]; then
     echo "REFUSED: RUN_VALIDATION=true needs RUN_PRS=true (validation summarises the PRS jobs of this launch)" >&2
     exit 2
 fi
+# Each stratum's Tractor ancestry list (CP-28) must exist before its 22-task arrays are queued:
+# submit_gwas_array.sh reads it in every task and refuses without it. A dry run lists what is
+# missing; a launch refuses.
+MISSING_ANC=()
+for stratum in "${STRATA[@]}"; do
+    [[ -s "${REPO}/data/tractor/${stratum}/ancestries.txt" ]] || MISSING_ANC+=("${REPO}/data/tractor/${stratum}/ancestries.txt")
+done
+if [[ ${#MISSING_ANC[@]} -gt 0 ]]; then
+    if [[ $DRY_RUN == 1 ]]; then
+        printf 'WARNING: missing %s (a launch would refuse)\n' "${MISSING_ANC[@]}"
+    else
+        printf 'REFUSED: missing %s (one per stratum; docs/HANDOFF_CONTRACT.md)\n' "${MISSING_ANC[@]}" >&2
+        exit 2
+    fi
+fi
+
 DEFERRED=()
 for step in PRS COLOC VALIDATION GXG; do
     v="RUN_${step}"

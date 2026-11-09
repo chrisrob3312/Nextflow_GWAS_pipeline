@@ -1,4 +1,5 @@
 #!/bin/bash
+# DEBUG-ONLY, not the execution path: an interactive wrapper; production runs use slurm/ or main.nf (shell/README.md)
 # Shell wrapper for Cohort-Specific LD Calculation
 # Maintains parity with modules/local/cohort_ld/main.nf
 

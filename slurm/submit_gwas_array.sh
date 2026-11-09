@@ -26,7 +26,13 @@
 #
 # Survival traits expect columns <trait>_time and <trait>_status in the
 # phenotype file (override with TIME_COL / EVENT_COL env vars).
+# The ancestries come from data/tractor/<stratum>/ancestries.txt; a stratum without
+# that file is refused (docs/HANDOFF_CONTRACT.md).
 # Output: results/gwas/<trait>/<stratum>/chr<N>.tractor_genesis.tsv.gz
+#
+# DRY_RUN=1 prints the Rscript command one task would run and stops; nothing is
+# activated, created or run. Outside an array it shows chromosome 1:
+#   DRY_RUN=1 bash slurm/submit_gwas_array.sh EUR OS survival
 # ============================================================================
 
 set -euo pipefail
@@ -39,14 +45,25 @@ for SCRIPT_DIR in "${GWAS_REPO:-}" "${SLURM_SUBMIT_DIR:-}" "$(cd "$(dirname "${B
 done
 [[ -f "${SCRIPT_DIR}/bin/slurm_utils.sh" ]] || { echo "ERROR: cannot find the repo (submit from the repo root, or export GWAS_REPO)" >&2; exit 1; }
 source "${SCRIPT_DIR}/bin/slurm_utils.sh"
-source "${SCRIPT_DIR}/bin/activate_env.sh" gwas-r     # conda env gwas-r, TMPDIR on disk (docs/HPC_SITE.md)
-print_slurm_info
-set_thread_env
+DRY_RUN="${DRY_RUN:-0}"
+if [[ "${DRY_RUN}" != 1 ]]; then
+    source "${SCRIPT_DIR}/bin/activate_env.sh" gwas-r     # conda env gwas-r, TMPDIR on disk (docs/HPC_SITE.md)
+    print_slurm_info
+    set_thread_env
+fi
 
 STRATUM="${1:?stratum required (EUR, AAC, LAT1, LAT2, EAS, SAS, OTHER, POOLED)}"
 TRAIT="${2:?trait required (OS, relapse, MRD)}"
 MODEL="${3:-survival}"
-CHR="${SLURM_ARRAY_TASK_ID}"
+CHR="${SLURM_ARRAY_TASK_ID:-}"
+if [[ -z "${CHR}" ]]; then
+    if [[ "${DRY_RUN}" == 1 ]]; then
+        CHR=1; echo "(dry run outside an array: showing chromosome 1 of 1-22)"
+    else
+        echo "ERROR: SLURM_ARRAY_TASK_ID is empty; this script runs as a 22-task array (chromosome = task id)" >&2
+        exit 1
+    fi
+fi
 
 echo "=============================================="
 echo "Stratum: ${STRATUM}   Trait: ${TRAIT}   Model: ${MODEL}   Chr: ${CHR}"
@@ -54,7 +71,7 @@ echo "=============================================="
 
 DATA_DIR="${SCRIPT_DIR}/data"
 RESULTS_DIR="${SCRIPT_DIR}/results/gwas/${TRAIT}/${STRATUM}"
-mkdir -p "${RESULTS_DIR}"
+[[ "${DRY_RUN}" == 1 ]] || mkdir -p "${RESULTS_DIR}"
 
 # Prefer PC-AiR / PC-Relate outputs (step 0) so every model adjusts for the
 # same ancestry PCs and the same admixture-robust GRM; fall back to data/
@@ -70,35 +87,43 @@ fi
 echo "Phenotype: ${PHENO}"; echo "GRM: ${KINSHIP}"
 TRACTOR_PREFIX="${DATA_DIR}/tractor/${STRATUM}/chr${CHR}"
 
-# Ancestral populations for the Tractor decomposition
-case "${STRATUM}" in
-    AAC)            ANCESTRIES="EUR,AFR" ;;
-    LAT1|LAT2|POOLED|OTHER) ANCESTRIES="EUR,AFR,AMR" ;;
-    *)              ANCESTRIES="${ANCESTRIES:-EUR,AFR,AMR}" ;;
-esac
-
-MODEL_ARGS=""
-if [[ "${MODEL}" == "survival" ]]; then
-    MODEL_ARGS="--time_col ${TIME_COL:-${TRAIT}_time} --event_col ${EVENT_COL:-${TRAIT}_status}"
+# Ancestral populations for the Tractor decomposition: this stratum's own list, written next to
+# its Tractor files by the extraction step (docs/HANDOFF_CONTRACT.md). No default: a stratum
+# without the file stops here, naming the path.
+ANC_FILE="${DATA_DIR}/tractor/${STRATUM}/ancestries.txt"
+STRATUM_ANCESTRIES="$(read_stratum_ancestries "${ANC_FILE}")" || exit 1
+REF_ANCESTRY="EUR"      # the adapter's reference for the LA terms; it must be in the list
+if [[ ",${STRATUM_ANCESTRIES}," != *",${REF_ANCESTRY},"* ]]; then
+    echo "ERROR: ${ANC_FILE} lists ${STRATUM_ANCESTRIES}, without the reference ancestry ${REF_ANCESTRY}" >&2
+    exit 1
 fi
 
-Rscript "${SCRIPT_DIR}/bin/tractor_genesis_adapter.R" \
-    --tractor_prefix "${TRACTOR_PREFIX}" \
-    --phenotype "${PHENO}" \
-    --trait "${TRAIT}" \
-    --model "${MODEL}" \
-    ${MODEL_ARGS} \
-    --ancestries "${ANCESTRIES}" \
-    --ref_ancestry "EUR" \
-    --kinship "${KINSHIP}" \
-    --covariates "${COVARIATES:-age,sex,PC1,PC2,PC3,PC4,PC5}" \
-    --stratum "${STRATUM}" \
-    --min_stratum_n 30 \
-    --ancestry_config "${SCRIPT_DIR}/bin/ancestry_config.R" \
-    --mac_min 10 \
-    --chromosome "${CHR}" \
-    --output_prefix "${RESULTS_DIR}/chr${CHR}" \
-    --threads "${SLURM_CPUS_PER_TASK}" \
-    --verbose
+# The command as an array: one element per argument, so nothing is split or globbed by accident
+CMD=(Rscript "${SCRIPT_DIR}/bin/tractor_genesis_adapter.R"
+    --tractor_prefix "${TRACTOR_PREFIX}"
+    --phenotype "${PHENO}"
+    --trait "${TRAIT}"
+    --model "${MODEL}")
+if [[ "${MODEL}" == "survival" ]]; then
+    CMD+=(--time_col "${TIME_COL:-${TRAIT}_time}" --event_col "${EVENT_COL:-${TRAIT}_status}")
+fi
+CMD+=(--ancestries "${STRATUM_ANCESTRIES}"
+    --ref_ancestry "${REF_ANCESTRY}"
+    --kinship "${KINSHIP}"
+    --covariates "${COVARIATES:-age,sex,PC1,PC2,PC3,PC4,PC5}"
+    --stratum "${STRATUM}"
+    --min_stratum_n 30
+    --ancestry_config "${SCRIPT_DIR}/bin/ancestry_config.R"
+    --mac_min 10
+    --chromosome "${CHR}"
+    --output_prefix "${RESULTS_DIR}/chr${CHR}"
+    --threads "${SLURM_CPUS_PER_TASK:-1}"
+    --verbose)
+
+if [[ "${DRY_RUN}" == 1 ]]; then
+    echo "[DRY-RUN] $(print_cmd "${CMD[@]}")"
+    exit 0
+fi
+"${CMD[@]}"
 
 echo "Completed chr${CHR} | ${TRAIT} (${MODEL}) | ${STRATUM}"

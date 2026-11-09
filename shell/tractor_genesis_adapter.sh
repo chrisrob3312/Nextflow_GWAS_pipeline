@@ -1,4 +1,5 @@
 #!/bin/bash
+# DEBUG-ONLY, not the execution path: does not pass --stratum/--mac_min/--chromosome; production runs use slurm/ or main.nf (shell/README.md)
 # ============================================================================
 # TractorGENESIS Shell Wrapper
 # Local ancestry-aware mixed model GWAS

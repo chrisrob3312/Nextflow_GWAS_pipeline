@@ -21,7 +21,7 @@ exactly as written; the chromosome placeholder `{N}` is 1–22 with no `chr` pre
 | `structure/cohort.pcrelate.grm.rds`, `structure/cohort.pcrelate.kinship.rds` | the relatedness term in every null model | R matrices with **dimnames = `.fam` IID**; KING-robust divergence used throughout the PC-AiR / PC-Relate iteration | Module 9 `STRUCTURE_COHORT` (PC-Relate) |
 | `local_ancestry/flare/chr{N}.anc.vcf.gz` + `.csi` | Tractor extraction (`extract_tracts_flare.py`) | FLARE output per chromosome, **indexed by upstream** (FLARE does not index); samples identical to `.fam` | Module 7 `FLARE_LAI` |
 | `local_ancestry/flare_panels.txt` | provenance of the LAI reference | the exact FLARE `ref-panel=` sample map used: `sample<TAB>label` | Module 7 (copied from `params.flare_panel_file`) |
-| `local_ancestry/ancestry_labels.txt` | the ancestry list the adapter is given (`--ancestries`) | one label per line, **alphabetical** — the order the Tractor-GENESIS adapter reads and reports in, so a column is always identifiable by name | derived from the panel file |
+| `local_ancestry/ancestry_labels.txt` | the cohort's ancestry labels; each stratum's own list, `data/tractor/<stratum>/ancestries.txt` (what the adapter is given as `--ancestries`), is the subset of these that the stratum's Tractor files carry | one label per line, **alphabetical** — the order the Tractor-GENESIS adapter reads and reports in, so a column is always identifiable by name | derived from the panel file |
 | `local_ancestry/flare_index_map.tsv` | the bridge from FLARE's numbering to those labels | header `anc_index label`; rows `0,1,2…` in the panel file's order of first appearance, which is how FLARE numbers `anc0…ancK-1`; the extraction step renames by this map so every downstream file is keyed by label | derived from the panel file |
 | `phenotypes/phenotypes.tsv` | the three GWAS outcomes, the null models, the Cox branch, covariates | tab-separated, header `FID IID sample_id mrd efs_time efs_event os_time os_event protocol <covariates…>`; `sample_id == IID` on every row (checked); `mrd` coded (0/1 or the agreed categories), `*_time` numeric, `*_event` 0/1, `NA` where unknown; `protocol` is a short code for the treatment protocol the participant was enrolled on (never free text; `NA` where unknown) — the study-level environmental covariate for env-MR-MEGA (`docs/ENV_MRMEGA.md`); **no free-text columns** (no `comments`, `cyto_text`, `death_cause`…, no `mrn`, no `dob` — derive age upstream) | the study, placed here by the harmonization run |
 | `phenotypes/covariates.txt` | what the model adjusts for | one column name per line, every name present in `phenotypes.tsv` | the study |
@@ -83,6 +83,17 @@ extraction, so every test runs on one site set at cohort MAF ≥ 1 % with the pe
 Structure is shared — one GRM, one PC set per scale, from this bundle — so the only per-trait
 work is the null model (3 × K, in parallel) and the score tests (3 × K × 22, in parallel), bounded by the
 cluster's `MaxArraySize` and QOS recorded in `docs/HPC_SITE.md`.
+
+**Each stratum's ancestry list is written downstream, not shipped.** The Tractor extraction step
+writes `data/tractor/<stratum>/ancestries.txt` next to that stratum's per-chromosome files: the
+labels from `local_ancestry/ancestry_labels.txt` that the stratum's dosage and hapcount files carry,
+one per line, in the same alphabetical order. `slurm/submit_gwas_array.sh` passes exactly that list
+as `--ancestries`; there is no cohort-wide default, and a stratum without the file is refused (the
+launcher refuses before queuing anything, each array task again, naming the path). The file is not
+part of the bundle, so `check_handoff_bundle.sh` does not look for it. The extraction step names the
+Tractor files by label (renaming FLARE's `anc0…ancK-1` through `flare_index_map.tsv`); the adapter
+falls back to position-numbered names only if label-named files are absent, and then the order of
+`ancestries.txt` would decide which ancestry each file is taken to be.
 
 ## How to use it
 

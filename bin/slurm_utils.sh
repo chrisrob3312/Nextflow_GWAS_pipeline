@@ -115,57 +115,46 @@ should_run_stratum() {
     fi
 }
 
-# Create SLURM array job script
-# Usage: create_array_job "my_job" "EUR,AAC,LAT1,LAT2" "run_analysis.sh"
-create_array_job() {
-    local job_name="$1"
-    local items="$2"
-    local script="$3"
-    local partition="${4:-normal}"
-    local time="${5:-24:00:00}"
-    local mem="${6:-32G}"
-    local cpus="${7:-8}"
-
-    # Count items
-    IFS=',' read -ra arr <<< "$items"
-    local n_items=${#arr[@]}
-    local max_idx=$((n_items - 1))
-
-    cat << EOF
-#!/bin/bash
-#SBATCH --job-name=${job_name}
-#SBATCH --array=0-${max_idx}
-#SBATCH --partition=${partition}
-#SBATCH --time=${time}
-#SBATCH --mem=${mem}
-#SBATCH --cpus-per-task=${cpus}
-#SBATCH --output=logs/${job_name}_%A_%a.out
-#SBATCH --error=logs/${job_name}_%A_%a.err
-
-# Source utilities
-source \$(dirname \$0)/slurm_utils.sh
-
-# Print job info
-print_slurm_info
-
-# Set thread environment
-set_thread_env
-
-# Get item for this array task
-ITEM=\$(get_array_item "${items}")
-echo "Processing: \$ITEM"
-
-# Run the analysis script
-${script} \$ITEM
-
-echo "Completed: \$ITEM"
-EOF
+# Print a command so it can be read, and pasted back into a shell: plain words as they are,
+# anything with spaces or special characters quoted. Used by the DRY_RUN modes.
+print_cmd() {
+    local a out=""
+    for a in "$@"; do
+        if [[ "$a" =~ ^[A-Za-z0-9_./:=,%@+-]+$ ]]; then out+=" $a"; else out+=" $(printf '%q' "$a")"; fi
+    done
+    echo "${out# }"
 }
 
-# Ancestry group definitions for this cohort
-ANCESTRIES="EUR,AAC,LAT1,LAT2,OTHER"
-PRIMARY_ANCESTRIES="EUR,AAC,LAT1,LAT2"
-MIN_STRATUM_N=30
+# Ancestry labels for one stratum's Tractor decomposition (the adapter's --ancestries), read
+# from data/tractor/<stratum>/ancestries.txt: one label per line, as in the handoff bundle's
+# local_ancestry/ancestry_labels.txt (commas also accepted; blank lines and # comments ignored).
+# Prints the labels comma-separated. Fails, naming the file, if it is missing or lists nothing,
+# or if a label is malformed or repeated. There is no default list on purpose.
+# Usage: anc="$(read_stratum_ancestries data/tractor/EUR/ancestries.txt)" || exit 1
+read_stratum_ancestries() {
+    local file="$1" labels bad dup
+    if [[ ! -f "$file" ]]; then
+        echo "ERROR: ${file} does not exist; every stratum needs its ancestries.txt (docs/HANDOFF_CONTRACT.md)" >&2
+        return 1
+    fi
+    labels="$(awk '{ sub(/#.*/, ""); gsub(/\r/, ""); n = split($0, a, /[ \t,]+/)
+                     for (i = 1; i <= n; i++) if (a[i] != "") print a[i] }' "$file")"
+    if [[ -z "$labels" ]]; then
+        echo "ERROR: ${file} lists no ancestry" >&2
+        return 1
+    fi
+    bad="$(awk '!/^[A-Za-z][A-Za-z0-9_]*$/ { print; exit }' <<< "$labels")"
+    if [[ -n "$bad" ]]; then
+        echo "ERROR: ${file}: '${bad}' is not an ancestry label" >&2
+        return 1
+    fi
+    dup="$(awk 'seen[$0]++ { print; exit }' <<< "$labels")"
+    if [[ -n "$dup" ]]; then
+        echo "ERROR: ${file} lists ${dup} twice" >&2
+        return 1
+    fi
+    paste -sd, - <<< "$labels"
+}
 
 # GWAS types to run
 GWAS_TYPES="tractor_la,standard,ancestry_specific"
@@ -179,6 +168,6 @@ QTL_TYPES="eqtl,sqtl,pqtl,mqtl,caqtl,hqtl"
 # Traits
 TRAITS="OS,relapse,MRD"
 
-# Export for use in other scripts
-export ANCESTRIES PRIMARY_ANCESTRIES MIN_STRATUM_N
+# Export for use in other scripts. There is no cohort-wide ancestry list here: each stratum's
+# list comes from its own ancestries.txt (read_stratum_ancestries above).
 export GWAS_TYPES PRS_METHODS QTL_TYPES TRAITS
