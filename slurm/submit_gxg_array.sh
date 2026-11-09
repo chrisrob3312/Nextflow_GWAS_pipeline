@@ -33,6 +33,7 @@ for SCRIPT_DIR in "${GWAS_REPO:-}" "${SLURM_SUBMIT_DIR:-}" "$(cd "$(dirname "${B
 done
 [[ -f "${SCRIPT_DIR}/bin/slurm_utils.sh" ]] || { echo "ERROR: cannot find the repo (submit from the repo root, or export GWAS_REPO)" >&2; exit 1; }
 source "${SCRIPT_DIR}/bin/slurm_utils.sh"
+rr_begin gxg              # run record row first, so a failure from here on is recorded too
 source "${SCRIPT_DIR}/bin/activate_env.sh" gwas-r     # conda env gwas-r, TMPDIR on disk (docs/HPC_SITE.md)
 print_slurm_info
 set_thread_env
@@ -79,6 +80,8 @@ PRUNE_MODE="${GXG_PRUNE_MODE:-conditional}" # conditional = test LD-correlated h
 COND_P="${GXG_COND_P:-1e-4}"                # conditional P below which an LD-correlated hit is an independent signal
 # ---------------------------------------------------------------------------
 
+IFS=',' read -ra SUMSTATS_FILES <<< "${SUMSTATS}"
+rr_args "${TRAIT} ${MODEL} ${STRATUM}" "${PHENO}" ${SUMSTATS_FILES[@]+"${SUMSTATS_FILES[@]}"}
 Rscript "${SCRIPT_DIR}/bin/run_gxg_interaction.R" \
     --sumstats "${SUMSTATS}" \
     --p_threshold "${GXG_P_THRESHOLD:-1e-5}" \
@@ -95,7 +98,7 @@ Rscript "${SCRIPT_DIR}/bin/run_gxg_interaction.R" \
     --ancestry_col "${ANCESTRY_COL}" \
     --ancestry_config "${SCRIPT_DIR}/bin/ancestry_config.R" \
     --stratum "${STRATUM}" \
-    --min_stratum_n 30 \
+    --min_stratum_n "${MIN_STRATUM_N:-30}" \
     ${TRACTOR_ARGS} \
     --output_prefix "${RESULTS_DIR}/${TRAIT}" \
     --threads "${SLURM_CPUS_PER_TASK}" \
@@ -119,6 +122,7 @@ set -euo pipefail
 # This job is not an array task: drop the array variables inherited from the task that submitted it.
 unset SLURM_ARRAY_JOB_ID SLURM_ARRAY_TASK_ID SLURM_ARRAY_TASK_COUNT SLURM_ARRAY_TASK_MIN SLURM_ARRAY_TASK_MAX SLURM_ARRAY_TASK_STEP
 source "${SCRIPT_DIR}/bin/slurm_utils.sh"
+rr_begin gxg_het "${TRAIT} ${MODEL}" "${PHENO}"
 source "${SCRIPT_DIR}/bin/activate_env.sh" gwas-r
 set_thread_env
 Rscript "${SCRIPT_DIR}/bin/run_gxg_interaction.R" \\
@@ -128,7 +132,7 @@ Rscript "${SCRIPT_DIR}/bin/run_gxg_interaction.R" \\
     --phenotype "${PHENO}" \\
     --trait ${TRAIT} --model ${MODEL} ${SURV_ARGS} \\
     --covariates ${COVARIATES} --ancestry_col ${ANCESTRY_COL} \\
-    --ancestry_config "${SCRIPT_DIR}/bin/ancestry_config.R" --min_stratum_n 30 \\
+    --ancestry_config "${SCRIPT_DIR}/bin/ancestry_config.R" --min_stratum_n ${MIN_STRATUM_N:-30} \\
     --output_prefix "${RESULTS_DIR}/${TRAIT}.het" --threads 16
 EOF
 fi

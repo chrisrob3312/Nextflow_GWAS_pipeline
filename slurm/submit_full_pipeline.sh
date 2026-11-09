@@ -21,6 +21,10 @@
 # Partition and account are put on every sbatch command line by submit() below (an #SBATCH
 # line cannot read a variable), and every job log is an absolute path under LOG_DIR
 # (default <repo>/logs). To submit one child script by hand, see docs/HPC_SITE.md.
+#
+# Run record (bin/run_record.sh): every launch gets results/run_record/<run_id>/ with
+# params.tsv (every number-changing switch) written now, one trace row per task written by
+# the task, and trace.tsv + summary.md written by a finalise job that waits on everything.
 # ============================================================================
 
 set -euo pipefail
@@ -51,7 +55,10 @@ export LOG_DIR
 [[ $DRY_RUN == 1 ]] || mkdir -p "${LOG_DIR}"
 
 # ---------------------------------------------------------------------------
-# Customisable via environment variables (defaults for the leukemia cohort):
+# Customisable via environment variables (defaults for the leukemia cohort). The defaults of
+# every number-changing switch live in one table, RR_SWITCHES in bin/run_record.sh;
+# rr_resolve_switches fills in the unset ones and exports them, so every job sees the value
+# that params.tsv records.
 #   STRATA_LIST="EUR,AAC,LAT1,LAT2,OTHER"   ancestry strata (LAT1/LAT2 separate; OTHER = EAS+SAS+small groups)
 #   TRAITS_LIST="OS,DFS,MRD"                any phenotype columns
 #   SURVIVAL_TRAITS="OS,DFS"                traits run as time-to-event (<trait>_time, <trait>_status);
@@ -62,20 +69,17 @@ export LOG_DIR
 #   GXG_USE_DEFAULT_LOCI=true|false         include the default known-leukemia-loci table
 #   LOG_DIR=/abs/path                       where every job log goes (default <repo>/logs)
 #   RUN_PRS / RUN_COLOC / RUN_VALIDATION / RUN_GXG = true|false   steps 3-6 (default false)
+#   MIN_STRATUM_N=30  MAC_MIN=10            smallest stratum; minor allele count per ancestry term
 # ---------------------------------------------------------------------------
-export STRATA_LIST="${STRATA_LIST:-EUR,AAC,LAT1,LAT2,OTHER}"
-export TRAITS_LIST="${TRAITS_LIST:-OS,DFS,MRD}"
+source "${REPO}/bin/run_record.sh"
+rr_refuse_unknown_switches || exit 2
+rr_resolve_switches
 IFS=',' read -ra STRATA <<< "${STRATA_LIST}"
 IFS=',' read -ra TRAITS <<< "${TRAITS_LIST}"
-SURVIVAL_TRAITS="${SURVIVAL_TRAITS:-OS,DFS}"
-export COVARIATES="${COVARIATES:-age,sex,PC1,PC2,PC3,PC4,PC5}"
-export GXG_CUSTOM_VARIANTS="${GXG_CUSTOM_VARIANTS:-}"
-export GXG_USE_DEFAULT_LOCI="${GXG_USE_DEFAULT_LOCI:-true}"
 
 # Steps 3-6 run only when asked for. Anything but true/false is refused rather than guessed.
 for step in PRS COLOC VALIDATION GXG; do
     v="RUN_${step}"
-    export "${v}=${!v:-false}"
     case "${!v}" in
         true|false) ;;
         *) echo "REFUSED: ${v}=${!v}; use true or false" >&2; exit 2 ;;
@@ -106,6 +110,19 @@ for step in PRS COLOC VALIDATION GXG; do
     v="RUN_${step}"
     [[ "${!v}" == true ]] || DEFERRED+=("${step}")
 done
+RR_DEFERRED="${DEFERRED[*]:-none}"
+
+# Run record: the run_id is computed once, here, and exported with the directory, so every job
+# of this launch writes into the same results/run_record/<run_id>/.
+RR_ROOT="${REPO}/results/run_record"
+if [[ $DRY_RUN == 1 ]]; then
+    GWAS_RUN_ID="$(rr_preview_run_id "${RR_ROOT}")"
+else
+    GWAS_RUN_ID="$(rr_claim_run_dir "${RR_ROOT}")"
+fi
+GWAS_RUN_DIR="${RR_ROOT}/${GWAS_RUN_ID}"
+export GWAS_RUN_ID GWAS_RUN_DIR
+[[ $DRY_RUN == 1 ]] || rr_write_launch_record "${GWAS_RUN_DIR}" "$0" "$@"
 
 trait_model() { [[ ",${SURVIVAL_TRAITS}," == *",$1,"* ]] && echo survival || echo binary; }
 
@@ -120,6 +137,12 @@ echo "Traits:    ${TRAITS[*]}"
 echo "Partition: ${SLURM_PARTITION}"
 echo "Account:   ${SLURM_ACCOUNT}"
 echo "Logs:      ${LOG_DIR}"
+if [[ $DRY_RUN == 1 ]]; then
+    echo "Record:    ${GWAS_RUN_DIR} (dry run: not created)"
+else
+    echo "Record:    ${GWAS_RUN_DIR}"
+fi
+echo "Switches you set: $(awk -F'\t' 'NR > 1 && $3 == "environment" {printf "%s%s=%s", sep, $1, $2; sep = " "} END {if (!sep) printf "none"}' <(rr_params_tsv))"
 echo "=============================================="
 # Printed on every launch, so the log shows these steps were left out on purpose
 if [[ ${#DEFERRED[@]} -gt 0 ]]; then
@@ -141,6 +164,7 @@ SBATCH_SITE=(--parsable --export=ALL --partition="${SLURM_PARTITION}" --account=
              --kill-on-invalid-dep=yes)
 JOB=""
 DRY_N=0
+ALL_JOBS=()          # every job id, for the finalise job's afterany dependency
 submit() {
     local label="$1"; shift
     if [[ $DRY_RUN == 1 ]]; then
@@ -150,7 +174,9 @@ submit() {
         JOB=$(sbatch "${SBATCH_SITE[@]}" "$@")
         JOB="${JOB%%;*}"                       # --parsable prints "jobid" or "jobid;cluster"
         echo "  ${label}: job ${JOB}"
+        [[ "${NOTE_JOB:-1}" == 0 ]] || rr_note_job "${GWAS_RUN_DIR}" "${label}" "${JOB}"
     fi
+    ALL_JOBS+=("${JOB}")
 }
 
 # ============================================================================
@@ -214,6 +240,8 @@ for trait in "${TRAITS[@]}"; do
 # Combine chromosomes per stratum, then meta-analyse the strata -> POOLED
 set -eu    # no pipefail: 'zcat | head -1' below stops zcat early (SIGPIPE) by design
 SCRIPT_DIR="${GWAS_REPO}"
+source "${SCRIPT_DIR}/bin/slurm_utils.sh"
+rr_begin combine "${GWAS_TRAIT} ${STRATA_LIST}"
 source "${SCRIPT_DIR}/bin/activate_env.sh" gwas-r
 GWAS_DIR="${SCRIPT_DIR}/results/gwas/${GWAS_TRAIT}"
 IFS=',' read -ra STRATA <<< "${STRATA_LIST}"
@@ -279,11 +307,14 @@ submit "colocalization (6 QTL types)" ${DEPEND_COMBINE:+"$DEPEND_COMBINE"} \
 #!/bin/bash
 set -euo pipefail
 SCRIPT_DIR="${GWAS_REPO}"
+source "${SCRIPT_DIR}/bin/slurm_utils.sh"
+rr_begin coloc
 source "${SCRIPT_DIR}/bin/activate_env.sh" gwas-r
 
 # Map array ID to QTL type
 QTL_TYPES=("eqtl" "sqtl" "pqtl" "mqtl" "caqtl" "hqtl")
 QTL_TYPE="${QTL_TYPES[$((SLURM_ARRAY_TASK_ID - 1))]}"
+rr_args "${QTL_TYPE}" "${SCRIPT_DIR}/results/gwas/POOLED.sumstats.gz"
 
 echo "Running colocalization for ${QTL_TYPE}..."
 
@@ -330,6 +361,8 @@ submit "PRS validation" ${DEPEND_VAL:+"$DEPEND_VAL"} \
 #!/bin/bash
 set -eu
 SCRIPT_DIR="${GWAS_REPO}"
+source "${SCRIPT_DIR}/bin/slurm_utils.sh"
+rr_begin validation "${TRAITS_LIST}"
 source "${SCRIPT_DIR}/bin/activate_env.sh" gwas-r
 
 echo "Comparing PRS methods across strata..."
@@ -372,6 +405,19 @@ else
 fi
 
 # ============================================================================
+# Run record finalise: once every job above has ended, however it ended (afterany), pull
+# State, MaxRSS and Elapsed from sacct into trace.tsv and write summary.md
+# ============================================================================
+echo ""
+echo "Submitting the run record finalise job..."
+DEPEND_ALL="$(IFS=:; echo "${ALL_JOBS[*]}")"
+# NOTE_JOB=0: the finalise job is not one of the jobs it reports on, so it stays out of jobs.tsv
+NOTE_JOB=0 submit "run record finalise" ${DEPEND_ALL:+--dependency=afterany:"${DEPEND_ALL}"} \
+    --output="${LOG_DIR}/run_record_finalize_%j.out" \
+    "${REPO}/bin/run_record_finalize.sh" "${GWAS_RUN_DIR}"
+[[ $DRY_RUN == 1 ]] || printf 'finalise_job\t%s\n' "${JOB}" >> "${GWAS_RUN_DIR}/run_info.tsv"
+
+# ============================================================================
 # Summary
 # ============================================================================
 echo ""
@@ -384,6 +430,7 @@ echo "GWAS jobs: ${#TRAITS[@]} traits × ${#STRATA[@]} strata × 22 chromosomes"
 [[ "${RUN_GXG}" == true ]]   && echo "GxG interaction: ${#TRAITS[@]} traits × 8 strata (+ ancestry heterogeneity)"
 if [[ ${#DEFERRED[@]} -gt 0 ]]; then echo "deferred: ${DEFERRED[*]} (RUN_*=false)"; fi
 echo "Logs: ${LOG_DIR}"
+echo "Run record: ${GWAS_RUN_DIR} (trace.tsv and summary.md once the finalise job has run)"
 echo ""
 echo "Monitor with: squeue -u \$USER"
 echo "Cancel all: scancel -u \$USER"

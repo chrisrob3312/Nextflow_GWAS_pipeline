@@ -6,6 +6,9 @@
 #   source /path/to/slurm_utils.sh
 # ============================================================================
 
+# The run record (rr_begin, ...; bin/run_record.sh), so every job that sources this file has it
+source "$(dirname "${BASH_SOURCE[0]}")/run_record.sh"
+
 # Check if running under SLURM
 is_slurm_job() {
     [[ -n "${SLURM_JOB_ID:-}" ]]

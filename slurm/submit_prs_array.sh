@@ -40,6 +40,7 @@ done
 
 # Load utilities
 source "${SCRIPT_DIR}/bin/slurm_utils.sh"
+rr_begin prs              # run record row first, so a failure from here on is recorded too
 source "${SCRIPT_DIR}/bin/activate_env.sh" gwas-r     # conda env gwas-r, TMPDIR on disk (docs/HPC_SITE.md)
 
 # Print job info
@@ -78,6 +79,7 @@ LOCAL_ANC="${DATA_DIR}/local_ancestry/cohort.msp.tsv.gz"
 PHENO="${DATA_DIR}/phenotypes/phenotypes.tsv"
 
 # Run PRS calculation
+rr_args "${TRAIT} ${METHOD}" "${PHENO}"
 Rscript "${SCRIPT_DIR}/bin/calculate_prs_admixed.R" \
     --method "${METHOD}" \
     --sumstats_dir "${SUMSTATS_DIR}" \

@@ -135,6 +135,44 @@ own line: without them the adapter and the meta-analysis would still run, on a w
 ~2 GB `.gz` with `fread()`. Set `TEST_GZ=/path/to/file.gz` to read a real chromosome file instead
 of the generated one. Its last line is `test_job_env: PASS` or `FAIL`.
 
+## Run record (B-03)
+
+Every launch of `slurm/submit_full_pipeline.sh` writes `results/run_record/<run_id>/`
+(`results/` is not committed):
+
+| file | written by | content |
+|---|---|---|
+| `params.tsv` | the launcher, before any job | every number-changing switch: `param`, `value`, `set_by` (`environment`, `default`, or `job` for a file the job picks at run time) |
+| `run_info.tsv` | the launcher | run id, git commit, uncommitted changes yes/no, launch time and host, partition, account, deferred steps, the finalise job id |
+| `jobs.tsv` | the launcher | every job it submitted: label, job id |
+| `trace.d/*.tsv` | each task, for itself | one row per task (see below) |
+| `trace.tsv` | the finalise job | all rows, plus `state`, `max_rss`, `elapsed` from `sacct` |
+| `summary.md` | the finalise job | tasks per step, exit codes, largest MaxRSS, longest Elapsed, the tasks that did not exit 0 |
+
+`run_id` is `<yyyymmdd-HHMM>_<git commit>_<n>`, computed once at launch and passed to every job;
+`n` keeps two launches in the same minute on the same commit apart. A trace row holds: step, Slurm
+ids, host, env and the sha256 of its yml (from `envs.tsv`), the sha256 of the job script, the
+command line, the md5 of each input, start, end and exit status, and the adapter's counts (`NA`:
+the adapter writes no file with them yet). Each task writes its own file, so concurrent array tasks
+never write to the same file. The row is written when the task starts, before the env is activated,
+and rewritten when it ends, so a task that fails at activation still has a row; a task killed by
+Slurm's time limit records exit 143, and one killed outright (out of memory) gets its exit status
+from `sacct` in `trace.tsv` (`exit_from` says which). Tasks that never started (cancelled after a
+failed dependency) are listed from `sacct` too.
+
+The finalise job (`bin/run_record_finalize.sh`) is submitted last, with
+`--dependency=afterany:<every job>`: it starts once all of them have ended, however they ended. It
+can be re-run by hand at any time: `bin/run_record_finalize.sh results/run_record/<run_id>`. Jobs
+submitted later by a running job (the GxG heterogeneity job) are not waited for; re-run it after
+them. A script submitted by hand, without the launcher, writes to `results/run_record/direct_<job id>/`.
+
+In R: `trace <- read.delim("results/run_record/<run_id>/trace.tsv", na.strings = "NA")`.
+
+The switch names are the ones the scripts read; their defaults are in `RR_SWITCHES` in
+`bin/run_record.sh`. The plan's `STRATUM_MIN_N` is `MIN_STRATUM_N` in the scripts; `PC_SCALE`,
+`MRMEGA_PCS` and `BUNDLE_RULES` are read by no script. The launcher refuses to start if any of these
+four is set, rather than ignore it.
+
 ## Site notes
 
 (What was fetched by hand and when: flare.jar version, Tractor commit, env-MR-MEGA version.)

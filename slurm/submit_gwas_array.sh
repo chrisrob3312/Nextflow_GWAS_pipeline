@@ -47,6 +47,7 @@ done
 source "${SCRIPT_DIR}/bin/slurm_utils.sh"
 DRY_RUN="${DRY_RUN:-0}"
 if [[ "${DRY_RUN}" != 1 ]]; then
+    rr_begin gwas         # run record row first, so a failure from here on is recorded too
     source "${SCRIPT_DIR}/bin/activate_env.sh" gwas-r     # conda env gwas-r, TMPDIR on disk (docs/HPC_SITE.md)
     print_slurm_info
     set_thread_env
@@ -112,9 +113,9 @@ CMD+=(--ancestries "${STRATUM_ANCESTRIES}"
     --kinship "${KINSHIP}"
     --covariates "${COVARIATES:-age,sex,PC1,PC2,PC3,PC4,PC5}"
     --stratum "${STRATUM}"
-    --min_stratum_n 30
+    --min_stratum_n "${MIN_STRATUM_N:-30}"
     --ancestry_config "${SCRIPT_DIR}/bin/ancestry_config.R"
-    --mac_min 10
+    --mac_min "${MAC_MIN:-10}"
     --chromosome "${CHR}"
     --output_prefix "${RESULTS_DIR}/chr${CHR}"
     --threads "${SLURM_CPUS_PER_TASK:-1}"
@@ -124,6 +125,8 @@ if [[ "${DRY_RUN}" == 1 ]]; then
     echo "[DRY-RUN] $(print_cmd "${CMD[@]}")"
     exit 0
 fi
+# Run record: the command line and inputs (phenotype, GRM, ancestry list, this chromosome's Tractor files)
+rr_args "$(print_cmd "${CMD[@]}")" "${PHENO}" "${KINSHIP}" "${ANC_FILE}" "${TRACTOR_PREFIX}".*
 "${CMD[@]}"
 
 echo "Completed chr${CHR} | ${TRAIT} (${MODEL}) | ${STRATUM}"
