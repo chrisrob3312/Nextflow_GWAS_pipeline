@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# Fake sbatch for tests/test_chassis.sh. It records every call in $FAKE_SLURM_DIR/sbatch.log,
+# keeps the job script as $FAKE_SLURM_DIR/jobs/<id>.sh (from the file named, or from standard
+# input, as real sbatch reads a heredoc), and prints a job id.
+#
+# With FAKE_SBATCH_RUN=1 it also runs the job at once, synchronously (so dependencies are met
+# by order), the way Slurm does: from a copy of the script in a spool directory, in the
+# directory sbatch was called from, with SLURM_JOB_ID, SLURM_ARRAY_*, SLURM_CPUS_PER_TASK and
+# SLURM_SUBMIT_DIR set, output to --output / --error. Each task adds accounting lines to
+# $FAKE_SLURM_DIR/sacct.db for the fake sacct (MaxRSS is always 2048K).
+#
+# Only the --option=value form is accepted, which is the form the pipeline uses.
+set -euo pipefail
+D="${FAKE_SLURM_DIR:?FAKE_SLURM_DIR must be set}"
+mkdir -p "$D/jobs" "$D/spool"
+id=$(( $(cat "$D/next_id" 2>/dev/null || echo 1000) + 1 ))
+echo "$id" > "$D/next_id"
+printf 'id=%s' "$id" >> "$D/sbatch.log"; printf ' %q' "$@" >> "$D/sbatch.log"; printf '\n' >> "$D/sbatch.log"
+
+parsable=0; array=""; cpus=""; out=""; err=""; name=""; partition=""; account=""; script=""; args=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --parsable)         parsable=1 ;;
+        --array=*)          array="${1#*=}" ;;
+        --cpus-per-task=*)  cpus="${1#*=}" ;;
+        --output=*)         out="${1#*=}" ;;
+        --error=*)          err="${1#*=}" ;;
+        --job-name=*)       name="${1#*=}" ;;
+        --partition=*)      partition="${1#*=}" ;;
+        --account=*)        account="${1#*=}" ;;
+        --*=*)              ;;      # --time, --mem, --dependency, --export, --kill-on-invalid-dep ...
+        -*)                 echo "fake sbatch: option form not handled: $1" >&2; exit 2 ;;
+        *)                  script="$1"; shift; args=("$@"); break ;;
+    esac
+    shift
+done
+if [[ -n "$script" ]]; then cp "$script" "$D/jobs/${id}.sh"; else cat > "$D/jobs/${id}.sh"; fi
+
+# #SBATCH lines fill in what the command line did not give (the command line wins, as in Slurm)
+while IFS= read -r line; do
+    [[ "$line" == "#!"* || -z "$line" ]] && continue
+    [[ "$line" == "#"* ]] || break
+    case "$line" in
+        "#SBATCH --array="*)         [[ -n "$array" ]] || array="${line#*=}" ;;
+        "#SBATCH --cpus-per-task="*) [[ -n "$cpus" ]]  || cpus="${line#*=}" ;;
+        "#SBATCH --output="*)        [[ -n "$out" ]]   || out="${line#*=}" ;;
+        "#SBATCH --error="*)         [[ -n "$err" ]]   || err="${line#*=}" ;;
+        "#SBATCH --job-name="*)      [[ -n "$name" ]]  || name="${line#*=}" ;;
+    esac
+done < "$D/jobs/${id}.sh"
+
+if [[ $parsable == 1 ]]; then echo "$id"; else echo "Submitted batch job $id"; fi
+[[ "${FAKE_SBATCH_RUN:-0}" == 1 ]] || exit 0
+
+tasks=()
+if [[ -n "$array" ]]; then
+    for part in ${array//,/ }; do
+        if [[ "$part" == *-* ]]; then tasks+=($(seq "${part%-*}" "${part#*-}")); else tasks+=("$part"); fi
+    done
+else
+    tasks=("")
+fi
+max="${tasks[${#tasks[@]}-1]}"
+for t in "${tasks[@]}"; do
+    if [[ -n "$t" ]]; then jid=$(( id * 1000 + t )); acct_id="${id}_${t}"; else jid="$id"; acct_id="$id"; fi
+    spool="$D/spool/job${jid}"; mkdir -p "$spool"; cp "$D/jobs/${id}.sh" "$spool/slurm_script"
+    o="${out:-slurm-%j.out}"; [[ -n "$t" && -z "$out" ]] && o="slurm-%A_%a.out"
+    e="${err:-$o}"
+    sub() { local p="$1"; p="${p//%j/$jid}"; p="${p//%A/$id}"; p="${p//%a/$t}"; p="${p//%x/${name:-job}}"; printf '%s' "$p"; }
+    o="$(sub "$o")"; e="$(sub "$e")"
+    envs=(SLURM_JOB_ID="$jid" SLURM_JOB_NAME="${name:-job}" SLURM_SUBMIT_DIR="$PWD"
+          SLURM_JOB_PARTITION="$partition" SLURM_JOB_ACCOUNT="$account" SLURMD_NODENAME=fakenode)
+    [[ -n "$cpus" ]] && envs+=(SLURM_CPUS_PER_TASK="$cpus")
+    unset_args=(-u SLURM_ARRAY_JOB_ID -u SLURM_ARRAY_TASK_ID -u SLURM_ARRAY_TASK_MAX -u SLURM_ARRAY_TASK_MIN -u SLURM_ARRAY_TASK_COUNT)
+    [[ -n "$t" ]] && envs+=(SLURM_ARRAY_JOB_ID="$id" SLURM_ARRAY_TASK_ID="$t" SLURM_ARRAY_TASK_MAX="$max"
+                            SLURM_ARRAY_TASK_MIN="${tasks[0]}" SLURM_ARRAY_TASK_COUNT="${#tasks[@]}")
+    start=$(date +%s); rc=0
+    if [[ "$e" == "$o" ]]; then
+        env "${unset_args[@]}" "${envs[@]}" bash "$spool/slurm_script" ${args[@]+"${args[@]}"} > "$o" 2>&1 || rc=$?
+    else
+        env "${unset_args[@]}" "${envs[@]}" bash "$spool/slurm_script" ${args[@]+"${args[@]}"} > "$o" 2> "$e" || rc=$?
+    fi
+    el=$(( $(date +%s) - start ))
+    state=COMPLETED; [[ $rc -eq 0 ]] || state=FAILED
+    printf '%s|%s|%s:0||00:00:%02d\n%s.batch|%s|%s:0|2048K|00:00:%02d\n' \
+        "$acct_id" "$state" "$rc" "$el" "$acct_id" "$state" "$rc" "$el" >> "$D/sacct.db"
+done

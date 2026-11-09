@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Fake sacct for tests/test_chassis.sh. Answers exactly the call bin/run_record.sh makes,
+#   sacct -j ID[,ID...] --noheader --parsable2 --format=JobID,State,ExitCode,MaxRSS,Elapsed
+# from the lines the fake sbatch wrote to $FAKE_SLURM_DIR/sacct.db. Any other form is an error,
+# so a change in how the pipeline calls sacct shows up in the test.
+set -euo pipefail
+D="${FAKE_SLURM_DIR:?FAKE_SLURM_DIR must be set}"
+ids=""; fmt=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -j)                    ids="$2"; shift 2 ;;
+        --noheader|--parsable2) shift ;;
+        --format=*)            fmt="${1#*=}"; shift ;;
+        *)                     echo "fake sacct: not handled: $1" >&2; exit 2 ;;
+    esac
+done
+[[ "$fmt" == "JobID,State,ExitCode,MaxRSS,Elapsed" ]] || { echo "fake sacct: unexpected --format=$fmt" >&2; exit 2; }
+echo "sacct -j ${ids}" >> "$D/sacct.log"
+[[ -f "$D/sacct.db" ]] || exit 0
+IFS=',' read -ra want <<< "$ids"
+for w in "${want[@]}"; do
+    awk -F'|' -v w="$w" '{ base = $1; sub(/\..*$/, "", base); if (base == w || index(base, w "_") == 1) print }' "$D/sacct.db"
+done
