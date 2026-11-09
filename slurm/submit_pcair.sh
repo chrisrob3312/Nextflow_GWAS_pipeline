@@ -1,11 +1,10 @@
 #!/bin/bash
 #SBATCH --job-name=pcair_pcrelate
-#SBATCH --partition=normal
 #SBATCH --time=12:00:00
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=16
-#SBATCH --output=logs/pcair_%j.out
-#SBATCH --error=logs/pcair_%j.err
+# --partition, --account, --output and --error come from the sbatch command line
+# (slurm/submit_full_pipeline.sh, or the direct-submit form in docs/HPC_SITE.md).
 
 # ============================================================================
 # STEP 0: GENESIS PC-AiR + PC-Relate (once per cohort, before every model)
@@ -18,12 +17,20 @@
 #   results/pcair/cohort.phenotypes.with_pcs.tsv  phenotype with PC1..PCn replaced
 # submit_gwas_array.sh and submit_gxg_array.sh pick these up automatically.
 #
-# Usage: sbatch submit_pcair.sh
+# Usage (normally submitted by slurm/submit_full_pipeline.sh; by hand, from the repo root,
+# with the site arguments of docs/HPC_SITE.md "Submitting one script by hand"):
+#   sbatch <site args> slurm/submit_pcair.sh
 # ============================================================================
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Repo root. Slurm runs a batch script from a copy in its spool directory, so this file's own
+# path does not lead back to the repo inside a job. The launcher exports GWAS_REPO; a direct
+# sbatch from the repo root leaves the repo in SLURM_SUBMIT_DIR; `bash slurm/...` uses the path.
+for SCRIPT_DIR in "${GWAS_REPO:-}" "${SLURM_SUBMIT_DIR:-}" "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; do
+    [[ -f "${SCRIPT_DIR}/bin/slurm_utils.sh" ]] && break
+done
+[[ -f "${SCRIPT_DIR}/bin/slurm_utils.sh" ]] || { echo "ERROR: cannot find the repo (submit from the repo root, or export GWAS_REPO)" >&2; exit 1; }
 source "${SCRIPT_DIR}/bin/slurm_utils.sh"
 print_slurm_info
 set_thread_env

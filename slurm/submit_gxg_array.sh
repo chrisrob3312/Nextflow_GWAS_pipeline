@@ -1,12 +1,11 @@
 #!/bin/bash
 #SBATCH --job-name=gxg_interaction
 #SBATCH --array=0-7
-#SBATCH --partition=normal
 #SBATCH --time=12:00:00
 #SBATCH --mem=32G
 #SBATCH --cpus-per-task=16
-#SBATCH --output=logs/gxg_%A_%a.out
-#SBATCH --error=logs/gxg_%A_%a.err
+# --partition, --account, --output and --error come from the sbatch command line
+# (slurm/submit_full_pipeline.sh, or the direct-submit form in docs/HPC_SITE.md).
 
 # ============================================================================
 # SLURM Array Job: GxG (Epistasis) Interaction Tests on GWAS Hits
@@ -16,16 +15,23 @@
 # Strata with N < 30 are skipped automatically by the script.
 # A final non-array job computes ancestry heterogeneity of the interactions.
 #
-# Usage:
-#   sbatch submit_gxg_array.sh <trait> [model]
-#   sbatch submit_gxg_array.sh OS survival
-#   sbatch submit_gxg_array.sh relapse binary
-#   sbatch submit_gxg_array.sh MRD binary
+# Usage (normally submitted by slurm/submit_full_pipeline.sh; by hand, from the repo root,
+# with the site arguments of docs/HPC_SITE.md "Submitting one script by hand"):
+#   sbatch <site args> slurm/submit_gxg_array.sh <trait> [model]
+#   sbatch <site args> slurm/submit_gxg_array.sh OS survival
+#   sbatch <site args> slurm/submit_gxg_array.sh relapse binary
+#   sbatch <site args> slurm/submit_gxg_array.sh MRD binary
 # ============================================================================
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Repo root. Slurm runs a batch script from a copy in its spool directory, so this file's own
+# path does not lead back to the repo inside a job. The launcher exports GWAS_REPO; a direct
+# sbatch from the repo root leaves the repo in SLURM_SUBMIT_DIR; `bash slurm/...` uses the path.
+for SCRIPT_DIR in "${GWAS_REPO:-}" "${SLURM_SUBMIT_DIR:-}" "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; do
+    [[ -f "${SCRIPT_DIR}/bin/slurm_utils.sh" ]] && break
+done
+[[ -f "${SCRIPT_DIR}/bin/slurm_utils.sh" ]] || { echo "ERROR: cannot find the repo (submit from the repo root, or export GWAS_REPO)" >&2; exit 1; }
 source "${SCRIPT_DIR}/bin/slurm_utils.sh"
 print_slurm_info
 set_thread_env
@@ -96,20 +102,31 @@ Rscript "${SCRIPT_DIR}/bin/run_gxg_interaction.R" \
 
 echo "Completed GxG for ${TRAIT} / ${STRATUM}"
 
-# Last array task submits the ancestry-heterogeneity job (all strata in one run)
+# Last array task submits the ancestry-heterogeneity job (all strata in one run). It goes to the
+# partition and account this task runs under (SLURM_JOB_PARTITION / SLURM_JOB_ACCOUNT are set by
+# Slurm in every job) unless SLURM_PARTITION / SLURM_ACCOUNT were exported at launch.
+# Unquoted heredoc (<<EOF): every ${...} below is filled in now, when this task submits the job,
+# so the new job receives plain values. A trailing \\ becomes a line continuation in that job.
 if [[ "${SLURM_ARRAY_TASK_ID}" == "${SLURM_ARRAY_TASK_MAX}" ]]; then
-    sbatch --dependency=afterany:${SLURM_ARRAY_JOB_ID} \
-           --job-name=gxg_het_${TRAIT} --partition=normal --time=12:00:00 \
-           --mem=32G --cpus-per-task=16 \
-           --output="${SCRIPT_DIR}/logs/gxg_het_${TRAIT}_%j.out" \
-           --wrap="source ${SCRIPT_DIR}/bin/slurm_utils.sh; set_thread_env; \
-                   Rscript ${SCRIPT_DIR}/bin/run_gxg_interaction.R \
-                     --sumstats '${SUMSTATS}' --p_threshold ${GXG_P_THRESHOLD:-1e-5} --max_hits ${GXG_MAX_HITS:-200} \
-                     ${LOCI_ARGS} --prune_mode ${PRUNE_MODE} --cond_p_threshold ${COND_P} \
-                     --geno ${DATA_DIR}/genotypes/cohort \
-                     --phenotype ${PHENO} \
-                     --trait ${TRAIT} --model ${MODEL} ${SURV_ARGS} \
-                     --covariates ${COVARIATES} --ancestry_col ${ANCESTRY_COL} \
-                     --ancestry_config ${SCRIPT_DIR}/bin/ancestry_config.R --min_stratum_n 30 \
-                     --output_prefix ${RESULTS_DIR}/${TRAIT}.het --threads 16"
+    sbatch --export=ALL \
+           --partition="${SLURM_PARTITION:-${SLURM_JOB_PARTITION}}" --account="${SLURM_ACCOUNT:-${SLURM_JOB_ACCOUNT}}" \
+           --dependency=afterany:"${SLURM_ARRAY_JOB_ID}" \
+           --job-name="gxg_het_${TRAIT}" --time=12:00:00 --mem=32G --cpus-per-task=16 \
+           --output="${LOG_DIR:-${SCRIPT_DIR}/logs}/gxg_het_${TRAIT}_%j.out" <<EOF
+#!/bin/bash
+set -euo pipefail
+# This job is not an array task: drop the array variables inherited from the task that submitted it.
+unset SLURM_ARRAY_JOB_ID SLURM_ARRAY_TASK_ID SLURM_ARRAY_TASK_COUNT SLURM_ARRAY_TASK_MIN SLURM_ARRAY_TASK_MAX SLURM_ARRAY_TASK_STEP
+source "${SCRIPT_DIR}/bin/slurm_utils.sh"
+set_thread_env
+Rscript "${SCRIPT_DIR}/bin/run_gxg_interaction.R" \\
+    --sumstats '${SUMSTATS}' --p_threshold ${GXG_P_THRESHOLD:-1e-5} --max_hits ${GXG_MAX_HITS:-200} \\
+    ${LOCI_ARGS} --prune_mode ${PRUNE_MODE} --cond_p_threshold ${COND_P} \\
+    --geno "${DATA_DIR}/genotypes/cohort" \\
+    --phenotype "${PHENO}" \\
+    --trait ${TRAIT} --model ${MODEL} ${SURV_ARGS} \\
+    --covariates ${COVARIATES} --ancestry_col ${ANCESTRY_COL} \\
+    --ancestry_config "${SCRIPT_DIR}/bin/ancestry_config.R" --min_stratum_n 30 \\
+    --output_prefix "${RESULTS_DIR}/${TRAIT}.het" --threads 16
+EOF
 fi

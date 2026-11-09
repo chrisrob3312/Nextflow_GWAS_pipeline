@@ -11,17 +11,41 @@
 #   4. Colocalization: Run parallel methods on all QTL types
 #   5. Validation: Compare methods overall and by ancestry
 #
-# Usage:
-#   ./submit_full_pipeline.sh [--dry-run]
+# Usage (from any directory):
+#   export SLURM_PARTITION=<partition> SLURM_ACCOUNT=<account>   # required, docs/HPC_SITE.md
+#   slurm/submit_full_pipeline.sh [--dry-run]
+#
+# Partition and account are put on every sbatch command line by submit() below (an #SBATCH
+# line cannot read a variable), and every job log is an absolute path under LOG_DIR
+# (default <repo>/logs). To submit one child script by hand, see docs/HPC_SITE.md.
 # ============================================================================
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DRY_RUN="${1:-}"
+# Work from the repo root whatever directory this was launched from. sbatch records the
+# directory it was called from as each job's SLURM_SUBMIT_DIR and starting directory.
+cd "${SCRIPT_DIR}/.."
+REPO="$PWD"
+export GWAS_REPO="$REPO"     # how every job finds the repo (Slurm runs a job script from a spool copy)
 
-# Create log directory
-mkdir -p "${SCRIPT_DIR}/../logs"
+case "${1:-}" in
+    "")        DRY_RUN=0 ;;
+    --dry-run) DRY_RUN=1 ;;
+    *)         echo "usage: $0 [--dry-run]" >&2; exit 2 ;;
+esac
+
+# Site settings come from the environment, never from this file (docs/HPC_SITE.md)
+for v in SLURM_PARTITION SLURM_ACCOUNT; do
+    if [[ -z "${!v:-}" ]]; then
+        echo "REFUSED: ${v} is not set. Export SLURM_PARTITION and SLURM_ACCOUNT before launching (docs/HPC_SITE.md)." >&2
+        exit 2
+    fi
+done
+LOG_DIR="${LOG_DIR:-${REPO}/logs}"
+[[ "$LOG_DIR" == /* ]] || LOG_DIR="${REPO}/${LOG_DIR}"     # a relative LOG_DIR is taken from the repo root
+export LOG_DIR
+[[ $DRY_RUN == 1 ]] || mkdir -p "${LOG_DIR}"
 
 # ---------------------------------------------------------------------------
 # Customisable via environment variables (defaults for the leukemia cohort):
@@ -33,9 +57,12 @@ mkdir -p "${SCRIPT_DIR}/../logs"
 #   COVARIATES="age,sex,PC1,...,PC5"        any phenotype columns; used by GWAS and GxG
 #   GXG_CUSTOM_VARIANTS=/path/list.txt      optional GRCh38 variant list for GxG
 #   GXG_USE_DEFAULT_LOCI=true|false         include the default known-leukemia-loci table
+#   LOG_DIR=/abs/path                       where every job log goes (default <repo>/logs)
 # ---------------------------------------------------------------------------
-IFS=',' read -ra STRATA <<< "${STRATA_LIST:-EUR,AAC,LAT1,LAT2,OTHER}"
-IFS=',' read -ra TRAITS <<< "${TRAITS_LIST:-OS,DFS,MRD}"
+export STRATA_LIST="${STRATA_LIST:-EUR,AAC,LAT1,LAT2,OTHER}"
+export TRAITS_LIST="${TRAITS_LIST:-OS,DFS,MRD}"
+IFS=',' read -ra STRATA <<< "${STRATA_LIST}"
+IFS=',' read -ra TRAITS <<< "${TRAITS_LIST}"
 SURVIVAL_TRAITS="${SURVIVAL_TRAITS:-OS,DFS}"
 export COVARIATES="${COVARIATES:-age,sex,PC1,PC2,PC3,PC4,PC5}"
 export GXG_CUSTOM_VARIANTS="${GXG_CUSTOM_VARIANTS:-}"
@@ -49,17 +76,35 @@ QTL_TYPES=("eqtl" "sqtl" "pqtl" "mqtl" "caqtl" "hqtl")
 echo "=============================================="
 echo "Multi-Ancestry GWAS Pipeline Submission"
 echo "=============================================="
-echo "Strata: ${STRATA[*]}"
-echo "Traits: ${TRAITS[*]}"
+echo "Strata:    ${STRATA[*]}"
+echo "Traits:    ${TRAITS[*]}"
+echo "Partition: ${SLURM_PARTITION}"
+echo "Account:   ${SLURM_ACCOUNT}"
+echo "Logs:      ${LOG_DIR}"
 echo "=============================================="
 
-# Function to submit or print command
-submit_job() {
-    local cmd="$1"
-    if [[ "$DRY_RUN" == "--dry-run" ]]; then
-        echo "[DRY-RUN] $cmd"
+# ---------------------------------------------------------------------------
+# submit LABEL SBATCH_ARGS... : every sbatch goes through here, so the site arguments are
+# added in one place. Sets JOB to the new job id (a placeholder "dryN" under --dry-run, so the
+# printed commands still show which job waits for which).
+#   --export=ALL               the job sees this launcher's environment (GWAS_REPO, LOG_DIR, switches)
+#   --kill-on-invalid-dep=yes  a job whose afterok dependency failed is cancelled, not left pending forever
+# A heredoc written after a submit call is the job script: sbatch reads its script from
+# standard input when no script file is named.
+# ---------------------------------------------------------------------------
+SBATCH_SITE=(--parsable --export=ALL --partition="${SLURM_PARTITION}" --account="${SLURM_ACCOUNT}"
+             --kill-on-invalid-dep=yes)
+JOB=""
+DRY_N=0
+submit() {
+    local label="$1"; shift
+    if [[ $DRY_RUN == 1 ]]; then
+        DRY_N=$((DRY_N + 1)); JOB="dry${DRY_N}"
+        printf '  [DRY-RUN] %s: sbatch' "$label"; printf ' %q' "${SBATCH_SITE[@]}" "$@"; printf '\n'
     else
-        eval "$cmd"
+        JOB=$(sbatch "${SBATCH_SITE[@]}" "$@")
+        JOB="${JOB%%;*}"                       # --parsable prints "jobid" or "jobid;cluster"
+        echo "  ${label}: job ${JOB}"
     fi
 }
 
@@ -70,14 +115,10 @@ echo ""
 echo "STEP 0: Submitting PC-AiR / PC-Relate..."
 DEPEND_PCAIR=""
 if [[ "${SKIP_PCAIR:-false}" != "true" ]]; then
-    cmd="sbatch --parsable ${SCRIPT_DIR}/submit_pcair.sh"
-    if [[ "$DRY_RUN" != "--dry-run" ]]; then
-        PCAIR_JOB=$(eval "$cmd")
-        DEPEND_PCAIR="--dependency=afterok:${PCAIR_JOB}"
-        echo "  Job ID: ${PCAIR_JOB}"
-    else
-        echo "  [DRY-RUN] $cmd"
-    fi
+    submit "PC-AiR / PC-Relate" \
+        --output="${LOG_DIR}/pcair_%j.out" --error="${LOG_DIR}/pcair_%j.err" \
+        "${SCRIPT_DIR}/submit_pcair.sh"
+    DEPEND_PCAIR="--dependency=afterok:${JOB}"
 else
     echo "  Skipped (SKIP_PCAIR=true): using data/kinship + PCs already in the phenotype file"
 fi
@@ -94,14 +135,11 @@ declare -A GWAS_JOBS
 for trait in "${TRAITS[@]}"; do
     model=$(trait_model "$trait")
     for stratum in "${STRATA[@]}"; do
-        echo "  ${trait} (${model}) / ${stratum}: 22 chromosomes"
-        cmd="sbatch --parsable ${DEPEND_PCAIR} ${SCRIPT_DIR}/submit_gwas_array.sh ${stratum} ${trait} ${model}"
-        if [[ "$DRY_RUN" != "--dry-run" ]]; then
-            GWAS_JOBS["${trait}.${stratum}"]=$(eval "$cmd")
-            echo "    Job ID: ${GWAS_JOBS["${trait}.${stratum}"]}"
-        else
-            echo "    [DRY-RUN] $cmd"
-        fi
+        submit "GWAS ${trait} (${model}) / ${stratum}, 22 chromosomes" ${DEPEND_PCAIR:+"$DEPEND_PCAIR"} \
+            --output="${LOG_DIR}/gwas_${trait}_${stratum}_%A_%a.out" \
+            --error="${LOG_DIR}/gwas_${trait}_${stratum}_%A_%a.err" \
+            "${SCRIPT_DIR}/submit_gwas_array.sh" "${stratum}" "${trait}" "${model}"
+        GWAS_JOBS["${trait}.${stratum}"]="$JOB"
     done
 done
 
@@ -112,7 +150,6 @@ echo ""
 echo "STEP 2: Submitting combine + meta-analysis jobs (one per trait)..."
 
 declare -A COMBINE_JOBS
-STRATA_CSV=$(IFS=,; echo "${STRATA[*]}")
 
 for trait in "${TRAITS[@]}"; do
     dep=""
@@ -122,42 +159,37 @@ for trait in "${TRAITS[@]}"; do
     done
     DEPEND_GWAS=""; [[ -n "$dep" ]] && DEPEND_GWAS="--dependency=afterok${dep}"
 
-    COMBINE_CMD="sbatch --parsable ${DEPEND_GWAS} << 'EOF'
+    # Quoted heredoc (<<'EOF'): the body below reaches sbatch exactly as written, nothing in it
+    # is expanded here. Launch-time values reach the job through its environment instead
+    # (sbatch --export=ALL): GWAS_REPO, STRATA_LIST, and GWAS_TRAIT set on the submit line.
+    GWAS_TRAIT="$trait" submit "combine + meta-analysis ${trait}" ${DEPEND_GWAS:+"$DEPEND_GWAS"} \
+        --job-name="combine_${trait}" --time=4:00:00 --mem=32G --cpus-per-task=8 \
+        --output="${LOG_DIR}/combine_${trait}_%j.out" <<'EOF'
 #!/bin/bash
-#SBATCH --job-name=combine_${trait}
-#SBATCH --partition=normal
-#SBATCH --time=4:00:00
-#SBATCH --mem=32G
-#SBATCH --cpus-per-task=8
-#SBATCH --output=logs/combine_${trait}_%j.out
-
-SCRIPT_DIR=\"${SCRIPT_DIR}/..\"
-GWAS_DIR=\"\${SCRIPT_DIR}/results/gwas/${trait}\"
+# Combine chromosomes per stratum, then meta-analyse the strata -> POOLED
+set -eu    # no pipefail: 'zcat | head -1' below stops zcat early (SIGPIPE) by design
+SCRIPT_DIR="${GWAS_REPO}"
+GWAS_DIR="${SCRIPT_DIR}/results/gwas/${GWAS_TRAIT}"
+IFS=',' read -ra STRATA <<< "${STRATA_LIST}"
 
 # Concatenate chromosomes per stratum (genomic order files -> one sumstats per stratum)
-for stratum in ${STRATA[*]}; do
-    files=(\${GWAS_DIR}/\${stratum}/chr*.tractor_genesis.genomic_order.tsv.gz)
-    [[ -e \"\${files[0]}\" ]] || { echo \"No results for \${stratum} (skipped: N < 30?)\"; continue; }
-    echo \"Combining ${trait} / \${stratum}...\"
-    { zcat \"\${files[0]}\" | head -1; for f in \"\${files[@]}\"; do zcat \"\$f\" | tail -n +2; done; } | \\
-        gzip > \${GWAS_DIR}/\${stratum}.sumstats.gz
+for stratum in "${STRATA[@]}"; do
+    files=("${GWAS_DIR}/${stratum}"/chr*.tractor_genesis.genomic_order.tsv.gz)
+    [[ -e "${files[0]}" ]] || { echo "No results for ${stratum} (skipped: N < 30?)"; continue; }
+    echo "Combining ${GWAS_TRAIT} / ${stratum}..."
+    { zcat "${files[0]}" | head -1; for f in "${files[@]}"; do zcat "$f" | tail -n +2; done; } |
+        gzip > "${GWAS_DIR}/${stratum}.sumstats.gz"
 done
 
 # Meta-analyse across strata (same ancestry background pooled across strata)
-echo \"Meta-analysing ${trait} across strata...\"
-Rscript \${SCRIPT_DIR}/bin/meta_analyze_strata.R \\
-    --input_dir \${GWAS_DIR} \\
-    --strata ${STRATA_CSV} \\
-    --output \${GWAS_DIR}/POOLED.sumstats.gz \\
+echo "Meta-analysing ${GWAS_TRAIT} across strata..."
+Rscript "${SCRIPT_DIR}/bin/meta_analyze_strata.R" \
+    --input_dir "${GWAS_DIR}" \
+    --strata "${STRATA_LIST}" \
+    --output "${GWAS_DIR}/POOLED.sumstats.gz" \
     --threads 8
-EOF"
-
-    if [[ "$DRY_RUN" != "--dry-run" ]]; then
-        COMBINE_JOBS[$trait]=$(eval "$COMBINE_CMD")
-        echo "  ${trait} combine Job ID: ${COMBINE_JOBS[$trait]}"
-    else
-        echo "  [DRY-RUN] Submit combine job for ${trait}"
-    fi
+EOF
+    COMBINE_JOBS[$trait]="$JOB"
 done
 
 # Single dependency handle for downstream steps (all traits combined)
@@ -181,15 +213,10 @@ fi
 declare -A PRS_JOBS
 
 for trait in "${TRAITS[@]}"; do
-    echo "  Submitting PRS for ${trait} (6 methods)..."
-
-    cmd="sbatch --parsable ${DEPEND_PRS} ${SCRIPT_DIR}/submit_prs_array.sh ${trait}"
-    if [[ "$DRY_RUN" != "--dry-run" ]]; then
-        PRS_JOBS[$trait]=$(eval "$cmd")
-        echo "    Job ID: ${PRS_JOBS[$trait]}"
-    else
-        echo "    [DRY-RUN] $cmd"
-    fi
+    submit "PRS ${trait} (6 methods)" ${DEPEND_PRS:+"$DEPEND_PRS"} \
+        --output="${LOG_DIR}/prs_${trait}_%A_%a.out" --error="${LOG_DIR}/prs_${trait}_%A_%a.err" \
+        "${SCRIPT_DIR}/submit_prs_array.sh" "${trait}"
+    PRS_JOBS[$trait]="$JOB"
 done
 
 # ============================================================================
@@ -198,43 +225,31 @@ done
 echo ""
 echo "STEP 4: Submitting colocalization jobs..."
 
-# Colocalization can start after GWAS combine
-COLOC_CMD="sbatch --parsable ${DEPEND_PRS:-} << 'EOF'
+# Colocalization can start after GWAS combine. Quoted heredoc, as in step 2.
+submit "colocalization (6 QTL types)" ${DEPEND_PRS:+"$DEPEND_PRS"} \
+    --job-name=colocalization --array=1-6 --time=24:00:00 --mem=64G --cpus-per-task=16 \
+    --output="${LOG_DIR}/coloc_%A_%a.out" <<'EOF'
 #!/bin/bash
-#SBATCH --job-name=colocalization
-#SBATCH --array=1-6
-#SBATCH --partition=normal
-#SBATCH --time=24:00:00
-#SBATCH --mem=64G
-#SBATCH --cpus-per-task=16
-#SBATCH --output=logs/coloc_%A_%a.out
-
-SCRIPT_DIR=\"${SCRIPT_DIR}/..\"
+set -euo pipefail
+SCRIPT_DIR="${GWAS_REPO}"
 
 # Map array ID to QTL type
-declare -a QTL_TYPES=(\"eqtl\" \"sqtl\" \"pqtl\" \"mqtl\" \"caqtl\" \"hqtl\")
-QTL_TYPE=\"\${QTL_TYPES[\$((SLURM_ARRAY_TASK_ID - 1))]}\"
+QTL_TYPES=("eqtl" "sqtl" "pqtl" "mqtl" "caqtl" "hqtl")
+QTL_TYPE="${QTL_TYPES[$((SLURM_ARRAY_TASK_ID - 1))]}"
 
-echo \"Running colocalization for \${QTL_TYPE}...\"
+echo "Running colocalization for ${QTL_TYPE}..."
 
 # Run all methods in parallel (coloc.susie, HyPrColoc, OPERA)
-Rscript \${SCRIPT_DIR}/bin/run_colocalization.R \\
-    --gwas \${SCRIPT_DIR}/results/gwas/POOLED.sumstats.gz \\
-    --qtl_dir \${SCRIPT_DIR}/data/qtl \\
-    --qtl_types \${QTL_TYPE} \\
-    --methods coloc_susie,hyprcoloc,opera \\
-    --run_opera true \\
-    --output_prefix \${SCRIPT_DIR}/results/coloc/\${QTL_TYPE} \\
-    --threads \${SLURM_CPUS_PER_TASK} \\
+Rscript "${SCRIPT_DIR}/bin/run_colocalization.R" \
+    --gwas "${SCRIPT_DIR}/results/gwas/POOLED.sumstats.gz" \
+    --qtl_dir "${SCRIPT_DIR}/data/qtl" \
+    --qtl_types "${QTL_TYPE}" \
+    --methods coloc_susie,hyprcoloc,opera \
+    --run_opera true \
+    --output_prefix "${SCRIPT_DIR}/results/coloc/${QTL_TYPE}" \
+    --threads "${SLURM_CPUS_PER_TASK}" \
     --verbose
-EOF"
-
-if [[ "$DRY_RUN" != "--dry-run" ]]; then
-    COLOC_JOB=$(eval "$COLOC_CMD")
-    echo "  Colocalization Job ID: ${COLOC_JOB}"
-else
-    echo "  [DRY-RUN] Submit colocalization array job"
-fi
+EOF
 
 # ============================================================================
 # STEP 5: Validation and comparison (depends on PRS)
@@ -256,37 +271,28 @@ else
     DEPEND_VAL=""
 fi
 
-VALIDATE_CMD="sbatch --parsable ${DEPEND_VAL} << 'EOF'
+# Quoted heredoc, as in step 2; the traits come from TRAITS_LIST in the job's environment.
+submit "PRS validation" ${DEPEND_VAL:+"$DEPEND_VAL"} \
+    --job-name=validation --time=4:00:00 --mem=32G --cpus-per-task=8 \
+    --output="${LOG_DIR}/validation_%j.out" <<'EOF'
 #!/bin/bash
-#SBATCH --job-name=validation
-#SBATCH --partition=normal
-#SBATCH --time=4:00:00
-#SBATCH --mem=32G
-#SBATCH --cpus-per-task=8
-#SBATCH --output=logs/validation_%j.out
+set -eu
+SCRIPT_DIR="${GWAS_REPO}"
 
-SCRIPT_DIR=\"${SCRIPT_DIR}/..\"
-
-echo \"Comparing PRS methods across strata...\"
+echo "Comparing PRS methods across strata..."
 
 # Combine all validation results
-for trait in OS relapse MRD; do
-    cat \${SCRIPT_DIR}/results/prs/\${trait}/*.validation.tsv | \\
-        awk 'NR==1 || !/^method/' > \\
-        \${SCRIPT_DIR}/results/prs/\${trait}_all_validation.tsv
+IFS=',' read -ra TRAITS <<< "${TRAITS_LIST}"
+for trait in "${TRAITS[@]}"; do
+    cat "${SCRIPT_DIR}/results/prs/${trait}"/*.validation.tsv |
+        awk 'NR==1 || !/^method/' > \
+        "${SCRIPT_DIR}/results/prs/${trait}_all_validation.tsv"
 done
 
 # Generate summary report
-echo \"Generating summary report...\"
+echo "Generating summary report..."
 # ... report generation code
-EOF"
-
-if [[ "$DRY_RUN" != "--dry-run" ]]; then
-    VALIDATE_JOB=$(eval "$VALIDATE_CMD")
-    echo "  Validation Job ID: ${VALIDATE_JOB}"
-else
-    echo "  [DRY-RUN] Submit validation job"
-fi
+EOF
 
 # ============================================================================
 # STEP 6: GxG interaction tests on GWAS hits (END OF PIPELINE)
@@ -300,15 +306,10 @@ declare -A GXG_JOBS
 
 for trait in "${TRAITS[@]}"; do
     model=$(trait_model "$trait")
-    echo "  Submitting GxG for ${trait} (${model}; POOLED + 7 strata)..."
-
-    cmd="sbatch --parsable ${DEPEND_PRS} ${SCRIPT_DIR}/submit_gxg_array.sh ${trait} ${model}"
-    if [[ "$DRY_RUN" != "--dry-run" ]]; then
-        GXG_JOBS[$trait]=$(eval "$cmd")
-        echo "    Job ID: ${GXG_JOBS[$trait]}"
-    else
-        echo "    [DRY-RUN] $cmd"
-    fi
+    submit "GxG ${trait} (${model}; POOLED + 7 strata)" ${DEPEND_PRS:+"$DEPEND_PRS"} \
+        --output="${LOG_DIR}/gxg_${trait}_%A_%a.out" --error="${LOG_DIR}/gxg_${trait}_%A_%a.err" \
+        "${SCRIPT_DIR}/submit_gxg_array.sh" "${trait}" "${model}"
+    GXG_JOBS[$trait]="$JOB"
 done
 
 # ============================================================================
@@ -322,6 +323,7 @@ echo "GWAS jobs: ${#STRATA[@]} strata × 22 chromosomes"
 echo "PRS jobs: ${#TRAITS[@]} traits × 6 methods"
 echo "Colocalization: ${#QTL_TYPES[@]} QTL types × 3 methods"
 echo "GxG interaction: ${#TRAITS[@]} traits × 8 strata (+ ancestry heterogeneity)"
+echo "Logs: ${LOG_DIR}"
 echo ""
 echo "Monitor with: squeue -u \$USER"
 echo "Cancel all: scancel -u \$USER"

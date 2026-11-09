@@ -1,12 +1,11 @@
 #!/bin/bash
 #SBATCH --job-name=tractor_genesis
 #SBATCH --array=1-22
-#SBATCH --partition=normal
 #SBATCH --time=24:00:00
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=16
-#SBATCH --output=logs/gwas_%A_%a.out
-#SBATCH --error=logs/gwas_%A_%a.err
+# --partition, --account, --output and --error come from the sbatch command line
+# (slurm/submit_full_pipeline.sh, or the direct-submit form in docs/HPC_SITE.md).
 
 # ============================================================================
 # SLURM Array Job: Tractor-GENESIS GWAS by Chromosome
@@ -17,12 +16,13 @@
 #   relapse  -> survival    (Cox null with kinship frailty, time-to-event)
 #   OS       -> survival
 #
-# Usage:
-#   sbatch submit_gwas_array.sh <stratum> <trait> <model>
+# Usage (normally submitted by slurm/submit_full_pipeline.sh; by hand, from the repo root,
+# with the site arguments of docs/HPC_SITE.md "Submitting one script by hand"):
+#   sbatch <site args> slurm/submit_gwas_array.sh <stratum> <trait> <model>
 #
-#   sbatch submit_gwas_array.sh LAT1 OS      survival
-#   sbatch submit_gwas_array.sh LAT1 relapse survival
-#   sbatch submit_gwas_array.sh LAT1 MRD     binary
+#   sbatch <site args> slurm/submit_gwas_array.sh LAT1 OS      survival
+#   sbatch <site args> slurm/submit_gwas_array.sh LAT1 relapse survival
+#   sbatch <site args> slurm/submit_gwas_array.sh LAT1 MRD     binary
 #
 # Survival traits expect columns <trait>_time and <trait>_status in the
 # phenotype file (override with TIME_COL / EVENT_COL env vars).
@@ -31,7 +31,13 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Repo root. Slurm runs a batch script from a copy in its spool directory, so this file's own
+# path does not lead back to the repo inside a job. The launcher exports GWAS_REPO; a direct
+# sbatch from the repo root leaves the repo in SLURM_SUBMIT_DIR; `bash slurm/...` uses the path.
+for SCRIPT_DIR in "${GWAS_REPO:-}" "${SLURM_SUBMIT_DIR:-}" "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; do
+    [[ -f "${SCRIPT_DIR}/bin/slurm_utils.sh" ]] && break
+done
+[[ -f "${SCRIPT_DIR}/bin/slurm_utils.sh" ]] || { echo "ERROR: cannot find the repo (submit from the repo root, or export GWAS_REPO)" >&2; exit 1; }
 source "${SCRIPT_DIR}/bin/slurm_utils.sh"
 print_slurm_info
 set_thread_env

@@ -1,12 +1,11 @@
 #!/bin/bash
 #SBATCH --job-name=prs_admixed
 #SBATCH --array=1-6
-#SBATCH --partition=normal
 #SBATCH --time=48:00:00
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=16
-#SBATCH --output=logs/prs_%A_%a.out
-#SBATCH --error=logs/prs_%A_%a.err
+# --partition, --account, --output and --error come from the sbatch command line
+# (slurm/submit_full_pipeline.sh, or the direct-submit form in docs/HPC_SITE.md).
 
 # ============================================================================
 # SLURM Array Job: Multi-Method PRS Calculation
@@ -19,19 +18,27 @@
 #   5. MUSSEL
 #   6. PROSPER
 #
-# Usage:
-#   sbatch submit_prs_array.sh <trait>
+# Usage (normally submitted by slurm/submit_full_pipeline.sh; by hand, from the repo root,
+# with the site arguments of docs/HPC_SITE.md "Submitting one script by hand"):
+#   sbatch <site args> slurm/submit_prs_array.sh <trait>
 #
 # Example:
-#   sbatch submit_prs_array.sh OS
-#   sbatch submit_prs_array.sh relapse
-#   sbatch submit_prs_array.sh MRD
+#   sbatch <site args> slurm/submit_prs_array.sh OS
+#   sbatch <site args> slurm/submit_prs_array.sh relapse
+#   sbatch <site args> slurm/submit_prs_array.sh MRD
 # ============================================================================
 
 set -euo pipefail
 
+# Repo root. Slurm runs a batch script from a copy in its spool directory, so this file's own
+# path does not lead back to the repo inside a job. The launcher exports GWAS_REPO; a direct
+# sbatch from the repo root leaves the repo in SLURM_SUBMIT_DIR; `bash slurm/...` uses the path.
+for SCRIPT_DIR in "${GWAS_REPO:-}" "${SLURM_SUBMIT_DIR:-}" "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; do
+    [[ -f "${SCRIPT_DIR}/bin/slurm_utils.sh" ]] && break
+done
+[[ -f "${SCRIPT_DIR}/bin/slurm_utils.sh" ]] || { echo "ERROR: cannot find the repo (submit from the repo root, or export GWAS_REPO)" >&2; exit 1; }
+
 # Load utilities
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${SCRIPT_DIR}/bin/slurm_utils.sh"
 
 # Print job info
