@@ -5,11 +5,14 @@
 # Submits complete multi-ancestry GWAS pipeline with proper dependencies
 #
 # Workflow:
+#   0. PC-AiR / PC-Relate (skip with SKIP_PCAIR=true)
 #   1. GWAS: Run Tractor-GENESIS for each ancestry stratum (22 chr × 5 strata)
 #   2. Combine: Merge chromosomes, run meta-analysis for OTHER
-#   3. PRS: Run 6 methods × 3 traits
-#   4. Colocalization: Run parallel methods on all QTL types
-#   5. Validation: Compare methods overall and by ancestry
+#   3. PRS: Run 6 methods × 3 traits                         only with RUN_PRS=true
+#   4. Colocalization: Run parallel methods on all QTL types  only with RUN_COLOC=true
+#   5. Validation: Compare methods overall and by ancestry    only with RUN_VALIDATION=true (needs RUN_PRS)
+#   6. GxG interaction on the GWAS hits                       only with RUN_GXG=true
+# Steps 3-6 are off by default; every launch prints which were deferred.
 #
 # Usage (from any directory):
 #   export SLURM_PARTITION=<partition> SLURM_ACCOUNT=<account>   # required, docs/HPC_SITE.md
@@ -58,6 +61,7 @@ export LOG_DIR
 #   GXG_CUSTOM_VARIANTS=/path/list.txt      optional GRCh38 variant list for GxG
 #   GXG_USE_DEFAULT_LOCI=true|false         include the default known-leukemia-loci table
 #   LOG_DIR=/abs/path                       where every job log goes (default <repo>/logs)
+#   RUN_PRS / RUN_COLOC / RUN_VALIDATION / RUN_GXG = true|false   steps 3-6 (default false)
 # ---------------------------------------------------------------------------
 export STRATA_LIST="${STRATA_LIST:-EUR,AAC,LAT1,LAT2,OTHER}"
 export TRAITS_LIST="${TRAITS_LIST:-OS,DFS,MRD}"
@@ -67,6 +71,25 @@ SURVIVAL_TRAITS="${SURVIVAL_TRAITS:-OS,DFS}"
 export COVARIATES="${COVARIATES:-age,sex,PC1,PC2,PC3,PC4,PC5}"
 export GXG_CUSTOM_VARIANTS="${GXG_CUSTOM_VARIANTS:-}"
 export GXG_USE_DEFAULT_LOCI="${GXG_USE_DEFAULT_LOCI:-true}"
+
+# Steps 3-6 run only when asked for. Anything but true/false is refused rather than guessed.
+for step in PRS COLOC VALIDATION GXG; do
+    v="RUN_${step}"
+    export "${v}=${!v:-false}"
+    case "${!v}" in
+        true|false) ;;
+        *) echo "REFUSED: ${v}=${!v}; use true or false" >&2; exit 2 ;;
+    esac
+done
+if [[ "${RUN_VALIDATION}" == true && "${RUN_PRS}" != true ]]; then
+    echo "REFUSED: RUN_VALIDATION=true needs RUN_PRS=true (validation summarises the PRS jobs of this launch)" >&2
+    exit 2
+fi
+DEFERRED=()
+for step in PRS COLOC VALIDATION GXG; do
+    v="RUN_${step}"
+    [[ "${!v}" == true ]] || DEFERRED+=("${step}")
+done
 
 trait_model() { [[ ",${SURVIVAL_TRAITS}," == *",$1,"* ]] && echo survival || echo binary; }
 
@@ -82,6 +105,12 @@ echo "Partition: ${SLURM_PARTITION}"
 echo "Account:   ${SLURM_ACCOUNT}"
 echo "Logs:      ${LOG_DIR}"
 echo "=============================================="
+# Printed on every launch, so the log shows these steps were left out on purpose
+if [[ ${#DEFERRED[@]} -gt 0 ]]; then
+    echo "deferred: ${DEFERRED[*]} (RUN_*=false)"
+else
+    echo "deferred: none"
+fi
 
 # ---------------------------------------------------------------------------
 # submit LABEL SBATCH_ARGS... : every sbatch goes through here, so the site arguments are
@@ -192,41 +221,42 @@ EOF
     COMBINE_JOBS[$trait]="$JOB"
 done
 
-# Single dependency handle for downstream steps (all traits combined)
+# Single dependency handle for downstream steps (all traits combined). Steps 3, 4 and 6 all
+# wait on the combine jobs, so this is set here, outside every RUN_* gate.
 COMBINE_JOB=""
 for trait in "${TRAITS[@]}"; do
     [[ -n "${COMBINE_JOBS[$trait]:-}" ]] && COMBINE_JOB="${COMBINE_JOB:+${COMBINE_JOB}:}${COMBINE_JOBS[$trait]}"
 done
+DEPEND_COMBINE=""
+[[ -n "${COMBINE_JOB}" ]] && DEPEND_COMBINE="--dependency=afterok:${COMBINE_JOB}"
 
 # ============================================================================
-# STEP 3: PRS for each trait (depends on GWAS combine)
+# STEP 3: PRS for each trait (depends on GWAS combine)                RUN_PRS
 # ============================================================================
 echo ""
+declare -A PRS_JOBS
+if [[ "${RUN_PRS}" == true ]]; then
 echo "STEP 3: Submitting PRS jobs..."
 
-if [[ -n "${COMBINE_JOB:-}" ]]; then
-    DEPEND_PRS="--dependency=afterok:${COMBINE_JOB}"
-else
-    DEPEND_PRS=""
-fi
-
-declare -A PRS_JOBS
-
 for trait in "${TRAITS[@]}"; do
-    submit "PRS ${trait} (6 methods)" ${DEPEND_PRS:+"$DEPEND_PRS"} \
+    submit "PRS ${trait} (6 methods)" ${DEPEND_COMBINE:+"$DEPEND_COMBINE"} \
         --output="${LOG_DIR}/prs_${trait}_%A_%a.out" --error="${LOG_DIR}/prs_${trait}_%A_%a.err" \
         "${SCRIPT_DIR}/submit_prs_array.sh" "${trait}"
     PRS_JOBS[$trait]="$JOB"
 done
+else
+    echo "STEP 3: PRS deferred (RUN_PRS=false)"
+fi
 
 # ============================================================================
-# STEP 4: Colocalization (parallel with PRS)
+# STEP 4: Colocalization (parallel with PRS)                          RUN_COLOC
 # ============================================================================
 echo ""
+if [[ "${RUN_COLOC}" == true ]]; then
 echo "STEP 4: Submitting colocalization jobs..."
 
 # Colocalization can start after GWAS combine. Quoted heredoc, as in step 2.
-submit "colocalization (6 QTL types)" ${DEPEND_PRS:+"$DEPEND_PRS"} \
+submit "colocalization (6 QTL types)" ${DEPEND_COMBINE:+"$DEPEND_COMBINE"} \
     --job-name=colocalization --array=1-6 --time=24:00:00 --mem=64G --cpus-per-task=16 \
     --output="${LOG_DIR}/coloc_%A_%a.out" <<'EOF'
 #!/bin/bash
@@ -250,11 +280,15 @@ Rscript "${SCRIPT_DIR}/bin/run_colocalization.R" \
     --threads "${SLURM_CPUS_PER_TASK}" \
     --verbose
 EOF
+else
+    echo "STEP 4: colocalization deferred (RUN_COLOC=false)"
+fi
 
 # ============================================================================
-# STEP 5: Validation and comparison (depends on PRS)
+# STEP 5: Validation and comparison (depends on PRS)                  RUN_VALIDATION
 # ============================================================================
 echo ""
+if [[ "${RUN_VALIDATION}" == true ]]; then
 echo "STEP 5: Submitting validation job..."
 
 # Build PRS dependency
@@ -293,24 +327,30 @@ done
 echo "Generating summary report..."
 # ... report generation code
 EOF
+else
+    echo "STEP 5: validation deferred (RUN_VALIDATION=false)"
+fi
 
 # ============================================================================
 # STEP 6: GxG interaction tests on GWAS hits (END OF PIPELINE)
 # ============================================================================
 # Needs only the combined GWAS sumstats (not PRS/coloc), so it runs in
-# parallel with steps 3-5. One array task per stratum, per trait.
+# parallel with steps 3-5. One array task per stratum, per trait.    RUN_GXG
 echo ""
-echo "STEP 6: Submitting GxG interaction jobs..."
-
 declare -A GXG_JOBS
+if [[ "${RUN_GXG}" == true ]]; then
+echo "STEP 6: Submitting GxG interaction jobs..."
 
 for trait in "${TRAITS[@]}"; do
     model=$(trait_model "$trait")
-    submit "GxG ${trait} (${model}; POOLED + 7 strata)" ${DEPEND_PRS:+"$DEPEND_PRS"} \
+    submit "GxG ${trait} (${model}; POOLED + 7 strata)" ${DEPEND_COMBINE:+"$DEPEND_COMBINE"} \
         --output="${LOG_DIR}/gxg_${trait}_%A_%a.out" --error="${LOG_DIR}/gxg_${trait}_%A_%a.err" \
         "${SCRIPT_DIR}/submit_gxg_array.sh" "${trait}" "${model}"
     GXG_JOBS[$trait]="$JOB"
 done
+else
+    echo "STEP 6: GxG deferred (RUN_GXG=false)"
+fi
 
 # ============================================================================
 # Summary
@@ -319,10 +359,11 @@ echo ""
 echo "=============================================="
 echo "Pipeline Submitted"
 echo "=============================================="
-echo "GWAS jobs: ${#STRATA[@]} strata × 22 chromosomes"
-echo "PRS jobs: ${#TRAITS[@]} traits × 6 methods"
-echo "Colocalization: ${#QTL_TYPES[@]} QTL types × 3 methods"
-echo "GxG interaction: ${#TRAITS[@]} traits × 8 strata (+ ancestry heterogeneity)"
+echo "GWAS jobs: ${#TRAITS[@]} traits × ${#STRATA[@]} strata × 22 chromosomes"
+[[ "${RUN_PRS}" == true ]]   && echo "PRS jobs: ${#TRAITS[@]} traits × 6 methods"
+[[ "${RUN_COLOC}" == true ]] && echo "Colocalization: ${#QTL_TYPES[@]} QTL types × 3 methods"
+[[ "${RUN_GXG}" == true ]]   && echo "GxG interaction: ${#TRAITS[@]} traits × 8 strata (+ ancestry heterogeneity)"
+if [[ ${#DEFERRED[@]} -gt 0 ]]; then echo "deferred: ${DEFERRED[*]} (RUN_*=false)"; fi
 echo "Logs: ${LOG_DIR}"
 echo ""
 echo "Monitor with: squeue -u \$USER"
