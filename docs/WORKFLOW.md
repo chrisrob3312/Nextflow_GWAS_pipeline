@@ -173,29 +173,40 @@ Each pair reports Wald and LRT p-values with Bonferroni over pairs and BH FDR.
 | Time-to-event traits | `survival_traits` (+ `survival_time_cols`, `survival_event_cols`) | `SURVIVAL_TRAITS` | default columns `<trait>_time`, `<trait>_status` |
 | Covariates | `covariate_cols`, `gxg_covariates` | `COVARIATES` | any phenotype columns |
 | Ancestry column | `gxg_ancestry_col` | `ANCESTRY_COL` | GRAF-ANC codes or labels |
-| Strata rules | `min_stratum_n`, `bin/ancestry_config.R` | `STRATA_LIST`, `bin/ancestry_config.R` | N < 30 pools to OTHER |
+| Strata rules | `min_stratum_n`, `bin/ancestry_config.R` | `STRATA_LIST`, `MIN_STRATUM_N`, `bin/ancestry_config.R` | N < 30 pools to OTHER |
 | Known loci | `gxg_known_loci`, `gxg_use_default_loci` | `KNOWN_LOCI`, `GXG_USE_DEFAULT_LOCI` | default table is a starting point; verify positions |
 | Custom variants | `gxg_custom_variants` | `GXG_CUSTOM_VARIANTS` | GRCh38, one per line |
+| Steps run | (no switch) | `RUN_PRS`, `RUN_COLOC`, `RUN_VALIDATION`, `RUN_GXG` (default `false`) | every SLURM launch prints the steps it deferred |
 | Hit selection among LD-correlated hits | `gxg_prune_mode`, `gxg_cond_p_threshold`, `gxg_max_pair_r2`, `gxg_min_distance_kb` | `GXG_PRUNE_MODE`, `GXG_COND_P` | conditional (default): LD-correlated hit tested conditional on kept hits, kept if cond P < 1e-4; precedence GWAS > custom > known |
-| Tractor | `tractor_aac_pops`, `tractor_lat_pops`, `tractor_ref_ancestry`, `tractor_mac_min` | `data/tractor/<stratum>/ancestries.txt`, one per stratum, read by `submit_gwas_array.sh` | no default list: a stratum without the file is refused |
+| Tractor | `tractor_aac_pops`, `tractor_lat_pops`, `tractor_ref_ancestry`, `tractor_mac_min` | `data/tractor/<stratum>/ancestries.txt`, one per stratum, read by `submit_gwas_array.sh`; `MAC_MIN` | no default list: a stratum without the file is refused |
 
 ## 6. SLURM orchestration (`slurm/submit_full_pipeline.sh`)
 
 ```mermaid
 flowchart TD
     S0["STEP 0  submit_pcair.sh<br/>PC-AiR PCs + PC-Relate GRM (once)"]
-    S1["STEP 1  submit_gwas_array.sh<br/>traits x strata, 22-chromosome arrays<br/>Tractor-GENESIS for every trait"]
+    S1["STEP 1  submit_gwas_array.sh<br/>traits x strata, 22-chromosome arrays<br/>Tractor-GENESIS for every trait<br/>--ancestries from data/tractor/&lt;stratum&gt;/ancestries.txt"]
     S0 --> S1
     S2["STEP 2  combine per trait<br/>chr* -> <stratum>.sumstats.gz<br/>bin/meta_analyze_strata.R -> POOLED.sumstats.gz"]
-    S3["STEP 3  submit_prs_array.sh<br/>6 PRS methods per trait"]
-    S4["STEP 4  colocalization array<br/>6 QTL types x 3 methods"]
-    S5["STEP 5  PRS validation<br/>overall + per stratum"]
-    S6["STEP 6  submit_gxg_array.sh<br/>per trait: POOLED + 7 strata,<br/>then ancestry-heterogeneity job"]
+    S3["STEP 3  submit_prs_array.sh<br/>6 PRS methods per trait<br/>RUN_PRS=true"]
+    S4["STEP 4  colocalization array<br/>6 QTL types x 3 methods<br/>RUN_COLOC=true"]
+    S5["STEP 5  PRS validation<br/>overall + per stratum<br/>RUN_VALIDATION=true"]
+    S6["STEP 6  submit_gxg_array.sh<br/>per trait: POOLED + 7 strata,<br/>then ancestry-heterogeneity job<br/>RUN_GXG=true"]
+    F["run record finalise<br/>afterany on every job<br/>trace.tsv + summary.md"]
     S1 --> S2
-    S2 --> S3 --> S5
-    S2 --> S4
-    S2 --> S6
+    S2 -.-> S3 -.-> S5
+    S2 -.-> S4
+    S2 -.-> S6
+    S2 --> F
 ```
+
+Dashed steps are off by default and run only with their `RUN_*` variable set to `true`; every
+launch prints the ones it deferred. The launcher needs `SLURM_PARTITION` and `SLURM_ACCOUNT` in
+the environment and puts them on every sbatch line, with absolute log paths under `LOG_DIR`
+(default `<repo>/logs`). Every job activates its conda env first (`source bin/activate_env.sh
+gwas-r`, which also puts `TMPDIR` on disk) and writes its row of the run record,
+`results/run_record/<run_id>/` (`params.tsv`, `trace.tsv`, `summary.md`). Site settings, the env
+build and the run record: `docs/HPC_SITE.md`.
 
 Results land under `results/gwas/<trait>/<stratum>/`, `results/prs/<trait>/`,
 `results/coloc/`, `results/gxg/<trait>/`.
@@ -213,6 +224,10 @@ Nextflow modules and the SLURM scripts call:
 | PRS (6 methods, LA partial, stratified validation) | `calculate_prs_admixed.R` | `PRS_METHOD`, `PRS_LA_PARTIAL`, `PRS_VALIDATE_STRATIFIED` | `submit_prs_array.sh` |
 | Colocalization (coloc.susie, HyPrColoc, OPERA) | `run_colocalization.R` | `COLOC_RUN`, `COLOC_COMBINE` | step 4 |
 | GxG interaction | `run_gxg_interaction.R` | `GXG_*` | `submit_gxg_array.sh` |
+
+The wrappers under `shell/` call the same `bin/` scripts but are debug-only, not the execution
+path: they do not pass `--stratum`, `--mac_min` or `--chromosome`, activate no env and write no
+run record (`shell/README.md`).
 
 The older single-method modules (`prs_csx`, `prs_cs`, `gaudi`, `ldpred2`,
 `coloc`, `ecaviar`, `fastenloc`) remain in `modules/local/` but are no longer

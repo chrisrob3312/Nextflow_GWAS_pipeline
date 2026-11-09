@@ -143,6 +143,41 @@ nextflow run main.nf \
   -profile singularity
 ```
 
+## Running on SLURM without Nextflow
+
+The same `bin/` scripts also run as plain SLURM jobs from `slurm/`. The site settings, the env
+build and the run record are described in [docs/HPC_SITE.md](docs/HPC_SITE.md); in short:
+
+1. **Environments.** Build the four conda envs in `envs/` (`gwas-r`, `gwas-py`, `lai`, `mrmega`)
+   into `$GWAS_ENVS_DIR`, run `bin/envs_tsv.sh` to record the sha256 of each yml in `envs.tsv`, and
+   check them with `sbatch ... bin/check_envs.sh`. Every job starts with
+   `source bin/activate_env.sh <env>`, which also puts `TMPDIR` on disk (`$SLURM_TMPDIR`, else
+   `$GWAS_SCRATCH/tmp`), never on a tmpfs `/tmp`.
+2. **Site settings.** `SLURM_PARTITION` and `SLURM_ACCOUNT` are required; the launcher refuses to
+   start without them. No site path is written in any script.
+   ```bash
+   export SLURM_PARTITION=<partition> SLURM_ACCOUNT=<account> GWAS_ENVS_DIR=<dir> GWAS_SCRATCH=<dir>
+   ```
+3. **Launch**, from any directory; the dry run prints every sbatch line and submits nothing:
+   ```bash
+   slurm/submit_full_pipeline.sh --dry-run
+   slurm/submit_full_pipeline.sh
+   ```
+   PC-AiR / PC-Relate, the Tractor-GENESIS GWAS (traits × strata × 22 chromosomes) and the
+   combine + meta-analysis step always run. PRS, colocalization, PRS validation and GxG run only
+   with `RUN_PRS=true`, `RUN_COLOC=true`, `RUN_VALIDATION=true` (needs `RUN_PRS`) and
+   `RUN_GXG=true`; every launch prints the ones it deferred, e.g.
+   `deferred: PRS COLOC VALIDATION GXG (RUN_*=false)`.
+4. **Ancestries per stratum.** Each stratum needs `data/tractor/<stratum>/ancestries.txt`, the
+   ancestry labels its Tractor files carry ([docs/HANDOFF_CONTRACT.md](docs/HANDOFF_CONTRACT.md)).
+5. **Run record.** Each launch writes `results/run_record/<run_id>/`: `params.tsv` (every
+   number-changing switch) at launch, a row per task as it runs, and `trace.tsv` (with MaxRSS and
+   Elapsed from `sacct`) and `summary.md` once the final job, which waits on all the others, has run.
+
+Logs go to `<repo>/logs/` (absolute paths; `LOG_DIR` to change). The wrappers under `shell/` are
+debug-only, not the execution path. `tests/test_chassis.sh` checks all of this locally with fake
+`sbatch`, `sacct` and `conda`.
+
 ## Input Requirements
 
 ### Samplesheet
@@ -375,6 +410,8 @@ Key methods:
 - Nextflow >= 23.04.0
 - Container runtime: Docker, Singularity, or Apptainer
 - OR Conda/Mamba for local execution
+- For the SLURM path without Nextflow: Slurm and conda (or mamba), with the envs in `envs/`
+  (see "Running on SLURM without Nextflow" above)
 
 ## License
 
