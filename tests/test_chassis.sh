@@ -789,6 +789,22 @@ if python3 -c 'import pandas' >/dev/null 2>&1 && [[ -n "${REAL_RSCRIPT}" ]]; the
         && ok "filter_gwas_results.py on 100 rows (CHROM POS ID P_JOINT P_EUR): P_JOINT by default, --p-col P_EUR, an unknown --p-col refused" || bad "filter: $a / $b / $c"
 fi
 
+section "M-05: distance-based loci (500 kb, not LD-based) in filter_gwas_results.py"
+if python3 -c 'import pandas' >/dev/null 2>&1; then
+    TD="${W}/m05"; rm -rf "${TD:?}"; mkdir -p "$TD"
+    printf 'CHR\tPOS\tID\tP_JOINT\tSTRATUM\n1\t1000000\ta\t1e-7\tEUR\n1\t1100000\tb\t1e-6\tEUR\n1\t1200000\tc\t5e-6\tEUR\n1\t3200000\td\t2e-6\tEUR\n1\t5000000\te\t0.5\tEUR\n2\t1000000\tf\t0.3\tEUR\n1\t1050000\tg\t3e-6\tAFR\n' > "${TD}/s.tsv"
+    out="$(python3 -I "${C}/bin/filter_gwas_results.py" --input "${TD}/s.tsv" --output "${TD}/o.tsv.gz" --significant "${TD}/o.significant.tsv" 2>&1)"
+    Lc="${TD}/o.loci.tsv"
+    head -1 "$Lc" | grep -q "^## method=distance-based, not LD-based: a locus is every suggestive variant within 500 kb" && grep -qx '## window_kb=500' "$Lc" \
+        && [[ "$(grep -v '^##' "$Lc" | cut -f1-4,8,9 | paste -sd'|' -)" == $'STRATUM\tLOCUS\tCHR\tINDEX_ID\tN_VARIANTS\tP_JOINT|AFR\tAFR:1\t1\tg\t1\t3e-06|EUR\tEUR:1\t1\ta\t3\t1e-07|EUR\tEUR:2\t1\td\t1\t2e-06' ]] \
+        && ok "three EUR variants within 200 kb + one 2 Mb away: two EUR loci (index a, d), the AFR variant its own locus; header states the window and 'distance-based'" || bad "loci: $(cat "$Lc")"
+    [[ "$(zcat "${TD}/o.tsv.gz" | awk -F'\t' 'NR > 1 {print $3 ":" $6 ":" $8}' | sort | paste -sd' ' -)" == "a:EUR:1:True b:EUR:1:False c:EUR:1:False d:EUR:2:True g:AFR:1:True" ]] \
+        && ok "the variant list carries LOCUS, LOCUS_INDEX and IS_INDEX" || bad "variant list: $(zcat "${TD}/o.tsv.gz")"
+    out="$(python3 -I "${C}/bin/filter_gwas_results.py" --input "${TD}/s.tsv" --output "${TD}/w.tsv.gz" --significant "${TD}/w.significant.tsv" --window-kb 50 2>&1)"
+    [[ "$(grep -vc '^##' "${TD}/w.loci.tsv")" -eq 6 ]] && grep -qx '## window_kb=50' "${TD}/w.loci.tsv" && ok "--window-kb 50: each EUR variant its own locus" || bad "window 50: $(cat "${TD}/w.loci.tsv")"
+fi
+grep -q 'path("${prefix}.loci.tsv"),        emit: loci' "${C}/modules/local/gwas_filter/main.nf" && ok "Nextflow GWAS_FILTER emits the locus table" || bad "module loci"
+
 section "GxG: missing sumstats are left out and named; none at all stops the task"
 rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results" "${C:?}/logs"; mkdir -p "${C}/results/gwas/os" "${C}/logs"
 echo x | gzip > "${C}/results/gwas/os/POOLED.sumstats.gz"; echo x | gzip > "${C}/results/gwas/os/EUR.sumstats.gz"

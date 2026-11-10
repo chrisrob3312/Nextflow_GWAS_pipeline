@@ -13,6 +13,7 @@ process GWAS_FILTER {
     output:
     tuple val(meta), path("${prefix}.filtered.tsv.gz"), emit: filtered
     tuple val(meta), path("${prefix}.significant.tsv"), emit: significant
+    tuple val(meta), path("${prefix}.loci.tsv"),        emit: loci      // distance-based, not LD-based (500 kb)
     path "versions.yml", emit: versions
 
     when:
@@ -26,6 +27,7 @@ process GWAS_FILTER {
         --input ${sumstats} \\
         --output ${prefix}.filtered.tsv.gz \\
         --significant ${prefix}.significant.tsv \\
+        --loci ${prefix}.loci.tsv \\
         --p-threshold 5e-8 \\
         --suggestive-threshold 1e-5 \\
         $args

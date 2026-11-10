@@ -142,6 +142,11 @@ The QQ and Manhattan plots and the hit filter (`bin/create_qq_plot.R`, `bin/crea
 `bin/filter_gwas_results.py`) take `--p-col` (e.g. `--p-col P_EUR`); without it they use `P_JOINT`,
 then `P` / `PVALUE` / `P_VALUE`. The lambda GC shown is always that of the plotted column, written to
 `<prefix>.lambda.txt` by the QQ script; a `--lambda-gc` file is printed for comparison, never used.
+The filter also writes a locus table (`--loci`, default `<prefix>.loci.tsv`): **distance-based, not
+LD-based**. Per stratum, the suggestive variant with the lowest P is an index variant and every
+unassigned suggestive variant within `--window-kb` (default 500) of it on its chromosome joins its
+locus; repeat. The table's `##` lines state the method, window, P column and threshold; the variant
+list gains `LOCUS`, `LOCUS_INDEX` and `IS_INDEX`.
 
 ## 4. GxG interaction (end of pipeline)
 
