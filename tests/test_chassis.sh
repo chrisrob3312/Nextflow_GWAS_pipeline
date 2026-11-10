@@ -247,6 +247,17 @@ out="$(bash -c 'source "$1/bin/run_record.sh"; printf "%s\n" "${RR_SWITCHES[@]}"
 done)"
 [[ -z "$out" ]] && ok "every \${NAME:-default} in slurm/ equals RR_SWITCHES" || bad "defaults differ: $out"
 
+section "MIN_STRATUM_N = 50 (decided 10 Nov 2026); MAC_MIN stays 10, marked open"
+check "RR_SWITCHES: MIN_STRATUM_N default 50" grep -q '"MIN_STRATUM_N|50|' "$REPO/bin/run_record.sh"
+check "RR_SWITCHES: MAC_MIN default 10, noted as open against the contract's 20" grep -q '"MAC_MIN|10|.*open: the contract says 20' "$REPO/bin/run_record.sh"
+check "adapter --min_stratum_n default 50" grep -q 'min_stratum_n"), type = "integer", default = 50' "$REPO/bin/tractor_genesis_adapter.R"
+check "GxG --min_stratum_n default 50" grep -q '"--min_stratum_n", type = "integer", default = 50' "$REPO/bin/run_gxg_interaction.R"
+check "ancestry_config.R MIN_STRATUM_N <- 50" grep -q '^MIN_STRATUM_N <- 50' "$REPO/bin/ancestry_config.R"
+check "nextflow.config min_stratum_n = 50" grep -qE '^ +min_stratum_n += 50 ' "$REPO/nextflow.config"
+check "contract and ENV_MRMEGA name the same floor (50)" bash -c "grep -q 'floor: 50 per stratum' '$REPO/docs/HANDOFF_CONTRACT.md' && grep -q 'floor (50, the same as .MIN_STRATUM_N' '$REPO/docs/ENV_MRMEGA.md'"
+out="$(awk '/source\(opt\$ancestry_config\)/ {s = NR} /^MIN_STRATUM_N <- opt\$min_stratum_n/ {a = NR} END {print (a > s && s > 0) ? "after" : "before"}' "$REPO/bin/run_gxg_interaction.R")"
+[[ "$out" == after ]] && ok "GxG: --min_stratum_n is applied after ancestry_config.R, so the option wins" || bad "GxG: ancestry_config.R overrides --min_stratum_n"
+
 section "B-03: a real launch (fake sbatch, jobs not run)"
 rm -rf "${FAKE_SLURM_DIR:?}"/*
 out="$(cd /tmp && env "${SITE[@]}" "$L" 2>&1)"; rc=$?
@@ -254,6 +265,7 @@ out="$(cd /tmp && env "${SITE[@]}" "$L" 2>&1)"; rc=$?
 RUN1="$(ls -d "${C}"/results/run_record/*/ 2>/dev/null | head -1)"; RUN1="${RUN1%/}"
 [[ -n "$RUN1" && "$(basename "$RUN1")" =~ ^[0-9]{8}-[0-9]{4}_[0-9a-z]+_1$ ]] && ok "run directory $(basename "$RUN1") (date-minute, git sha, suffix)" || bad "run dir: '$RUN1'"
 for f in params.tsv run_info.tsv jobs.tsv; do check "${f} written at launch" test -s "${RUN1}/${f}"; done
+check "params.tsv: MIN_STRATUM_N 50 (default)" grep -qP '^MIN_STRATUM_N\t50\tdefault$' "${RUN1}/params.tsv"
 n_sb="$(wc -l < "${FAKE_SLURM_DIR}/sbatch.log")"
 [[ "$(tail -n +2 "${RUN1}/jobs.tsv" | wc -l)" -eq $((n_sb - 1)) ]] && ok "jobs.tsv lists the $((n_sb - 1)) jobs finalise reports on" || bad "jobs.tsv rows"
 grep -qP "^finalise_job\\t$(tail -1 "${FAKE_SLURM_DIR}/sbatch.log" | sed 's/^id=\([0-9]*\).*/\1/')\$" "${RUN1}/run_info.tsv" && ok "run_info.tsv names the finalise job" || bad "finalise_job in run_info"

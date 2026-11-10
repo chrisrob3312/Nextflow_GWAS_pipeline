@@ -12,7 +12,7 @@
 # ============================================================================
 # END OF PIPELINE. One array task per analysis stratum:
 #   0 = POOLED  1 = EUR  2 = AAC  3 = LAT1  4 = LAT2  5 = EAS  6 = SAS  7 = OTHER
-# Strata with N < 30 are skipped automatically by the script.
+# Strata with N < MIN_STRATUM_N (default 50) are skipped automatically by the script.
 # A final non-array job computes ancestry heterogeneity of the interactions.
 #
 # Usage (normally submitted by slurm/submit_full_pipeline.sh; by hand, from the repo root,
@@ -98,7 +98,7 @@ Rscript "${SCRIPT_DIR}/bin/run_gxg_interaction.R" \
     --ancestry_col "${ANCESTRY_COL}" \
     --ancestry_config "${SCRIPT_DIR}/bin/ancestry_config.R" \
     --stratum "${STRATUM}" \
-    --min_stratum_n "${MIN_STRATUM_N:-30}" \
+    --min_stratum_n "${MIN_STRATUM_N:-50}" \
     ${TRACTOR_ARGS} \
     --output_prefix "${RESULTS_DIR}/${TRAIT}" \
     --threads "${SLURM_CPUS_PER_TASK}" \
@@ -132,7 +132,7 @@ Rscript "${SCRIPT_DIR}/bin/run_gxg_interaction.R" \\
     --phenotype "${PHENO}" \\
     --trait ${TRAIT} --model ${MODEL} ${SURV_ARGS} \\
     --covariates ${COVARIATES} --ancestry_col ${ANCESTRY_COL} \\
-    --ancestry_config "${SCRIPT_DIR}/bin/ancestry_config.R" --min_stratum_n ${MIN_STRATUM_N:-30} \\
+    --ancestry_config "${SCRIPT_DIR}/bin/ancestry_config.R" --min_stratum_n ${MIN_STRATUM_N:-50} \\
     --output_prefix "${RESULTS_DIR}/${TRAIT}.het" --threads 16
 EOF
 fi

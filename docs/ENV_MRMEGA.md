@@ -27,7 +27,7 @@ attached to. The table is written per trait as `results/mrmega_env/<trait>.study
 (`study  pc1..pc_k  pct_<level>…  n`).
 
 Sensitivity unit (reported, not primary): **stratum × protocol** as the study, where every cell reaches
-the stratum floor (50); cells below the floor are not run. This is the "Option B" of the earlier design
+the stratum floor (50, the same as `MIN_STRATUM_N` and the upstream bundling floor); cells below the floor are not run. This is the "Option B" of the earlier design
 notes and it is what makes the protocol a categorical study-level factor rather than a proportion.
 
 ## What upstream must ship

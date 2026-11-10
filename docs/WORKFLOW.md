@@ -34,7 +34,7 @@ with `phenotype_cols = 'OS,DFS,MRD'`, `survival_traits = 'OS,DFS'`, `binary_trai
 flowchart TD
     IN["INPUTS<br/>samplesheet (PLINK bed/bim/fam)<br/>phenotype TSV (sample_id, traits, covariates, GRAF_ANC)<br/>kinship RDS<br/>local ancestry MSP (RFMix)"]
     QC["QC_WORKFLOW<br/>MAF / HWE / missingness filters"]
-    ANC["ANCESTRY_INFERENCE<br/>GRAF-ANC -> strata<br/>EUR, AAC, LAT1, LAT2, EAS, SAS (N>=30) else OTHER"]
+    ANC["ANCESTRY_INFERENCE<br/>GRAF-ANC -> strata<br/>EUR, AAC, LAT1, LAT2, EAS, SAS (N>=50) else OTHER"]
     GWAS["GWAS_WORKFLOW<br/>per stratum x trait<br/>REGENIE / SAIGE / GENESIS / SPA-Cox"]
     TR["TRACTOR-GENESIS<br/>AAC (EUR,AFR) + LATINO (EUR,AFR,AMR)<br/>ALL traits: MRD binary, OS/DFS time-to-event"]
     META["META_ANALYSIS<br/>MR-MEGA across strata -> POOLED"]
@@ -142,7 +142,7 @@ flowchart TD
     PR["Independent-signal selection (gxg_prune_mode = conditional)<br/>walk GWAS hits by P > custom > known;<br/>a hit in LD (r2 > 0.2) with kept hits is tested CONDITIONAL on them<br/>(y ~ hit + kept partners + covariates, LRT); kept if cond P < 1e-4<br/>-> hits_pruned.tsv records status, proxy, conditional P"]
     PAIRS["pair list<br/>skip same-chr pairs < 1 Mb apart"]
     T0["POOLED<br/>y ~ g1 + g2 + g1:g2 + covariates + stratum"]
-    T1["per stratum (N >= 30)<br/>EUR, AAC, LAT1, LAT2, EAS, SAS, OTHER"]
+    T1["per stratum (N >= 50)<br/>EUR, AAC, LAT1, LAT2, EAS, SAS, OTHER"]
     HET["ancestry modification<br/>Cochran's Q / I2 across strata<br/>pooled 3-way LRT g1:g2:stratum"]
     LA["optional Tractor dosages<br/>Dose_anc(SNP1) x Dose_anc(SNP2)"]
     OUT["gxg.<stratum>.tsv, gxg.all.tsv, gxg.significant.tsv<br/>gxg.ancestry_heterogeneity.tsv, gxg.local_ancestry.tsv<br/>gxg_summary.tsv (wide), gxg_top_interactions.tsv"]
@@ -173,12 +173,12 @@ Each pair reports Wald and LRT p-values with Bonferroni over pairs and BH FDR.
 | Time-to-event traits | `survival_traits` (+ `survival_time_cols`, `survival_event_cols`) | `SURVIVAL_TRAITS` | default columns `<trait>_time`, `<trait>_status` |
 | Covariates | `covariate_cols`, `gxg_covariates` | `COVARIATES` | any phenotype columns |
 | Ancestry column | `gxg_ancestry_col` | `ANCESTRY_COL` | GRAF-ANC codes or labels |
-| Strata rules | `min_stratum_n`, `bin/ancestry_config.R` | `STRATA_LIST`, `MIN_STRATUM_N`, `bin/ancestry_config.R` | N < 30 pools to OTHER |
+| Strata rules | `min_stratum_n`, `bin/ancestry_config.R` | `STRATA_LIST`, `MIN_STRATUM_N`, `bin/ancestry_config.R` | default 50 (decided 10 Nov 2026); a smaller stratum is skipped, or pools to OTHER where the script assigns strata |
 | Known loci | `gxg_known_loci`, `gxg_use_default_loci` | `KNOWN_LOCI`, `GXG_USE_DEFAULT_LOCI` | default table is a starting point; verify positions |
 | Custom variants | `gxg_custom_variants` | `GXG_CUSTOM_VARIANTS` | GRCh38, one per line |
 | Steps run | (no switch) | `RUN_PRS`, `RUN_COLOC`, `RUN_VALIDATION`, `RUN_GXG` (default `false`) | every SLURM launch prints the steps it deferred |
 | Hit selection among LD-correlated hits | `gxg_prune_mode`, `gxg_cond_p_threshold`, `gxg_max_pair_r2`, `gxg_min_distance_kb` | `GXG_PRUNE_MODE`, `GXG_COND_P` | conditional (default): LD-correlated hit tested conditional on kept hits, kept if cond P < 1e-4; precedence GWAS > custom > known |
-| Tractor | `tractor_aac_pops`, `tractor_lat_pops`, `tractor_ref_ancestry`, `tractor_mac_min` | `data/tractor/<stratum>/ancestries.txt`, one per stratum, read by `submit_gwas_array.sh`; `MAC_MIN` | no default list: a stratum without the file is refused |
+| Tractor | `tractor_aac_pops`, `tractor_lat_pops`, `tractor_ref_ancestry`, `tractor_mac_min` | `data/tractor/<stratum>/ancestries.txt`, one per stratum, read by `submit_gwas_array.sh`; `MAC_MIN` | no default list: a stratum without the file is refused. `MAC_MIN` default 10; open question: the handoff contract says 20 |
 
 ## 6. SLURM orchestration (`slurm/submit_full_pipeline.sh`)
 

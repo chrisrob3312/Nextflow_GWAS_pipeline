@@ -113,8 +113,8 @@ option_list <- list(
     # Ancestry stratification
     make_option(c("--stratum"), type = "character", default = NULL,
                 help = "Ancestry stratum to analyze (EUR, AAC, LAT1, LAT2, OTHER, or POOLED)"),
-    make_option(c("--min_stratum_n"), type = "integer", default = 30,
-                help = "Minimum samples per stratum [default: 30]"),
+    make_option(c("--min_stratum_n"), type = "integer", default = 50,
+                help = "Minimum samples per stratum [default: 50]"),
     make_option(c("--ancestry_config"), type = "character", default = NULL,
                 help = "Path to ancestry_config.R for cohort-specific settings")
 )

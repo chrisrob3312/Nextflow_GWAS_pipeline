@@ -69,7 +69,9 @@ export LOG_DIR
 #   GXG_USE_DEFAULT_LOCI=true|false         include the default known-leukemia-loci table
 #   LOG_DIR=/abs/path                       where every job log goes (default <repo>/logs)
 #   RUN_PRS / RUN_COLOC / RUN_VALIDATION / RUN_GXG = true|false   steps 3-6 (default false)
-#   MIN_STRATUM_N=30  MAC_MIN=10            smallest stratum; minor allele count per ancestry term
+#   MIN_STRATUM_N=50                        smallest stratum analysed (decided 10 Nov 2026)
+#   MAC_MIN=10                              minor allele count per ancestry term; open question: the
+#                                           handoff contract says 20, the code default is still 10
 # ---------------------------------------------------------------------------
 source "${REPO}/bin/run_record.sh"
 rr_refuse_unknown_switches || exit 2
@@ -249,7 +251,7 @@ IFS=',' read -ra STRATA <<< "${STRATA_LIST}"
 # Concatenate chromosomes per stratum (genomic order files -> one sumstats per stratum)
 for stratum in "${STRATA[@]}"; do
     files=("${GWAS_DIR}/${stratum}"/chr*.tractor_genesis.genomic_order.tsv.gz)
-    [[ -e "${files[0]}" ]] || { echo "No results for ${stratum} (skipped: N < 30?)"; continue; }
+    [[ -e "${files[0]}" ]] || { echo "No results for ${stratum} (skipped: N below MIN_STRATUM_N?)"; continue; }
     echo "Combining ${GWAS_TRAIT} / ${stratum}..."
     { zcat "${files[0]}" | head -1; for f in "${files[@]}"; do zcat "$f" | tail -n +2; done; } |
         gzip > "${GWAS_DIR}/${stratum}.sumstats.gz"

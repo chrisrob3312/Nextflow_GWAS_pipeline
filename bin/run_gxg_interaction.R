@@ -93,8 +93,8 @@ option_list <- list(
                 help = "Ancestry column in phenotype file [default: GRAF_ANC]"),
     make_option("--stratum", type = "character", default = NULL,
                 help = "Run only this stratum (POOLED, EUR, AAC, LAT1, LAT2, EAS, SAS, OTHER)"),
-    make_option("--min_stratum_n", type = "integer", default = 30,
-                help = "Minimum N per stratum; smaller groups pool to OTHER [default: 30]"),
+    make_option("--min_stratum_n", type = "integer", default = 50,
+                help = "Minimum N per stratum; smaller groups pool to OTHER [default: 50]"),
     make_option("--ancestry_config", type = "character", default = NULL,
                 help = "Path to ancestry_config.R (cohort stratum rules)"),
 
@@ -140,6 +140,7 @@ GRAF_ANC_CODES <- c("107" = "AAC", "100" = "AFR", "300" = "EUR", "500" = "EAS",
 if (!is.null(opt$ancestry_config) && file.exists(opt$ancestry_config)) {
     source(opt$ancestry_config)
 }
+MIN_STRATUM_N <- opt$min_stratum_n   # again: ancestry_config.R sets its own MIN_STRATUM_N, the option wins
 
 cat("\n")
 cat("╔══════════════════════════════════════════════════════════════════╗\n")

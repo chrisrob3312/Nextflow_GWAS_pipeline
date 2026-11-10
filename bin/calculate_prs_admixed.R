@@ -176,10 +176,10 @@ if (!is.na(slurm_cpus) && slurm_cpus > 0) {
 # Ancestry Configuration for Latino Cohort
 # ============================================================================
 # Primary strata (run separately): EUR, AAC, LAT1, LAT2
-# Small groups (N < 30): Pool to OTHER, meta-analyze into pooled results
+# Small groups (N < MIN_STRATUM_N): Pool to OTHER, meta-analyze into pooled results
 # LAT1/LAT2: Run separately as >60% of cohort is Latino
 
-MIN_STRATUM_N <- 30
+MIN_STRATUM_N <- 50      # smallest stratum (decided 10 Nov 2026)
 PRIMARY_ANCESTRIES <- c("EUR", "AAC", "LAT1", "LAT2")
 
 # Parse ancestries

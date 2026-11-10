@@ -168,6 +168,9 @@ build and the run record are described in [docs/HPC_SITE.md](docs/HPC_SITE.md); 
    with `RUN_PRS=true`, `RUN_COLOC=true`, `RUN_VALIDATION=true` (needs `RUN_PRS`) and
    `RUN_GXG=true`; every launch prints the ones it deferred, e.g.
    `deferred: PRS COLOC VALIDATION GXG (RUN_*=false)`.
+   The number-changing switches (all recorded in the run record) include `MIN_STRATUM_N`, the
+   smallest stratum analysed (default 50, decided 10 Nov 2026), and `MAC_MIN`, the minor allele
+   count an ancestry's dose term needs (default 10; the handoff contract says 20, still open).
 4. **Ancestries per stratum.** Each stratum needs `data/tractor/<stratum>/ancestries.txt`, the
    ancestry labels its Tractor files carry ([docs/HANDOFF_CONTRACT.md](docs/HANDOFF_CONTRACT.md)).
 5. **Run record.** Each launch writes `results/run_record/<run_id>/`: `params.tsv` (every
