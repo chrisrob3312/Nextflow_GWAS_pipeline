@@ -15,7 +15,9 @@
 #
 # Usage:
 #   meta_analyze_strata.R --input_dir results/gwas/OS --strata EUR,AAC,LAT1,LAT2,OTHER \
-#                         --output results/gwas/OS/POOLED.sumstats.gz
+#                         --output results/gwas/os/POOLED.ivw_descriptive.sumstats.gz
+# The output starts with "##" lines: strata= (pooled), strata_skipped= (below MIN_STRATUM_N, from
+# --strata_skipped), backgrounds= (the ancestry backgrounds pooled), covariates= (CP-22, CP-08).
 # ============================================================================
 
 suppressPackageStartupMessages({ library(data.table); library(optparse) })
@@ -31,7 +33,9 @@ opt <- parse_args(OptionParser(option_list = list(
                 help = "File name pattern inside input_dir [default: {stratum}.sumstats.gz]"),
     make_option("--method", type = "character", default = "random", help = "random or fixed"),
     make_option("--min_strata", type = "integer", default = 2),
-    make_option("--output", type = "character", default = "POOLED.sumstats.gz"),
+    make_option("--strata_skipped", type = "character", default = "",
+                help = "Strata left out because they were skipped (below MIN_STRATUM_N); recorded in the header only"),
+    make_option("--output", type = "character", default = "POOLED.ivw_descriptive.sumstats.gz"),
     make_option("--threads", type = "integer", default = 4)
 )))
 
@@ -112,6 +116,10 @@ cov_known <- cov_by_stratum[!is.na(cov_by_stratum)]
 meta <- if (length(cov_known) == 0) character() else if (length(unique(cov_known)) == 1 && length(cov_known) == length(cov_by_stratum)) {
     c(covariates = unname(cov_known[1]))
 } else setNames(ifelse(is.na(cov_by_stratum), "unknown", cov_by_stratum), paste0("covariates_", names(cov_by_stratum)))
+# Scope (CP-22): which strata were pooled, which were skipped, which backgrounds
+meta <- c(strata = paste(names(dt_list), collapse = ","),
+          strata_skipped = if (nzchar(opt$strata_skipped)) opt$strata_skipped else "none",
+          backgrounds = paste(bg, collapse = ","), meta)
 fwrite_sumstats(pooled, opt$output, meta)
 cat("\nPooled results:", opt$output, "\n")
 cat("  Variants:", nrow(pooled), "\n")

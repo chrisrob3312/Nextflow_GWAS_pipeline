@@ -90,7 +90,7 @@ flowchart TD
 | `GWAS_WORKFLOW` (standard) | stratified genotypes x trait, phenotype, covariates, kinship | `<id>.<ancestry>.<trait>.sumstats.gz`, filtered sumstats, significant variants | META, FM, H2, VIS, GxG |
 | `PLINK_TO_VCF` -> `TRACTOR_EXTRACT_TRACTS` | AAC and merged LATINO genotypes + MSP; `meta.tractor_pops` | `<id>.ancdose.<k>.tsv.gz`, `<id>.hapcount.<k>.tsv.gz` per ancestry k | TRACTOR_GENESIS |
 | `TRACTOR_GENESIS` (`bin/tractor_genesis_adapter.R`) | dosages + hapcounts, phenotype, kinship, covariates; `meta.model` | `<prefix>.tractor_genesis.tsv.gz` (sorted by P_JOINT), `.genomic_order.tsv.gz`, `.top_hits.tsv`, `.significant.tsv`, `.heterogeneous.tsv`, `.<anc>_specific.tsv`, `.null_model.rds` | META, GxG |
-| `META_ANALYSIS` | sumstats grouped by trait across strata | MR-MEGA results, heterogeneity table; SLURM path: `bin/meta_analyze_strata.R` -> `POOLED.sumstats.gz` | FM, H2, PRS, FUNC, GxG |
+| `META_ANALYSIS` | sumstats grouped by trait across strata | MR-MEGA results, heterogeneity table; SLURM path: `bin/meta_analyze_strata.R` -> `POOLED.ivw_descriptive.sumstats.gz` | FM, H2, PRS, FUNC, GxG |
 | `FINE_MAPPING` | filtered sumstats, LD reference / cohort LD | credible sets, PIPs | COLOC |
 | `COLOCALIZATION` (`COLOC_RUN` = `bin/run_colocalization.R`) | every ancestry-stratified GWAS (standard + Tractor-GENESIS) and the meta/POOLED GWAS; QTL megaset pooled by type (`curated_qtl_sources.yml` via `download_qtl_datasets.R`, `harmonize_qtl.R`); optional cohort LD | per GWAS: `.coloc_susie.tsv`, `.hyprcoloc.tsv`, `.opera.tsv`; per trait: `coloc_combined.tsv`, `coloc_consensus.tsv`, shared / divergent / meta-only tables, PP4 heatmap | REP |
 | `HERITABILITY` | sumstats, meta results, LD reference | h2 per stratum, local-ancestry h2, genetic correlations | REP |
@@ -191,7 +191,7 @@ Each pair reports Wald and LRT p-values with Bonferroni over pairs and BH FDR.
 | Time-to-event traits | `survival_traits` (+ `survival_time_cols`, `survival_event_cols`) | `SURVIVAL_TRAITS` (default `efs,os`); `TIME_COL_<trait>`, `EVENT_COL_<trait>` override one trait | columns `<trait>_time`, `<trait>_event`, as the handoff contract names them; each trait has its own |
 | Covariates | `covariate_cols`, `gxg_covariates` | `COVARIATES` (default: the bundle's `phenotypes/covariates.txt`, then `PC1..PC5`) | numeric phenotype columns: the launcher refuses a name that is not a column, the adapter one that is not numeric; the list used is written as `## covariates=` above every results table |
 | Ancestry column | `gxg_ancestry_col` | `ANCESTRY_COL` | GRAF-ANC codes or labels |
-| Strata rules | `min_stratum_n`, `bin/ancestry_config.R` | `STRATA_LIST`, `MIN_STRATUM_N`, `bin/ancestry_config.R` | default 50 (decided 10 Nov 2026); a smaller stratum is skipped, or pools to OTHER where the script assigns strata |
+| Strata rules | `min_stratum_n`, `bin/ancestry_config.R` | `STRATA_LIST` (default: every stratum of the bundle's `ancestry/strata.tsv`; a name it lacks is refused), `MIN_STRATUM_N`, `bin/ancestry_config.R` | `MIN_STRATUM_N` default 50 (decided 10 Nov 2026); a smaller stratum is skipped, and STEP 2 names it in the pooled file's `## strata_skipped=` |
 | Known loci | `gxg_known_loci`, `gxg_use_default_loci` | `KNOWN_LOCI`, `GXG_USE_DEFAULT_LOCI` | default table is a starting point; verify positions |
 | Custom variants | `gxg_custom_variants` | `GXG_CUSTOM_VARIANTS` | GRCh38, one per line |
 | Steps run | (no switch) | `RUN_PRS`, `RUN_COLOC`, `RUN_VALIDATION`, `RUN_GXG` (default `false`) | every SLURM launch prints the steps it deferred |
@@ -205,11 +205,11 @@ flowchart TD
     S0["STEP 0  submit_pcair.sh<br/>ingest the bundle's PCs (cohort + within-stratum) and GRM<br/>STRUCTURE_SOURCE=compute: PC-AiR / PC-Relate instead"]
     S1["STEP 1  submit_gwas_array.sh<br/>traits x strata, 22-chromosome arrays<br/>Tractor-GENESIS for every trait<br/>--ancestries from data/tractor/&lt;stratum&gt;/ancestries.txt"]
     S0 --> S1
-    S2["STEP 2  combine per trait<br/>chr* -> <stratum>.sumstats.gz<br/>bin/meta_analyze_strata.R -> POOLED.sumstats.gz"]
+    S2["STEP 2  per trait: strata disjoint, every stratum complete or skipped<br/>chr* -> <stratum>.sumstats.gz<br/>bin/meta_analyze_strata.R -> POOLED.ivw_descriptive.sumstats.gz"]
     S3["STEP 3  submit_prs_array.sh<br/>6 PRS methods per trait<br/>RUN_PRS=true"]
-    S4["STEP 4  colocalization, one array per trait<br/>results/gwas/&lt;trait&gt;/POOLED.sumstats.gz<br/>6 QTL types x 3 methods<br/>RUN_COLOC=true"]
+    S4["STEP 4  colocalization, one array per trait<br/>results/gwas/&lt;trait&gt;/POOLED.ivw_descriptive.sumstats.gz<br/>6 QTL types x 3 methods<br/>RUN_COLOC=true"]
     S5["STEP 5  PRS validation<br/>overall + per stratum<br/>RUN_VALIDATION=true"]
-    S6["STEP 6  submit_gxg_array.sh<br/>per trait: POOLED + 7 strata,<br/>then ancestry-heterogeneity job<br/>RUN_GXG=true"]
+    S6["STEP 6  submit_gxg_array.sh<br/>per trait: POOLED + each stratum,<br/>then ancestry-heterogeneity job<br/>RUN_GXG=true"]
     F["run record finalise<br/>afterany on every job<br/>trace.tsv + summary.md"]
     S1 --> S2
     S2 -.-> S3 -.-> S5
@@ -260,8 +260,16 @@ Tractor-GENESIS reports, for every variant and trait: `P_JOINT` (any effect),
 and for each ancestral background `BETA_<anc>`, `SE_<anc>`, `Z_<anc>`,
 `P_<anc>`, `MAC_<anc>`, plus `P_HET` and `I2` for whether the effects differ
 across backgrounds. The per-stratum SLURM runs add stratum-level results
-(EUR, AAC, LAT1, LAT2, ...) on top, and `meta_analyze_strata.R` pools each
-background across strata. PRS adds the local-ancestry partial scores, and
+(one per stratum of the bundle's `strata.tsv`) on top, and `meta_analyze_strata.R` pools each
+background across strata.
+
+STEP 2 (one job per trait) first checks the strata: no sample in two
+`results/strata/<S>.samples.txt` (else `strata not disjoint`), and every stratum either has all 22
+chromosomes' results or was skipped below `MIN_STRATUM_N` on every chromosome (each task's
+`run_counts.tsv` says which); anything else stops the job naming the stratum. It then combines
+the chromosomes and pools the analysed strata into `POOLED.ivw_descriptive.sumstats.gz` (a
+descriptive IVW / random-effects summary), whose `##` lines name the strata pooled, the strata
+skipped and the backgrounds. With fewer than two analysed strata no pooled file is written. PRS adds the local-ancestry partial scores, and
 GxG reports every interaction pooled, per stratum, and for ancestry
 modification.
 

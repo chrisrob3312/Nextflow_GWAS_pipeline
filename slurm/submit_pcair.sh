@@ -78,4 +78,12 @@ esac
 rr_args "$(print_cmd "${CMD[@]}")" "${INPUTS[@]}"
 "${CMD[@]}"
 
+# The comparator knows no strata: write each stratum's members from the bundle's strata.tsv, as the
+# ingest does, so the combine step can check them for overlap (CP-22)
+if [[ "${STRUCTURE_SOURCE:-bundle}" == compute ]]; then
+    mkdir -p "${SCRIPT_DIR}/results/strata"
+    awk -F'\t' -v d="${SCRIPT_DIR}/results/strata" 'NR > 1 && $2 != "" {print $1 > (d "/" $2 ".samples.txt")}' \
+        "${HANDOFF_DIR}/ancestry/strata.tsv"
+fi
+
 echo "Structure (${STRUCTURE_SOURCE:-bundle}) ready in ${OUT_DIR}"

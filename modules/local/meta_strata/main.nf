@@ -17,7 +17,7 @@ process META_STRATA {
     val method   // 'random' or 'fixed'
 
     output:
-    tuple val(trait_meta), path("${prefix}.POOLED.sumstats.gz"), emit: meta_results
+    tuple val(trait_meta), path("${prefix}.POOLED.ivw_descriptive.sumstats.gz"), emit: meta_results
     path "versions.yml", emit: versions
 
     when:
@@ -37,7 +37,7 @@ process META_STRATA {
         --strata ${anc_list.join(',')} \\
         --method ${method} \\
         --min_strata 2 \\
-        --output ${prefix}.POOLED.sumstats.gz \\
+        --output ${prefix}.POOLED.ivw_descriptive.sumstats.gz \\
         --threads ${task.cpus}
 
     cat <<-END_VERSIONS > versions.yml

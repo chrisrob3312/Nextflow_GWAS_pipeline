@@ -55,7 +55,7 @@ _RR_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # MIN_STRATUM_N), PC_SCALE, MRMEGA_PCS, BUNDLE_RULES; rr_refuse_unknown_switches stops a launch
 # that sets one of them, rather than let it be silently ignored.
 RR_SWITCHES=(
-    "STRATA_LIST|EUR,AAC,LAT1,LAT2,OTHER|strata analysed"
+    "STRATA_LIST|@job|strata analysed; default: every stratum in HANDOFF_DIR/ancestry/strata.tsv (set_by bundle)"
     "TRAITS_LIST|mrd,efs,os|traits analysed (phenotype columns, as docs/HANDOFF_CONTRACT.md names them)"
     "SURVIVAL_TRAITS|efs,os|traits run as time-to-event, with columns <trait>_time and <trait>_event; the rest are binary"
     "COVARIATES|@job|model covariates (GWAS, GxG), numeric phenotype columns; default: the bundle's phenotypes/covariates.txt then PC1..PC5 (set_by bundle)"

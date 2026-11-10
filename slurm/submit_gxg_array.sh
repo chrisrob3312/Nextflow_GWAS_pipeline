@@ -10,8 +10,9 @@
 # ============================================================================
 # SLURM Array Job: GxG (Epistasis) Interaction Tests on GWAS Hits
 # ============================================================================
-# END OF PIPELINE. One array task per analysis stratum:
-#   0 = POOLED  1 = EUR  2 = AAC  3 = LAT1  4 = LAT2  5 = EAS  6 = SAS  7 = OTHER
+# END OF PIPELINE. One array task per analysis stratum: task 0 = POOLED, then one per stratum of
+# STRATA_LIST (default: the bundle's ancestry/strata.tsv, sorted). The launcher passes
+# --array=0-<number of strata>; by hand, pass it too (the #SBATCH line above is only a default).
 # Strata with N < MIN_STRATUM_N (default 50) are skipped automatically by the script.
 # A final non-array job computes ancestry heterogeneity of the interactions.
 #
@@ -40,7 +41,8 @@ set_thread_env
 
 TRAIT="${1:?trait required (mrd, efs, os)}"
 MODEL="${2:-survival}"
-STRATUM=$(get_array_item "POOLED,EUR,AAC,LAT1,LAT2,EAS,SAS,OTHER")
+GWAS_STRATA="${STRATA_LIST:-$(bundle_strata)}" || exit 1
+STRATUM=$(get_array_item "POOLED,${GWAS_STRATA}")
 
 echo "=============================================="
 echo "Trait: ${TRAIT}   Model: ${MODEL}   Stratum: ${STRATUM}"
@@ -59,11 +61,12 @@ mkdir -p "${RESULTS_DIR}"
 # sumstats (skipped below MIN_STRATUM_N, or not analysed) is left out and named; none at all stops
 # the task. (The old `ls ... | paste` died under pipefail as soon as one file was missing.)
 SUMSTATS_FILES=(); SUMSTATS_MISSING=()
-for s in POOLED EUR AAC LAT1 LAT2 EAS SAS OTHER; do
-    if [[ -s "${GWAS_DIR}/${s}.sumstats.gz" ]]; then SUMSTATS_FILES+=("${GWAS_DIR}/${s}.sumstats.gz"); else SUMSTATS_MISSING+=("${s}"); fi
+for s in POOLED ${GWAS_STRATA//,/ }; do
+    f="${GWAS_DIR}/${s}.sumstats.gz"; [[ "$s" == POOLED ]] && f="${GWAS_DIR}/POOLED.ivw_descriptive.sumstats.gz"
+    if [[ -s "$f" ]]; then SUMSTATS_FILES+=("$f"); else SUMSTATS_MISSING+=("${s}"); fi
 done
 if [[ ${#SUMSTATS_FILES[@]} -eq 0 ]]; then
-    echo "ERROR: no sumstats for ${TRAIT}: none of ${GWAS_DIR}/{POOLED,EUR,AAC,LAT1,LAT2,EAS,SAS,OTHER}.sumstats.gz exists" >&2
+    echo "ERROR: no sumstats for ${TRAIT}: none of ${GWAS_DIR}/POOLED.ivw_descriptive.sumstats.gz, {${GWAS_STRATA}}.sumstats.gz exists" >&2
     exit 1
 fi
 if [[ ${#SUMSTATS_MISSING[@]} -gt 0 ]]; then

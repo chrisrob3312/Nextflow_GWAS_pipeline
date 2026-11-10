@@ -154,6 +154,14 @@ default_covariates() {
     printf '%s%sPC1,PC2,PC3,PC4,PC5' "$names" "${names:+,}"
 }
 
+# bundle_strata: the strata of the handoff bundle (HANDOFF_DIR/ancestry/strata.tsv), comma-joined,
+# sorted; the default STRATA_LIST (CP-22). Fails, naming the file, if it is missing.
+bundle_strata() {
+    local f="${HANDOFF_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/data/handoff}/ancestry/strata.tsv"
+    [[ -s "$f" ]] || { echo "ERROR: ${f} (the bundle's strata) is missing or empty" >&2; return 1; }
+    awk -F'\t' 'NR > 1 && $2 != "" {print $2}' "$f" | sort -u | paste -sd, -
+}
+
 trait_is_survival() { [[ ",${SURVIVAL_TRAITS:-efs,os}," == *",$1,"* ]]; }
 
 # Print a command so it can be read, and pasted back into a shell: plain words as they are,

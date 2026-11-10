@@ -46,7 +46,7 @@ mkdir -p "${W}/envs/"{gwas-r,gwas-py,lai,mrmega}/bin "${W}/scratch"
 cat > "${W}/envs/gwas-r/bin/Rscript" <<EOF
 #!/usr/bin/env bash
 # Scripts that need only base R + data.table run in the real R (when there is one)
-case "\${1:-}" in */ingest_structure.R|*/qc_assert.R) [[ -n "${REAL_RSCRIPT}" ]] && exec "${REAL_RSCRIPT}" "\$@" ;; esac
+case "\${1:-}" in */ingest_structure.R|*/qc_assert.R|*/meta_analyze_strata.R) [[ -n "${REAL_RSCRIPT}" ]] && exec "${REAL_RSCRIPT}" "\$@" ;; esac
 EOF
 cat >> "${W}/envs/gwas-r/bin/Rscript" <<'EOF'
 if [[ "${1:-}" == */check_r_libs.R ]]; then
@@ -62,15 +62,18 @@ echo "stub Rscript: $*"
 if [[ "${1:-}" == */tractor_genesis_adapter.R ]]; then
     prev=""; for a in "$@"; do [[ "$prev" == --output_prefix ]] && out="$a"; prev="$a"; done
     st="${FAKE_ADAPTER_STATUS:-ok}"
+    sp=""; for a in "$@"; do [[ "$sp" == --stratum && ",${FAKE_SKIP_STRATUM:-}," == *",$a,"* ]] && st=skipped_below_min_stratum_n; sp="$a"; done
     if [[ "$st" == ok ]]; then nt=900; else nt=NA; fi
     printf 'key\tvalue\nstatus\t%s\nstratum\tEUR\nstratum_check\tpassed\nmin_stratum_n\t50\nn_null\t%s\nn_variants\t1000\nn_pass_mac\t950\nn_tested\t%s\nn_failed\t2\n' \
         "$st" "${FAKE_N_NULL:-120}" "$nt" > "${out}.run_counts.tsv"
     # and, when it ran, a genomic-order table with its "## covariates=" line (FAKE_META_CHR<n> replaces
     # that line for chromosome n)
-    if [[ "$st" == ok ]]; then
+    nout=0; sp=""; for a in "$@"; do [[ "$sp" == --stratum && ",${FAKE_NO_OUTPUT:-}," == *",$a,"* ]] && nout=1; sp="$a"; done
+    if [[ "$st" == ok && $nout == 0 ]]; then
         cov=""; chr=""; prev=""; for a in "$@"; do [[ "$prev" == --covariates ]] && cov="$a"; [[ "$prev" == --chromosome ]] && chr="$a"; prev="$a"; done
         mv="FAKE_META_CHR${chr}"
-        printf '%s\nCHR\tPOS\tID\tP_JOINT\n%s\t100\t%s:100\t0.5\n' "${!mv:-## covariates=${cov}}" "$chr" "$chr" | gzip > "${out}.tractor_genesis.genomic_order.tsv.gz"
+        printf '%s\nCHR\tPOS\tID\tREF\tALT\tN\tP_JOINT\tMAC_EUR\tBETA_EUR\tSE_EUR\tP_EUR\n%s\t100\t%s:100\tA\tG\t120\t0.5\t30\t0.1\t0.05\t0.04\n' \
+            "${!mv:-## covariates=${cov}}" "$chr" "$chr" | gzip > "${out}.tractor_genesis.genomic_order.tsv.gz"
     fi
     # and its QC verdicts (bin/qc_assert.R): PASS, INFO for the model when skipped, FAIL for the id
     # named in FAKE_ADAPTER_QC_FAIL
@@ -98,6 +101,10 @@ printf 'EUR\n' > "${C}/data/tractor/EUR/ancestries.txt"
 printf 'AFR\nEUR\n' > "${C}/data/tractor/AAC/ancestries.txt"
 for s in LAT1 LAT2 OTHER; do printf 'AFR\nAMR\nEUR\n' > "${C}/data/tractor/${s}/ancestries.txt"; done
 printf 'AFR\nAMR\nEUR\n' > "${C}/data/tractor/ancestries.txt"       # cohort-wide list (GxG pooled, PRS)
+# the stub bundle's strata (ancestry/strata.tsv: EUR AFR AMR MIX), the launcher's default STRATA_LIST
+for s in AFR AMR MIX; do mkdir -p "${C}/data/tractor/${s}"; done
+printf 'AFR\nEUR\n' > "${C}/data/tractor/AFR/ancestries.txt"
+for s in AMR MIX; do printf 'AFR\nAMR\nEUR\n' > "${C}/data/tractor/${s}/ancestries.txt"; done
 # the handoff bundle (HANDOFF_DIR default <repo>/data/handoff): the stub the checker's tests use
 bash "${C}/scripts/test/make_stub_bundle.sh" "${C}/data/handoff" >/dev/null 2>&1 || echo "  (make_stub_bundle.sh failed)"
 L="${C}/slurm/submit_full_pipeline.sh"
@@ -243,7 +250,8 @@ grep -q 'submit_prs_array.sh os' <<< "$(grep '\[DRY-RUN\]' <<< "$out")" && ok "R
 has "$out" "deferred: COLOC VALIDATION GXG (RUN_*=false)" && ok "RUN_PRS=true: deferred list shrinks" || bad "deferred with RUN_PRS"
 out="$(cd /tmp && env "${SITE[@]}" RUN_GXG=true "$L" --dry-run 2>&1)"
 gx="$(grep '\[DRY-RUN\] GxG' <<< "$out")"
-[[ "$(grep -c -- '--dependency=afterok:dry17:dry18:dry19 ' <<< "$gx")" -eq 3 ]] && ok "RUN_GXG without PRS: GxG waits on the three combine jobs" || bad "GxG dependency: $gx"
+[[ "$(grep -c -- '--dependency=afterok:dry14:dry15:dry16 ' <<< "$gx")" -eq 3 ]] && grep -q -- '--array=0-4 ' <<< "$gx" \
+    && ok "RUN_GXG without PRS: GxG waits on the three combine jobs; one task for POOLED + each of the 4 bundle strata" || bad "GxG dependency: $gx"
 grep -q -- 'afterok: \|afterok::\|afterok:$\|--dependency= ' <<< "$out" && bad "an empty job id in a dependency" || ok "no empty job id in any dependency"
 out="$(cd /tmp && env "${SITE[@]}" RUN_PRS=true RUN_COLOC=true RUN_VALIDATION=true RUN_GXG=true "$L" --dry-run 2>&1)"
 has "$out" "deferred: none" && [[ "$(grep -c '\[DRY-RUN\] \(PRS\|colocalization\|PRS validation\|GxG\)' <<< "$out")" -eq 10 ]] && ok "all RUN_*=true: every step submitted (coloc once per trait)" || bad "all on"
@@ -282,11 +290,13 @@ grep -q -- '--ancestries AFR,EUR .*--chromosome 5 ' <<< "$(grep '^\[DRY-RUN\]' <
 mv "${C}/data/tractor/LAT1/ancestries.txt" "${W}/anc.away"
 out="$(cd /tmp && DRY_RUN=1 bash "$G" LAT1 os survival 2>&1)"; rc=$?
 [[ $rc -ne 0 ]] && has "$out" "${C}/data/tractor/LAT1/ancestries.txt does not exist" && ok "without the file: exits non-zero naming it" || bad "absent: rc=$rc $out"
-out="$(cd /tmp && env "${SITE[@]}" "$L" --dry-run 2>&1)"
-has "$out" "WARNING: missing ${C}/data/tractor/LAT1/ancestries.txt" && ok "launcher dry run warns about the missing file" || bad "launcher warning"
-out="$(cd /tmp && env "${SITE[@]}" "$L" 2>&1)"; rc=$?
-[[ $rc -ne 0 ]] && has "$out" "REFUSED: missing ${C}/data/tractor/LAT1/ancestries.txt" && ok "launcher refuses a real launch without it" || bad "launcher refusal: rc=$rc"
 mv "${W}/anc.away" "${C}/data/tractor/LAT1/ancestries.txt"
+mv "${C}/data/tractor/AMR/ancestries.txt" "${W}/anc.away"
+out="$(cd /tmp && env "${SITE[@]}" "$L" --dry-run 2>&1)"
+has "$out" "WARNING: missing ${C}/data/tractor/AMR/ancestries.txt" && ok "launcher dry run warns about the missing file" || bad "launcher warning"
+out="$(cd /tmp && env "${SITE[@]}" "$L" 2>&1)"; rc=$?
+[[ $rc -ne 0 ]] && has "$out" "REFUSED: missing ${C}/data/tractor/AMR/ancestries.txt" && ok "launcher refuses a real launch without it" || bad "launcher refusal: rc=$rc"
+mv "${W}/anc.away" "${C}/data/tractor/AMR/ancestries.txt"
 rm -rf "${C:?}/results" "${C:?}/logs"
 out="$(cd /tmp && DRY_RUN=1 MAC_MIN=30 MIN_STRATUM_N=50 bash "$G" EUR os survival 2>&1)"
 grep -q -- '--min_stratum_n 50 .*--mac_min 30 ' <<< "$(grep '^\[DRY-RUN\]' <<< "$out")" && ok "MAC_MIN and MIN_STRATUM_N reach the adapter" || bad "switches: $out"
@@ -522,7 +532,7 @@ rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results" "${C:?}/logs"
 out="$(cd /tmp && env "${SITE[@]}" STRATA_LIST=EUR TRAITS_LIST=os FAKE_SBATCH_RUN=1 RR_SACCT_WAIT=0 FAKE_ADAPTER_STATUS=skipped_below_min_stratum_n FAKE_N_NULL=31 "$L" 2>&1)"
 RD="$(ls -d "${C}"/results/run_record/*/ | head -1)"
 grep -q '| gwas | 22 | 22 | 0 | 0 | 22 |' "${RD%/}/summary.md" && ok "summary.md: 22 gwas tasks exit 0, all 22 skipped below MIN_STRATUM_N" || bad "summary: $(grep '| gwas' "${RD%/}/summary.md")"
-grep -q 'skipped: N below MIN_STRATUM_N' "${C}"/logs/combine_os_*.out && ok "combine names the likely reason for a stratum without results" || bad "combine message"
+grep -q 'Stratum EUR: skipped on every chromosome (below MIN_STRATUM_N); not pooled' "${C}"/logs/combine_os_*.out && ok "combine says the stratum was skipped below MIN_STRATUM_N and is not pooled" || bad "combine message: $(cat "${C}"/logs/combine_os_*.out)"
 
 section "CP-11: qc_assert / qc_gate, sample accounting at every join, gates between steps"
 QG="${C}/bin/qc_gate.sh"; QD="${W}/qc_unit"; rm -rf "${QD:?}"; mkdir -p "${QD}/assertions.d"
@@ -655,10 +665,10 @@ if [[ -n "${REAL_RSCRIPT}" ]] && "${REAL_RSCRIPT}" -e 'quit(status = !all(sapply
     # meta_analyze_strata.R carries the strata's covariates line: once when they agree, per stratum otherwise
     cp "${TD}/t.tsv.gz" "${TD}/EUR.sumstats.gz"; cp "${TD}/t.tsv.gz" "${TD}/AFR.sumstats.gz"
     "${REAL_RSCRIPT}" "${C}/bin/meta_analyze_strata.R" --input_dir "$TD" --strata EUR,AFR --output "${TD}/P1.gz" --threads 1 >/dev/null 2>&1
-    m1="$(zcat "${TD}/P1.gz" 2>/dev/null | head -1)"
+    m1="$(zcat "${TD}/P1.gz" 2>/dev/null | grep '^## covariates')"
     (cd "$TD" && zcat t.tsv.gz | sed 's/^## covariates=.*/## covariates=sex,PC1/' | gzip > AFR.sumstats.gz)
     "${REAL_RSCRIPT}" "${C}/bin/meta_analyze_strata.R" --input_dir "$TD" --strata EUR,AFR --output "${TD}/P2.gz" --threads 1 >/dev/null 2>&1
-    m2="$(zcat "${TD}/P2.gz" 2>/dev/null | head -2 | paste -sd'|' -)"
+    m2="$(zcat "${TD}/P2.gz" 2>/dev/null | grep '^## covariates' | paste -sd'|' -)"
     [[ "$m1" == "## covariates=sex,age_at_diagnosis,PC1" && "$m2" == "## covariates_EUR=sex,age_at_diagnosis,PC1|## covariates_AFR=sex,PC1" ]] \
         && ok "meta_analyze_strata.R: POOLED carries '## covariates=' (one line if the strata agree, one per stratum if not)" || bad "meta header: '$m1' / '$m2'"
 else
@@ -805,18 +815,57 @@ if python3 -c 'import pandas' >/dev/null 2>&1; then
 fi
 grep -q 'path("${prefix}.loci.tsv"),        emit: loci' "${C}/modules/local/gwas_filter/main.nf" && ok "Nextflow GWAS_FILTER emits the locus table" || bad "module loci"
 
+section "CP-22: STEP 2 reads the bundle's strata, checks them disjoint and complete, writes POOLED.ivw_descriptive"
+out="$(cd /tmp && env "${SITE[@]}" STRATA_LIST=EUR,AAC "$L" --dry-run 2>&1)"; rc=$?
+[[ $rc -eq 2 ]] && has "$out" "REFUSED: stratum AAC (STRATA_LIST) is not in ${C}/data/handoff/ancestry/strata.tsv (it has: AFR,AMR,EUR,MIX)" \
+    && ok "a stratum the bundle's strata.tsv does not have: refused" || bad "unknown stratum: rc=$rc $(tail -2 <<< "$out")"
+if [[ -n "${REAL_RSCRIPT}" ]] && "${REAL_RSCRIPT}" -e 'quit(status = !all(sapply(c("data.table", "optparse"), requireNamespace, quietly = TRUE)))' >/dev/null 2>&1 \
+   && ! grep -q "placeholder rds" "${C}/data/handoff/structure/cohort.pcrelate.grm.rds"; then
+    e2e() { rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results/run_record" "${C:?}/results/gwas" "${C:?}/logs"
+            out="$(cd /tmp && env "${SITE[@]}" TRAITS_LIST=os FAKE_SBATCH_RUN=1 RR_SACCT_WAIT=0 "$@" "$L" 2>&1)"
+            RD="$(ls -d "${C}"/results/run_record/*/ | head -1)"; RD="${RD%/}"
+            CX="$(awk -F'\t' 'NR > 1 && $1 == "combine" {print $14}' "${RD}/trace.tsv")"; CL="$(cat "${C}"/logs/combine_os_*.out 2>/dev/null)"; }
+    rm -rf "${C:?}/results"
+    e2e
+    grep -q $'^STRATA_LIST\tAFR,AMR,EUR,MIX\tbundle$' "${RD}/params.tsv" && ok "STRATA_LIST unset: the bundle's strata (AFR,AMR,EUR,MIX), set_by bundle in params.tsv" || bad "default strata: $(grep STRATA_LIST "${RD}/params.tsv")"
+    P="${C}/results/gwas/os/POOLED.ivw_descriptive.sumstats.gz"
+    [[ "$CX" == 0 ]] && has "$CL" "Strata disjoint: AFR,AMR,EUR,MIX (8 samples)" && [[ -s "$P" && ! -e "${C}/results/gwas/os/POOLED.sumstats.gz" ]] \
+        && [[ "$(zcat "$P" | grep '^##' | paste -sd'|' -)" == "## strata=AFR,AMR,EUR,MIX|## strata_skipped=none|## backgrounds=EUR|## covariates=sex,age_at_diagnosis,cd19_pos_pct,storage_days,PC1,PC2,PC3,PC4,PC5" ]] \
+        && ok "four strata: disjoint, all 22 chromosomes each, pooled into POOLED.ivw_descriptive.sumstats.gz with ## strata= / strata_skipped= / backgrounds= / covariates=" || bad "pooled: CX=$CX $(zcat "$P" 2>&1 | head -5) $CL"
+    e2e STRATA_LIST=EUR,AFR,AMR FAKE_SKIP_STRATUM=AFR
+    [[ "$CX" == 0 ]] && has "$CL" "Stratum AFR: skipped on every chromosome (below MIN_STRATUM_N); not pooled" && zcat "$P" | grep -qx '## strata=EUR,AMR' && zcat "$P" | grep -qx '## strata_skipped=AFR' \
+        && ok "a stratum skipped below MIN_STRATUM_N: left out, and named in ## strata_skipped=" || bad "skipped stratum: CX=$CX $(zcat "$P" 2>&1 | head -3)"
+    e2e STRATA_LIST=EUR,AFR,AMR FAKE_NO_OUTPUT=AMR
+    [[ "$CX" == 1 ]] && has "$CL" "ERROR: stratum AMR: no results for 22 chromosome(s): chr1 chr2" \
+        && ok "one stratum's chromosome files gone: STEP 2 exits non-zero naming the stratum (no silent continue)" || bad "missing stratum: CX=$CX $CL"
+    e2e STRATA_LIST=EUR,AFR FAKE_SKIP_STRATUM=AFR
+    [[ "$CX" == 0 ]] && has "$CL" "POOLED not written: 1 stratum(s) analysed (EUR); pooling needs two" && [[ ! -e "$P" ]] \
+        && ok "one stratum left: no POOLED file, and the log says why" || bad "single stratum: CX=$CX $CL"
+    printf 'S001\n' >> "${C}/results/strata/AFR.samples.txt"
+    e2e STRATA_LIST=EUR,AFR SKIP_PCAIR=true
+    [[ "$CX" == 1 ]] && has "$CL" "ERROR: strata not disjoint: 1 sample(s); e.g. EUR and AFR share S001" \
+        && ok "an overlapping samples.txt pair halts STEP 2 with 'strata not disjoint'" || bad "overlap: CX=$CX $CL"
+    rm -rf "${C:?}/results/strata"; mkdir -p "${C}/logs"
+    jid="$(pcair STRUCTURE_SOURCE=compute)"
+    [[ "$(cat "${C}/results/strata/EUR.samples.txt" 2>/dev/null | paste -sd, -)" == "S001,S002,S003" && -s "${C}/results/strata/MIX.samples.txt" ]] \
+        && ok "STRUCTURE_SOURCE=compute: results/strata/<S>.samples.txt written from strata.tsv too" || bad "compute strata: $(ls "${C}/results/strata" 2>&1)"
+    rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results" "${C:?}/logs"
+else
+    echo "  (real R with data.table and optparse, or real .rds files in the stub bundle, not available: CP-22 end-to-end checks skipped)"
+fi
+
 section "GxG: missing sumstats are left out and named; none at all stops the task"
 rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results" "${C:?}/logs"; mkdir -p "${C}/results/gwas/os" "${C}/logs"
-echo x | gzip > "${C}/results/gwas/os/POOLED.sumstats.gz"; echo x | gzip > "${C}/results/gwas/os/EUR.sumstats.gz"
-out="$(cd "$C" && env "${SITE[@]}" GWAS_REPO="$C" LOG_DIR="${C}/logs" FAKE_SBATCH_RUN=1 sbatch --parsable \
+echo x | gzip > "${C}/results/gwas/os/POOLED.ivw_descriptive.sumstats.gz"; echo x | gzip > "${C}/results/gwas/os/EUR.sumstats.gz"
+out="$(cd "$C" && env "${SITE[@]}" GWAS_REPO="$C" LOG_DIR="${C}/logs" FAKE_SBATCH_RUN=1 sbatch --parsable --array=0-4 \
         --output="${C}/logs/gxg_%A_%a.out" slurm/submit_gxg_array.sh os survival 2>&1)"
 jid="$(head -1 <<< "$out")"
 lg="${C}/logs/gxg_${jid}_0.out"
-has "$(cat "$lg" 2>/dev/null)" "left out of hit selection: AAC LAT1 LAT2 EAS SAS OTHER" && grep -q "stub Rscript: .*--sumstats ${C}/results/gwas/os/POOLED.sumstats.gz,${C}/results/gwas/os/EUR.sumstats.gz " "$lg" \
-    && ok "two of eight sumstats present: the task runs on those two and names the six left out" || bad "gxg partial: $(tail -5 "$lg" 2>&1)"
+has "$(cat "$lg" 2>/dev/null)" "left out of hit selection: AFR AMR MIX" && grep -q "stub Rscript: .*--sumstats ${C}/results/gwas/os/POOLED.ivw_descriptive.sumstats.gz,${C}/results/gwas/os/EUR.sumstats.gz " "$lg" \
+    && ok "two of five sumstats present (POOLED + the bundle's 4 strata): the task runs on those two and names the three left out" || bad "gxg partial: $(tail -5 "$lg" 2>&1)"
 grep -q -- "--tractor_prefix ${C}/data/tractor/all_chr --ancestries AFR,AMR,EUR" "$lg" && ok "pooled task: --ancestries from data/tractor/ancestries.txt" || bad "gxg ancestries: $(grep stub "$lg")"
 grep -q -- "--time_col os_time --event_col os_event " "$lg" && ok "GxG survival columns: os_time / os_event" || bad "gxg columns: $(grep stub "$lg")"
-[[ "$(grep -l 'Completed GxG' "${C}"/logs/gxg_"${jid}"_*.out | wc -l)" -eq 8 ]] && ok "all 8 GxG tasks completed (pipefail no longer kills them)" || bad "gxg tasks completed: $(grep -L 'Completed GxG' "${C}"/logs/gxg_"${jid}"_*.out)"
+[[ "$(grep -l 'Completed GxG' "${C}"/logs/gxg_"${jid}"_*.out | wc -l)" -eq 5 ]] && ok "all 5 GxG tasks completed (pipefail no longer kills them)" || bad "gxg tasks completed: $(grep -L 'Completed GxG' "${C}"/logs/gxg_"${jid}"_*.out)"
 rm -f "${C}"/results/gwas/os/*.sumstats.gz
 out="$(cd "$C" && env "${SITE[@]}" GWAS_REPO="$C" LOG_DIR="${C}/logs" FAKE_SBATCH_RUN=1 sbatch --parsable \
         --output="${C}/logs/gxgnone_%A_%a.out" slurm/submit_gxg_array.sh os survival 2>&1)"
@@ -839,12 +888,12 @@ printf 'AFR\nAMR\nEUR\n' > "${C}/data/tractor/ancestries.txt"
 section "Colocalization: per trait, refuses without coloc / susieR / hyprcoloc"
 out="$(cd /tmp && env "${SITE[@]}" RUN_COLOC=true "$L" --dry-run 2>&1)"
 cl="$(grep '\[DRY-RUN\] colocalization' <<< "$out")"
-[[ "$(wc -l <<< "$cl")" -eq 3 ]] && grep -q 'colocalization mrd .*--dependency=afterok:dry17 .*coloc_mrd_%A_%a.out' <<< "$cl" \
-    && grep -q 'colocalization os .*--dependency=afterok:dry19 ' <<< "$cl" && ok "one coloc array per trait, each waiting on its own combine job" || bad "coloc dry run: $cl"
+[[ "$(wc -l <<< "$cl")" -eq 3 ]] && grep -q 'colocalization mrd .*--dependency=afterok:dry14 .*coloc_mrd_%A_%a.out' <<< "$cl" \
+    && grep -q 'colocalization os .*--dependency=afterok:dry16 ' <<< "$cl" && ok "one coloc array per trait, each waiting on its own combine job" || bad "coloc dry run: $cl"
 rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results" "${C:?}/logs"
 out="$(cd /tmp && env "${SITE[@]}" STRATA_LIST=EUR TRAITS_LIST=os RUN_COLOC=true FAKE_SBATCH_RUN=1 RR_SACCT_WAIT=0 "$L" 2>&1)"
-grep -q "stub Rscript: .*run_colocalization.R --gwas ${C}/results/gwas/os/POOLED.sumstats.gz .*--output_prefix ${C}/results/coloc/os/eqtl " "${C}"/logs/coloc_os_*_1.out \
-    && ok "coloc reads results/gwas/os/POOLED.sumstats.gz and writes results/coloc/os/" || bad "coloc paths: $(grep stub "${C}"/logs/coloc_os_*_1.out)"
+grep -q "stub Rscript: .*run_colocalization.R --gwas ${C}/results/gwas/os/POOLED.ivw_descriptive.sumstats.gz .*--output_prefix ${C}/results/coloc/os/eqtl " "${C}"/logs/coloc_os_*_1.out \
+    && ok "coloc reads results/gwas/os/POOLED.ivw_descriptive.sumstats.gz and writes results/coloc/os/" || bad "coloc paths: $(grep stub "${C}"/logs/coloc_os_*_1.out)"
 rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results" "${C:?}/logs"
 out="$(cd /tmp && env "${SITE[@]}" STRATA_LIST=EUR TRAITS_LIST=os RUN_COLOC=true FAKE_R_MISSING=hyprcoloc FAKE_SBATCH_RUN=1 RR_SACCT_WAIT=0 "$L" 2>&1)"
 RD="$(ls -d "${C}"/results/run_record/*/ | head -1)"

@@ -119,14 +119,14 @@ Rscript "${SCRIPT_DIR}/bin/calculate_prs_admixed.R" \
 # ----------------------------------------------------------------------------
 # Local-ancestry PARTIAL scores: run in the PRS-CSx task once its shrunk
 # per-ancestry posterior weights exist (preferred); fall back to Tractor-GENESIS
-# betas from results/gwas/<trait>/POOLED.sumstats.gz if PRS-CSx produced none.
+# betas from results/gwas/<trait>/POOLED.ivw_descriptive.sumstats.gz if PRS-CSx produced none.
 # ----------------------------------------------------------------------------
 if [[ "${METHOD}" == "prs_csx" && -d "${DATA_DIR}/tractor" ]]; then
     if ls "${RESULTS_DIR}"/prs_csx*.weights.tsv.gz >/dev/null 2>&1; then
         LA_WEIGHTS="${RESULTS_DIR}"                  # directory of <..>.<anc>.weights.tsv.gz
         echo "LA partial scores: using PRS-CSx per-ancestry weights"
     else
-        LA_WEIGHTS="${SCRIPT_DIR}/results/gwas/${TRAIT}/POOLED.sumstats.gz"
+        LA_WEIGHTS="${SCRIPT_DIR}/results/gwas/${TRAIT}/POOLED.ivw_descriptive.sumstats.gz"
         echo "LA partial scores: PRS-CSx weights not found, falling back to Tractor-GENESIS betas (no shrinkage)"
     fi
     INDEX_MAP_ARGS=()

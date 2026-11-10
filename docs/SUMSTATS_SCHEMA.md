@@ -2,7 +2,7 @@
 
 This file describes the tables the Tractor-GENESIS step writes
 (`results/gwas/<trait>/<stratum>/chr<N>.tractor_genesis.*`, combined into
-`results/gwas/<trait>/<stratum>.sumstats.gz` and pooled into `POOLED.sumstats.gz`).
+`results/gwas/<trait>/<stratum>.sumstats.gz` and pooled into `POOLED.ivw_descriptive.sumstats.gz`).
 
 ## Genotype dose: hard calls in every stratum, including k = 1
 
@@ -39,6 +39,9 @@ A table may start with lines `## key=value` (no tab in them) before its column h
 | key | written by | value |
 |---|---|---|
 | `covariates` | the adapter, every table; kept once by the combine step; `meta_analyze_strata.R` | the covariate list the null model used, global-ancestry columns included (`none` when there are none); `covariates_<stratum>` per stratum in the pooled file when the strata differ |
+| `strata` | `meta_analyze_strata.R` (pooled file) | the strata pooled |
+| `strata_skipped` | `meta_analyze_strata.R` (pooled file) | the strata left out because they were skipped below `MIN_STRATUM_N` (`none` when none) |
+| `backgrounds` | `meta_analyze_strata.R` (pooled file) | the ancestry backgrounds pooled (from the `BETA_<anc>` columns) |
 
 `data.table::fread` skips these lines by itself; `bin/sumstats_io.R` reads them
 (`sumstats_meta()`) and writes them (`fwrite_sumstats()`); `bin/filter_gwas_results.py` skips them.

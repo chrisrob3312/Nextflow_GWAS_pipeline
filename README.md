@@ -182,7 +182,8 @@ pipeline"); the run record is described in [docs/WORKFLOW.md](docs/WORKFLOW.md),
    ancestry labels its Tractor files carry; GxG's pooled task and PRS read the cohort-wide
    `data/tractor/ancestries.txt` ([docs/HANDOFF_CONTRACT.md](docs/HANDOFF_CONTRACT.md)). Tractor
    files are read by ancestry label, or through `data/tractor/flare_index_map.tsv` when numbered;
-   never by their position in the list. With `data/ancestry/strata.tsv` present, the adapter
+   never by their position in the list. The strata are the bundle's (`ancestry/strata.tsv`; set
+   `STRATA_LIST` to run fewer). With `data/ancestry/strata.tsv` present, the adapter
    checks every sample against its stratum; a stratum under `MIN_STRATUM_N` analysable samples is
    skipped, and the run record says so.
 5. **Run record.** Each launch writes `results/run_record/<run_id>/`: `params.tsv` (every

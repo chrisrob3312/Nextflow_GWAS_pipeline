@@ -60,7 +60,8 @@ export LOG_DIR
 # every number-changing switch live in one table, RR_SWITCHES in bin/run_record.sh;
 # rr_resolve_switches fills in the unset ones and exports them, so every job sees the value
 # that params.tsv records.
-#   STRATA_LIST="EUR,AAC,LAT1,LAT2,OTHER"   ancestry strata (LAT1/LAT2 separate; OTHER = EAS+SAS+small groups)
+#   STRATA_LIST="EUR,AFR"                   strata analysed; default: every stratum in the bundle's
+#                                           ancestry/strata.tsv (strata are assigned upstream)
 #   TRAITS_LIST="mrd,efs,os"               phenotype columns, as the handoff contract names them
 #   SURVIVAL_TRAITS="efs,os"                traits run as time-to-event, each with its own columns
 #                                           <trait>_time and <trait>_event (TIME_COL_<trait> /
@@ -78,7 +79,21 @@ export LOG_DIR
 source "${REPO}/bin/slurm_utils.sh"    # helpers, and bin/run_record.sh (the switch table, rr_*)
 rr_refuse_unknown_switches || exit 2
 rr_resolve_switches
+export HANDOFF_DIR="${HANDOFF_DIR:-${REPO}/data/handoff}"   # the handoff bundle (docs/HPC_SITE.md)
+
+# Strata (CP-22): assigned upstream, listed in the bundle's ancestry/strata.tsv. STRATA_LIST unset
+# means all of them (set_by bundle); a stratum strata.tsv does not have is refused.
+STRATA_TSV="${HANDOFF_DIR}/ancestry/strata.tsv"
+[[ -s "${STRATA_TSV}" ]] || { echo "REFUSED: ${STRATA_TSV} is missing or empty (the strata come from the handoff bundle)" >&2; exit 2; }
+BUNDLE_STRATA="$(bundle_strata)"
+if [[ "${RR_SET_BY[STRATA_LIST]}" == job ]]; then
+    export STRATA_LIST="${BUNDLE_STRATA}"; RR_SET_BY[STRATA_LIST]=bundle
+fi
 IFS=',' read -ra STRATA <<< "${STRATA_LIST}"
+for stratum in "${STRATA[@]}"; do
+    [[ ",${BUNDLE_STRATA}," == *",${stratum},"* ]] \
+        || { echo "REFUSED: stratum ${stratum} (STRATA_LIST) is not in ${STRATA_TSV} (it has: ${BUNDLE_STRATA})" >&2; exit 2; }
+done
 IFS=',' read -ra TRAITS <<< "${TRAITS_LIST}"
 
 # Steps 3-6 run only when asked for. Anything but true/false is refused rather than guessed.
@@ -116,7 +131,6 @@ fi
 # Every trait's columns must be in the phenotype file: a binary trait its own column, a survival
 # trait <trait>_time and <trait>_event (or its TIME_COL_<trait> / EVENT_COL_<trait>). Checked
 # here, on the header, before anything is queued. A dry run warns; a launch refuses.
-export HANDOFF_DIR="${HANDOFF_DIR:-${REPO}/data/handoff}"   # the handoff bundle (docs/HPC_SITE.md)
 PHENO_SOURCE="${PHENO_IN:-${HANDOFF_DIR}/phenotypes/phenotypes.tsv}"
 PHENO_HEADER=""
 [[ -s "${PHENO_SOURCE}" ]] && PHENO_HEADER="$(head -1 "${PHENO_SOURCE}" | tr '\t' '\n')"
@@ -323,7 +337,7 @@ for trait in "${TRAITS[@]}"; do
 done
 
 # ============================================================================
-# STEP 2: Combine chromosomes per trait x stratum, meta-analyse strata -> POOLED
+# STEP 2: per trait: strata disjoint and complete, chromosomes combined, strata pooled -> POOLED
 # ============================================================================
 echo ""
 echo "STEP 2: Submitting combine + meta-analysis jobs (one per trait)..."
@@ -340,13 +354,13 @@ for trait in "${TRAITS[@]}"; do
 
     # Quoted heredoc (<<'EOF'): the body below reaches sbatch exactly as written, nothing in it
     # is expanded here. Launch-time values reach the job through its environment instead
-    # (sbatch --export=ALL): GWAS_REPO, STRATA_LIST, and GWAS_TRAIT set on the submit line.
+    # (sbatch --export=ALL): GWAS_REPO, STRATA_LIST, HANDOFF_DIR, and GWAS_TRAIT set on the submit line.
     GWAS_TRAIT="$trait" submit "combine + meta-analysis ${trait}" ${DEPEND_GWAS:+"$DEPEND_GWAS"} \
         --job-name="combine_${trait}" --time=4:00:00 --mem=32G --cpus-per-task=8 \
         --output="${LOG_DIR}/combine_${trait}_%j.out" <<'EOF'
 #!/bin/bash
-# Combine chromosomes per stratum, then meta-analyse the strata -> POOLED
-set -eu    # no pipefail: 'zcat | head -1' below stops zcat early (SIGPIPE) by design
+# Check the strata, combine chromosomes per stratum, pool the strata -> POOLED.ivw_descriptive
+set -eu    # no pipefail: 'zcat | awk {exit}' below stops zcat early (SIGPIPE) by design
 SCRIPT_DIR="${GWAS_REPO}"
 source "${SCRIPT_DIR}/bin/slurm_utils.sh"
 rr_begin combine "${GWAS_TRAIT} ${STRATA_LIST}"
@@ -354,18 +368,60 @@ rr_begin combine "${GWAS_TRAIT} ${STRATA_LIST}"
 qc_gate_or_exit "${QC_REQUIRE_GWAS}" "combine ${GWAS_TRAIT}"
 source "${SCRIPT_DIR}/bin/activate_env.sh" gwas-r
 GWAS_DIR="${SCRIPT_DIR}/results/gwas/${GWAS_TRAIT}"
+STRATA_TSV="${HANDOFF_DIR}/ancestry/strata.tsv"
 IFS=',' read -ra STRATA <<< "${STRATA_LIST}"
+join() { local IFS=,; echo "$*"; }          # join a b c -> a,b,c
 
-# Concatenate chromosomes per stratum (genomic order files -> one sumstats per stratum). A file
-# may start with "## key=value" lines (e.g. "## covariates=..."): they are kept once, and every
-# chromosome must carry the same ones. awk prints the leading "##" lines (meta) or, after them,
-# the column header (hdr) or the data rows (rows).
+# 1. The strata are disjoint (CP-22): no sample in two results/strata/<S>.samples.txt (step 0
+#    writes each stratum's members from the bundle's strata.tsv). awk names the first shared sample.
+SAMPLE_FILES=()
+for stratum in "${STRATA[@]}"; do
+    f="${SCRIPT_DIR}/results/strata/${stratum}.samples.txt"
+    [[ -s "$f" ]] || { echo "ERROR: ${f} is missing (step 0 writes each stratum's members from ${STRATA_TSV})" >&2; exit 1; }
+    SAMPLE_FILES+=("$f")
+done
+overlap="$(awk 'FNR == 1 {s = FILENAME; sub(/.*\//, "", s); sub(/\.samples\.txt$/, "", s)}
+               ($1 in seen) && seen[$1] != s {n++; if (!ex) ex = seen[$1] " and " s " share " $1; next}
+               {seen[$1] = s}
+               END {if (n) print n " sample(s); e.g. " ex}' "${SAMPLE_FILES[@]}")"
+[[ -z "$overlap" ]] || { echo "ERROR: strata not disjoint: ${overlap} (results/strata/<S>.samples.txt)" >&2; exit 1; }
+echo "Strata disjoint: $(join "${STRATA[@]}") ($(cat "${SAMPLE_FILES[@]}" | wc -l) samples)"
+
+# 2. Each stratum has all 22 chromosomes' results, or was skipped below MIN_STRATUM_N on every
+#    chromosome (each task's chr<N>.run_counts.tsv says which). Anything else stops the job,
+#    naming the stratum: a missing stratum is never pooled around in silence.
+ANALYSED=(); SKIPPED=(); PROBLEMS=()
+for stratum in "${STRATA[@]}"; do
+    d="${GWAS_DIR}/${stratum}"; n_ok=0; n_skip=0; missing=()
+    for c in $(seq 1 22); do
+        st="$(awk -F'\t' '$1 == "status" {print $2}' "${d}/chr${c}.run_counts.tsv" 2>/dev/null || true)"
+        case "$st" in
+            skipped_below_min_stratum_n) n_skip=$((n_skip + 1)) ;;
+            ok) if [[ -s "${d}/chr${c}.tractor_genesis.genomic_order.tsv.gz" ]]; then n_ok=$((n_ok + 1)); else missing+=("chr${c}"); fi ;;
+            *)  missing+=("chr${c}") ;;
+        esac
+    done
+    if [[ $n_skip -eq 22 ]]; then
+        SKIPPED+=("$stratum"); echo "Stratum ${stratum}: skipped on every chromosome (below MIN_STRATUM_N); not pooled"
+    elif [[ ${#missing[@]} -gt 0 ]]; then
+        PROBLEMS+=("stratum ${stratum}: no results for ${#missing[@]} chromosome(s): ${missing[*]}")
+    elif [[ $n_skip -gt 0 ]]; then
+        PROBLEMS+=("stratum ${stratum}: skipped below MIN_STRATUM_N on ${n_skip} chromosome(s) but analysed on ${n_ok}")
+    else
+        ANALYSED+=("$stratum")
+    fi
+done
+if [[ ${#PROBLEMS[@]} -gt 0 ]]; then printf 'ERROR: %s\n' "${PROBLEMS[@]}" >&2; exit 1; fi
+
+# 3. Concatenate chromosomes per analysed stratum (genomic order files -> one sumstats per
+#    stratum). A file may start with "## key=value" lines (e.g. "## covariates=..."): they are kept
+#    once, and every chromosome must carry the same ones. awk prints the leading "##" lines (meta)
+#    or, after them, the column header (hdr) or the data rows (rows).
 meta() { zcat "$1" | awk '/^##/ {print; next} {exit}'; }
 hdr()  { zcat "$1" | awk '!/^##/ {print; exit}'; }
 rows() { zcat "$1" | awk '/^##/ && !h {next} h {print} {h = 1}'; }
-for stratum in "${STRATA[@]}"; do
+for stratum in ${ANALYSED[@]+"${ANALYSED[@]}"}; do
     files=("${GWAS_DIR}/${stratum}"/chr*.tractor_genesis.genomic_order.tsv.gz)
-    [[ -e "${files[0]}" ]] || { echo "No results for ${stratum} (skipped: N below MIN_STRATUM_N?)"; continue; }
     echo "Combining ${GWAS_TRAIT} / ${stratum}..."
     m0="$(meta "${files[0]}")"
     for f in "${files[@]}"; do
@@ -375,13 +431,22 @@ for stratum in "${STRATA[@]}"; do
         gzip > "${GWAS_DIR}/${stratum}.sumstats.gz"
 done
 
-# Meta-analyse across strata (same ancestry background pooled across strata)
-echo "Meta-analysing ${GWAS_TRAIT} across strata..."
-Rscript "${SCRIPT_DIR}/bin/meta_analyze_strata.R" \
-    --input_dir "${GWAS_DIR}" \
-    --strata "${STRATA_LIST}" \
-    --output "${GWAS_DIR}/POOLED.sumstats.gz" \
-    --threads 8
+# 4. Pool the analysed strata (the same ancestry background across strata). Descriptive: an IVW /
+#    random-effects summary of per-stratum estimates, named so (POOLED.ivw_descriptive), with the
+#    strata pooled, the strata skipped and the backgrounds in its "##" lines.
+POOLED_OUT="${GWAS_DIR}/POOLED.ivw_descriptive.sumstats.gz"
+if [[ ${#ANALYSED[@]} -lt 2 ]]; then
+    echo "POOLED not written: ${#ANALYSED[@]} stratum(s) analysed ($(join ${ANALYSED[@]+"${ANALYSED[@]}"})); pooling needs two"
+    rm -f "${POOLED_OUT}"
+else
+    echo "Pooling ${GWAS_TRAIT} across $(join "${ANALYSED[@]}")..."
+    Rscript "${SCRIPT_DIR}/bin/meta_analyze_strata.R" \
+        --input_dir "${GWAS_DIR}" \
+        --strata "$(join "${ANALYSED[@]}")" \
+        --strata_skipped "$(join ${SKIPPED[@]+"${SKIPPED[@]}"})" \
+        --output "${POOLED_OUT}" \
+        --threads 8
+fi
 EOF
     COMBINE_JOBS[$trait]="$JOB"
 done
@@ -421,7 +486,7 @@ if [[ "${RUN_COLOC}" == true ]]; then
 echo "STEP 4: Submitting colocalization jobs (one 6-task array per trait)..."
 
 # Per trait: each array colocalizes that trait's POOLED meta-analysis (written by its combine job,
-# results/gwas/<trait>/POOLED.sumstats.gz) and waits on that combine job only. Quoted heredoc, as
+# results/gwas/<trait>/POOLED.ivw_descriptive.sumstats.gz) and waits on that combine job only. Quoted heredoc, as
 # in step 2; GWAS_TRAIT is set on the submit line.
 for trait in "${TRAITS[@]}"; do
 GWAS_TRAIT="$trait" submit "colocalization ${trait} (6 QTL types)" \
@@ -447,7 +512,7 @@ fi
 # Map array ID to QTL type
 QTL_TYPES=("eqtl" "sqtl" "pqtl" "mqtl" "caqtl" "hqtl")
 QTL_TYPE="${QTL_TYPES[$((SLURM_ARRAY_TASK_ID - 1))]}"
-GWAS_FILE="${SCRIPT_DIR}/results/gwas/${GWAS_TRAIT}/POOLED.sumstats.gz"
+GWAS_FILE="${SCRIPT_DIR}/results/gwas/${GWAS_TRAIT}/POOLED.ivw_descriptive.sumstats.gz"
 OUT_DIR="${SCRIPT_DIR}/results/coloc/${GWAS_TRAIT}"
 mkdir -p "${OUT_DIR}"
 rr_args "${GWAS_TRAIT} ${QTL_TYPE}" "${GWAS_FILE}"
@@ -533,8 +598,9 @@ echo "STEP 6: Submitting GxG interaction jobs..."
 
 for trait in "${TRAITS[@]}"; do
     model=$(trait_model "$trait")
-    submit "GxG ${trait} (${model}; POOLED + 7 strata)" ${DEPEND_COMBINE:+"$DEPEND_COMBINE"} \
-        --output="${LOG_DIR}/gxg_${trait}_%A_%a.out" --error="${LOG_DIR}/gxg_${trait}_%A_%a.err" \
+    # one task per stratum plus POOLED (task 0): --array on the command line overrides the script's
+    submit "GxG ${trait} (${model}; POOLED + ${#STRATA[@]} strata)" ${DEPEND_COMBINE:+"$DEPEND_COMBINE"} \
+        --array="0-${#STRATA[@]}" --output="${LOG_DIR}/gxg_${trait}_%A_%a.out" --error="${LOG_DIR}/gxg_${trait}_%A_%a.err" \
         "${SCRIPT_DIR}/submit_gxg_array.sh" "${trait}" "${model}"
     GXG_JOBS[$trait]="$JOB"
 done
@@ -565,7 +631,7 @@ echo "=============================================="
 echo "GWAS jobs: ${#TRAITS[@]} traits × ${#STRATA[@]} strata × 22 chromosomes"
 [[ "${RUN_PRS}" == true ]]   && echo "PRS jobs: ${#TRAITS[@]} traits × 6 methods"
 [[ "${RUN_COLOC}" == true ]] && echo "Colocalization: ${#TRAITS[@]} traits × ${#QTL_TYPES[@]} QTL types × 3 methods"
-[[ "${RUN_GXG}" == true ]]   && echo "GxG interaction: ${#TRAITS[@]} traits × 8 strata (+ ancestry heterogeneity)"
+[[ "${RUN_GXG}" == true ]]   && echo "GxG interaction: ${#TRAITS[@]} traits × (POOLED + ${#STRATA[@]} strata) (+ ancestry heterogeneity)"
 if [[ ${#DEFERRED[@]} -gt 0 ]]; then echo "deferred: ${DEFERRED[*]} (RUN_*=false)"; fi
 echo "Logs: ${LOG_DIR}"
 echo "Run record: ${GWAS_RUN_DIR} (trace.tsv and summary.md once the finalise job has run)"
