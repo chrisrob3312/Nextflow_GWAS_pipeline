@@ -95,9 +95,14 @@ option_list <- list(
 
     # Runtime
     make_option(c("--chunk_size"), type = "integer", default = 1000,
-                help = "Variants per chunk [default: 1000]"),
+                help = "Variants per chunk; the chunks are tested in parallel [default: 1000]"),
     make_option(c("--threads"), type = "integer", default = 1,
-                help = "Number of threads [default: 1]"),
+                help = "Chunks tested at once (forked workers; SLURM_CPUS_PER_TASK when set) [default: 1]"),
+    make_option(c("--null_model_rds"), type = "character", default = NULL,
+                help = paste("Null-model cache shared by a stratum x trait's chromosome tasks: loaded when it was fitted",
+                             "on the same samples, outcome, covariates and GRM ('null loaded'), else fitted and saved there")),
+    make_option(c("--allow_unrelated_cox"), action = "store_true", default = FALSE,
+                help = "With --kinship but no coxme installed, fit the Cox null without the GRM instead of stopping"),
     make_option(c("-v", "--verbose"), action = "store_true", default = FALSE,
                 help = "Verbose output"),
 
@@ -520,8 +525,29 @@ cov_mat <- if (length(covariates) > 0) {
     m <- as.matrix(pheno[, covariates, with = FALSE]); storage.mode(m) <- "double"; m
 } else NULL
 
-# --- fit the null model ------------------------------------------------------
-if (opt$model == "survival") {
+# --- the null model: from the cache (--null_model_rds) when it matches, else fitted -------------
+# The key names everything the null depends on: the samples (in order), the outcome, the model,
+# the covariates and the GRM file's contents. 22 chromosome tasks share one cache per stratum x
+# trait; a task that finds none (or a stale one) fits and writes it (a temporary file renamed into
+# place, so a reader never sees half a file).
+null_key <- list(samples = common_samples, trait = opt$trait, model = opt$model,
+                 outcome = outcome_cols, covariates = covariates %||% character(),
+                 kinship = if (!is.null(opt$kinship)) unname(tools::md5sum(opt$kinship)) else NA_character_,
+                 allow_unrelated_cox = isTRUE(opt$allow_unrelated_cox))
+null_ops <- NULL; nullmod <- NULL; null_source <- "fitted"
+if (!is.null(opt$null_model_rds) && file.exists(opt$null_model_rds)) {
+    cached <- tryCatch(readRDS(opt$null_model_rds), error = function(e) NULL)
+    if (!is.null(cached) && identical(cached$key, null_key)) {
+        null_ops <- cached$null_ops; nullmod <- cached$nullmod; null_source <- "loaded"
+        cat("  null loaded from", opt$null_model_rds, "\n")
+    } else {
+        cat("  null cache", opt$null_model_rds, "was fitted on other samples or settings: refitting\n")
+    }
+}
+
+if (!is.null(null_ops)) {
+    # nothing to fit
+} else if (opt$model == "survival") {
     if (!all(c(opt$time_col, opt$event_col) %in% names(pheno))) {
         stop("Survival columns not found: ", opt$time_col, ", ", opt$event_col)
     }
@@ -533,6 +559,12 @@ if (opt$model == "survival") {
     if (!is.null(cov_mat)) surv_df <- cbind(surv_df, as.data.frame(cov_mat))
     cov_str <- if (length(covariates) > 0) paste("+", paste(covariates, collapse = " + ")) else ""
     has_coxme <- requireNamespace("coxme", quietly = TRUE)
+    # With a GRM the Cox null is a frailty model (coxme). Without coxme, refuse rather than drop
+    # the relatedness quietly, unless the caller says the samples may be treated as unrelated.
+    if (!is.null(kinship) && !has_coxme && !isTRUE(opt$allow_unrelated_cox)) {
+        stop("coxme required for a Cox null with a GRM (--kinship): install coxme in the gwas-r env, ",
+             "or pass --allow_unrelated_cox to fit the Cox null without the GRM")
+    }
 
     if (!is.null(kinship) && has_coxme) {
         K <- as.matrix(kinship) * 2                     # expected relationship = 2 * kinship
@@ -545,8 +577,8 @@ if (opt$model == "survival") {
         cat("  Fitted Cox MIXED model (coxme; frailty on 2 x kinship)\n")
         cat("    Frailty variance:", signif(as.numeric(coxme::VarCorr(cox_null)[[1]]), 4), "\n")
     } else {
-        if (!is.null(kinship) && !has_coxme) {
-            cat("  WARNING: coxme not installed - Cox null fitted WITHOUT kinship. Install coxme or pass an unrelated set.\n")
+        if (!is.null(kinship)) {
+            cat("  WARNING: --allow_unrelated_cox and no coxme: the Cox null is fitted WITHOUT the GRM\n")
         }
         f_null <- as.formula(paste("Surv(time, event) ~ 1", cov_str))
         cox_null <- coxph(f_null, data = surv_df, ties = "breslow")
@@ -577,6 +609,13 @@ if (opt$model == "survival") {
         "mixed model (GENESIS", if (is.null(kinship)) "- no kinship)" else "with kinship)", "\n")
     null_ops <- genesis_ops(nullmod, n_samples)
 }
+if (null_source == "fitted" && !is.null(opt$null_model_rds)) {
+    tmp <- paste0(opt$null_model_rds, ".tmp.", Sys.getpid())
+    dir.create(dirname(opt$null_model_rds), recursive = TRUE, showWarnings = FALSE)
+    saveRDS(list(key = null_key, null_ops = null_ops, nullmod = nullmod), tmp)
+    file.rename(tmp, opt$null_model_rds)
+    cat("  null saved to", opt$null_model_rds, "\n")
+}
 
 # Samples the null model was fitted on: must be the complete cases counted above, or the score
 # test would pair residuals with the wrong genotype rows
@@ -585,8 +624,8 @@ acct("model_n", n_samples, model_n, paste(opt$model, "null model"))
 qc_assert("adapter_model_n", model_n == n_null, n = model_n,
           message = sprintf("%s: null model on %d samples; %d complete cases", qc_where, model_n, n_null))
 
-# Save null model
-saveRDS(nullmod, paste0(opt$output_prefix, ".null_model.rds"))
+# Save null model (per task; with --null_model_rds the shared cache holds it instead)
+if (is.null(opt$null_model_rds)) saveRDS(nullmod, paste0(opt$output_prefix, ".null_model.rds"))
 
 # ============================================================================
 # Run Association Tests
@@ -595,47 +634,23 @@ cat("\nRunning association tests...\n")
 cat("  Variants:", n_variants, "\n")
 cat("  Chunk size:", opt$chunk_size, "\n")
 
-# Process variants
-n_status <- c(ok = 0L, mac = 0L, error = 0L)      # per-variant outcome, for <output_prefix>.run_counts.tsv
-rows <- vector("list", n_variants)
-pb_interval <- max(1, floor(n_variants / 20))
+# Chunks of --chunk_size variants, tested in parallel by forked workers (--threads); each worker
+# returns its rows and per-variant status, bound in chunk order, so the result does not depend on
+# the number of threads (tests/test_chassis.sh compares --threads 1 and 4).
+chunks <- split(seq_len(n_variants), ceiling(seq_len(n_variants) / opt$chunk_size))
+cat("  Chunks:", length(chunks), "| threads:", opt$threads, "\n")
 start_time <- Sys.time()
-
-for (v in 1:n_variants) {
-    # Get variant info
-    var_info <- tractor_data$variant_info[v, ]
-
-    # LA (non-reference hapcounts), dose and hapcount (every ancestry) for this variant
-    dose_vec <- lapply(setNames(ancestries, ancestries), function(a) tractor_data$dosage[[a]][v, ])
-    hap_vec  <- lapply(setNames(ancestries, ancestries), function(a) tractor_data$hapcount[[a]][v, ])
-    la_vec   <- hap_vec[non_ref_anc]
-
-    # Run test (same conditional score test for binary / quantitative / survival)
-    res <- test_variant_tractor(
-        la_vec = la_vec,
-        dose_vec = dose_vec,
-        hap_vec = hap_vec,
-        null_ops = null_ops,
-        ancestries = ancestries,
-        ref_anc = ref_anc,
-        mac_min = opt$mac_min
-    )
-
-    n_status[[res$status]] <- n_status[[res$status]] + 1L
-
-    rows[[v]] <- result_row(var_info, res, ancestries, opt$stratum)
-
-    # Progress
-    if (v %% pb_interval == 0 || v == n_variants) {
-        elapsed <- as.numeric(difftime(Sys.time(), start_time, units = "secs"))
-        rate <- v / elapsed
-        eta <- (n_variants - v) / rate
-        cat(sprintf("\r  Progress: %d/%d (%.1f%%) | %.0f var/s | ETA: %.0fs    ",
-                    v, n_variants, 100 * v / n_variants, rate, eta))
-    }
-}
-cat("\n")
-results <- rbindlist(rows)       # STRATUM (with --stratum) is the first column (result_row)
+run_chunk <- function(idx) test_chunk(slice_chunk(tractor_data, idx), null_ops, ancestries, ref_anc, opt$mac_min, opt$stratum)
+out <- if (opt$threads > 1 && length(chunks) > 1 && .Platform$OS.type == "unix") {
+    parallel::mclapply(chunks, run_chunk, mc.cores = opt$threads, mc.preschedule = FALSE)
+} else lapply(chunks, run_chunk)
+failed <- vapply(out, function(x) inherits(x, "try-error") || is.null(x), NA)
+if (any(failed)) stop("a worker failed on chunk ", which(failed)[1], ": ", as.character(out[[which(failed)[1]]]))
+results <- rbindlist(lapply(out, `[[`, "dt"))       # STRATUM (with --stratum) is the first column (result_row)
+st <- unlist(lapply(out, `[[`, "status"), use.names = FALSE)
+n_status <- c(ok = sum(st == "ok"), mac = sum(st == "mac"), error = sum(st == "error"))
+cat(sprintf("  Tested %d variants in %.1f s (%d ok, %d below the MAC gate, %d failed)\n", n_variants,
+            as.numeric(difftime(Sys.time(), start_time, units = "secs")), n_status[["ok"]], n_status[["mac"]], n_status[["error"]]))
 
 # ============================================================================
 # Write Results

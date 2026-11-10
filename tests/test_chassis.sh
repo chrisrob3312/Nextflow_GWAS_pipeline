@@ -461,7 +461,7 @@ grep -q 'anc_code' "$A" && bad "adapter still derives a file number from the pos
 grep -q 'source(file.path(.adapter_dir, "tractor_io.R"))' "$A" && ok "adapter sources bin/tractor_io.R" || bad "adapter does not source tractor_io.R"
 grep -q 'check_stratum_membership(opt$stratum, tractor_ids, opt$strata_file, pheno)' "$A" && ok "adapter: --stratum checked against the Tractor files' samples" || bad "adapter: no stratum check"
 grep -q 'if (n_null < opt$min_stratum_n)' "$A" && grep -q 'quit(save = "no", status = 0)' "$A" && ok "adapter: below --min_stratum_n, skip with exit 0" || bad "adapter: no min_stratum_n gate"
-grep -q 'rows\[\[v\]\] <- result_row(var_info, res, ancestries, opt$stratum)' "$A" && grep -q 'if (!is.null(stratum)) row$STRATUM <- stratum' "${A%/*}/tractor_model.R" \
+grep -q 'test_chunk(slice_chunk(tractor_data, idx), null_ops, ancestries, ref_anc, opt$mac_min, opt$stratum)' "$A" && grep -q 'if (!is.null(stratum)) row$STRATUM <- stratum' "${A%/*}/tractor_model.R" \
     && ok "adapter: outputs labelled with a STRATUM column (the first; result_row in bin/tractor_model.R)" || bad "adapter: no STRATUM label"
 grep -q 'write_run_counts(opt$output_prefix, run_counts)' "$A" && ok "adapter: writes <output_prefix>.run_counts.tsv" || bad "adapter: no counts file"
 grep -q '".ancdose.", k' "$REPO/bin/calculate_prs_admixed.R" && bad "PRS still reads Tractor files by position" || ok "PRS LA partial: no file number from the position either"
@@ -945,6 +945,37 @@ if [[ -n "${REAL_RSCRIPT}" ]] && "${REAL_RSCRIPT}" -e 'quit(status = !all(sapply
     grep -q 'CMD+=(--sample_include "${SAMPLE_INCLUDE}")' "${C}/slurm/submit_gwas_array.sh" && ok "submit_gwas_array.sh passes results/strata/<S>.samples.txt as --sample_include" || bad "gwas array sample_include"
 else
     echo "  (real R with data.table, optparse, survival and Matrix not available: CP-17 adapter checks skipped)"
+fi
+
+section "CP-17 performance: chunks in parallel, one null per stratum x trait, no Cox null without the GRM"
+if [[ -n "${REAL_RSCRIPT}" ]] && "${REAL_RSCRIPT}" -e 'quit(status = !all(sapply(c("data.table", "optparse", "survival", "Matrix"), requireNamespace, quietly = TRUE)))' >/dev/null 2>&1; then
+    TD="${W}/cp17p"; rm -rf "${TD:?}"; mkdir -p "$TD"
+    "${REAL_RSCRIPT}" "${C}/tests/toy/make_toy_tractor.R" "${TD}/toy" 120 60 AFR,EUR >/dev/null
+    ad() { (cd "$TD" && GWAS_QC_DIR="${TD}/qc" "${REAL_RSCRIPT}" "${C}/bin/tractor_genesis_adapter.R" --tractor_prefix toy --phenotype toy.phenotypes.tsv \
+            --trait os --model survival --time_col os_time --event_col os_event --ancestries AFR,EUR --ref_ancestry EUR \
+            --covariates sex,age_at_diagnosis --stratum TOY --min_stratum_n 50 --chromosome 22 --chunk_size 7 "$@" 2>&1); }
+    o1="$(ad --threads 1 --output_prefix t1/chr22)"; o4="$(ad --threads 4 --output_prefix t4/chr22)"
+    cmp="$("${REAL_RSCRIPT}" -e 'suppressPackageStartupMessages(library(data.table)); a <- fread(commandArgs(TRUE)[1]); b <- fread(commandArgs(TRUE)[2])
+            num <- names(a)[sapply(a, is.numeric)]; d <- max(abs(as.matrix(a[, ..num]) - as.matrix(b[, ..num])), na.rm = TRUE)
+            cat(identical(dim(a), dim(b)) && identical(is.na(a), is.na(b)) && identical(a$ID, b$ID) && d <= 1e-10, "\n")' \
+            "${TD}/t1/chr22.tractor_genesis.genomic_order.tsv.gz" "${TD}/t4/chr22.tractor_genesis.genomic_order.tsv.gz" 2>&1)"
+    has "$o4" "Chunks: 9 | threads: 4" && [[ "$cmp" == "TRUE " ]] && ok "--threads 4 (9 chunks of 7, forked) gives the --threads 1 results to 1e-10" || bad "threads: $cmp $(grep -i 'chunk\|error' <<< "$o4")"
+    oa="$(ad --null_model_rds cache/null_model.rds --output_prefix c/chr22)"; ob="$(ad --null_model_rds cache/null_model.rds --output_prefix c/chr21)"
+    has "$oa" "null saved to cache/null_model.rds" && has "$ob" "null loaded from cache/null_model.rds" && ! has "$ob" "Fitted Cox" \
+        && ok "--null_model_rds: the first chromosome fits and saves the null, the second logs 'null loaded'" || bad "null cache: $(grep null <<< "$ob")"
+    oc="$(ad --null_model_rds cache/null_model.rds --covariates sex --output_prefix c/chr20)"
+    has "$oc" "was fitted on other samples or settings: refitting" && ok "... a cache fitted with other covariates is not reused" || bad "stale cache: $(grep null <<< "$oc")"
+    "${REAL_RSCRIPT}" -e 'ids <- readLines(commandArgs(TRUE)[1]); m <- diag(0.5, length(ids)); dimnames(m) <- list(ids, ids); saveRDS(m, commandArgs(TRUE)[2])' "${TD}/toy.samples.txt" "${TD}/kin.rds"
+    if ! "${REAL_RSCRIPT}" -e 'quit(status = !requireNamespace("coxme", quietly = TRUE))' >/dev/null 2>&1; then
+        out="$(ad --kinship kin.rds --output_prefix k/chr22)"; rc=$?
+        [[ $rc -ne 0 ]] && has "$out" "coxme required for a Cox null with a GRM" && ok "no coxme, with a GRM: exits non-zero, 'coxme required'" || bad "coxme stop: rc=$rc"
+        out="$(ad --kinship kin.rds --allow_unrelated_cox --output_prefix k2/chr22)"; rc=$?
+        [[ $rc -eq 0 ]] && has "$out" "WARNING: --allow_unrelated_cox and no coxme: the Cox null is fitted WITHOUT the GRM" && ok "... and runs, saying so, with --allow_unrelated_cox" || bad "allow_unrelated_cox: rc=$rc"
+    fi
+    out="$(cd /tmp && DRY_RUN=1 bash "$G" EUR os survival 2>&1)"
+    has "$out" "--null_model_rds ${C}/results/gwas/os/EUR/null_model.rds" && ok "submit_gwas_array.sh: one null cache per stratum x trait (results/gwas/<trait>/<S>/null_model.rds)" || bad "gwas null cache arg"
+else
+    echo "  (real R with data.table, optparse, survival and Matrix not available: CP-17 performance checks skipped)"
 fi
 
 section "GxG: missing sumstats are left out and named; none at all stops the task"

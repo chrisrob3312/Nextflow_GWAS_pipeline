@@ -8,6 +8,7 @@
 #   mac_minor(alt, n_hap)            minor allele count
 #   test_variant_tractor(...)        the conditional score test of one variant
 #   result_row(...)                  one output row
+#   slice_chunk / test_chunk         a block of variants: its matrices, and its rows + status
 # ============================================================================
 `%||%` <- function(a, b) if (is.null(a)) b else a
 
@@ -231,4 +232,25 @@ result_row <- function(var_info, res, ancestries, stratum = NULL) {
     row$P_HET <- as.numeric(res$het$p)
     row$I2 <- as.numeric(res$het$I2)
     row
+}
+
+# slice_chunk(td, idx): the rows idx of the Tractor matrices (a chunk the worker tests)
+slice_chunk <- function(td, idx) list(
+    variant_info = td$variant_info[idx],
+    hapcount = lapply(td$hapcount, function(x) x[idx, , drop = FALSE]),
+    dosage   = lapply(td$dosage,   function(x) x[idx, , drop = FALSE]))
+
+# test_chunk(ch, ...): every variant of a chunk -> list(dt = its rows, status = per-variant status)
+test_chunk <- function(ch, null_ops, ancestries, ref_anc, mac_min, stratum = NULL) {
+    non_ref <- setdiff(ancestries, ref_anc)
+    nv <- nrow(ch$variant_info)
+    rows <- vector("list", nv); status <- character(nv)
+    for (v in seq_len(nv)) {
+        dose_vec <- lapply(setNames(ancestries, ancestries), function(a) ch$dosage[[a]][v, ])
+        hap_vec  <- lapply(setNames(ancestries, ancestries), function(a) ch$hapcount[[a]][v, ])
+        res <- test_variant_tractor(hap_vec[non_ref], dose_vec, hap_vec, null_ops, ancestries, ref_anc, mac_min)
+        status[v] <- res$status
+        rows[[v]] <- result_row(ch$variant_info[v], res, ancestries, stratum)
+    }
+    list(dt = data.table::rbindlist(rows), status = status)
 }

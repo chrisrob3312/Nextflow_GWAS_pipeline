@@ -165,6 +165,7 @@ CMD+=(--ancestries "${STRATUM_ANCESTRIES}"
     --mac_min "${MAC_MIN:-$(rr_default MAC_MIN)}"
     --chromosome "${CHR}"
     --output_prefix "${RESULTS_DIR}/chr${CHR}"
+    --null_model_rds "${RESULTS_DIR}/null_model.rds"
     --threads "${SLURM_CPUS_PER_TASK:-1}"
     --verbose)
 
