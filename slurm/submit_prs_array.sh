@@ -23,9 +23,9 @@
 #   sbatch <site args> slurm/submit_prs_array.sh <trait>
 #
 # Example:
-#   sbatch <site args> slurm/submit_prs_array.sh OS
-#   sbatch <site args> slurm/submit_prs_array.sh relapse
-#   sbatch <site args> slurm/submit_prs_array.sh MRD
+#   sbatch <site args> slurm/submit_prs_array.sh os
+#   sbatch <site args> slurm/submit_prs_array.sh efs
+#   sbatch <site args> slurm/submit_prs_array.sh mrd
 # ============================================================================
 
 set -euo pipefail
@@ -51,7 +51,12 @@ set_thread_env
 declare -a METHODS=("prs_csx" "gaudi" "disco_divas" "sdpr_admix" "mussel" "prosper")
 METHOD="${METHODS[$((SLURM_ARRAY_TASK_ID - 1))]}"
 
-TRAIT="${1:-OS}"
+TRAIT="${1:?trait required (mrd, efs, os)}"
+# A survival trait's validation uses its own columns (<trait>_time, <trait>_event)
+SURV_ARGS=()
+if trait_is_survival "${TRAIT}"; then
+    SURV_ARGS=(--trait_type survival --time_col "$(trait_time_col "${TRAIT}")" --event_col "$(trait_event_col "${TRAIT}")")
+fi
 
 echo "=============================================="
 echo "Trait: ${TRAIT}"
@@ -103,6 +108,7 @@ Rscript "${SCRIPT_DIR}/bin/calculate_prs_admixed.R" \
     --ancestry_props "${PRS_ANCESTRY_PROPS}" \
     --phenotype "${PHENO}" \
     --trait "${TRAIT}" \
+    ${SURV_ARGS[@]+"${SURV_ARGS[@]}"} \
     --ancestry_col "GRAF_ANC" \
     --validate \
     --stratify_validation \

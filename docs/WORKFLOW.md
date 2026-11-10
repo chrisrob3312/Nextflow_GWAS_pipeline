@@ -11,7 +11,7 @@ one module to the next. The same steps exist as SLURM array scripts under
 |---|---|---|---|
 | Samplesheet | `input` | CSV, header. Required column `sample_id` (one row per genotype set, e.g. per cohort), plus ONE of: `bed,bim,fam` / `pgen,pvar,psam` / `bgen,sample[,bgi]` / `vcf[,vcf_index]`; optional `cohort` | Validated by `bin/check_samplesheet.py`; non-PLINK1 sets are converted to bed/bim/fam in QC |
 | Phenotype file | `phenotype_file` | TSV, header. **`FID` and `IID` must be the first two columns** (REGENIE, SAIGE, SPA-Cox require it; the R scripts accept `IID` or `sample_id`). `IID` must match the genotype sample IDs | Nothing is inferred from the file |
-| Traits | `phenotype_cols` | comma list of column names | **Traits are exactly these columns.** `binary_traits` (0/1) and `survival_traits` (needs `<trait>_time`, `<trait>_status`) pick the model; anything else is quantitative |
+| Traits | `phenotype_cols` | comma list of column names | **Traits are exactly these columns.** `binary_traits` (0/1) and `survival_traits` (needs `<trait>_time`, `<trait>_event`) pick the model; anything else is quantitative |
 | Covariates | `covariate_cols` | comma list of column names | **Covariates are exactly these columns.** List `PC1..PCn` here; with `run_pcair = true` they are replaced by PC-AiR PCs before any model runs |
 | Ancestry labels | `gxg_ancestry_col` (default `GRAF_ANC`) | a column of the phenotype file | GRAF-ANC codes or labels; used by GxG and PRS validation to stratify |
 | Ancestry calls | `ancestry_calls_file` (when `run_ancestry_inference = false`) | TSV/CSV: `sample_id`, `ancestry` (codes or labels) | Normalised by `ANCESTRY_CALLS_PREPARE`; defines the per-ancestry strata (N ≥ `min_ancestry_n`) |
@@ -23,9 +23,9 @@ one module to the next. The same steps exist as SLURM array scripts under
 Example phenotype file:
 
 ```
-FID   IID   OS_time  OS_status  DFS_time  DFS_status  MRD  age  sex  PC1 ... PC5  GRAF_ANC
+FID   IID   sample_id   mrd   efs_time  efs_event  os_time  os_event  protocol  age  sex  PC1 ... PC5
 ```
-with `phenotype_cols = 'OS,DFS,MRD'`, `survival_traits = 'OS,DFS'`, `binary_traits = 'MRD'`,
+with `phenotype_cols = 'mrd,efs,os'`, `survival_traits = 'efs,os'`, `binary_traits = 'mrd'`,
 `covariate_cols = 'age,sex,PC1,PC2,PC3,PC4,PC5'`.
 
 ## 1. End-to-end overview
@@ -36,7 +36,7 @@ flowchart TD
     QC["QC_WORKFLOW<br/>MAF / HWE / missingness filters"]
     ANC["ANCESTRY_INFERENCE<br/>GRAF-ANC -> strata<br/>EUR, AAC, LAT1, LAT2, EAS, SAS (N>=50) else OTHER"]
     GWAS["GWAS_WORKFLOW<br/>per stratum x trait<br/>REGENIE / SAIGE / GENESIS / SPA-Cox"]
-    TR["TRACTOR-GENESIS<br/>AAC (EUR,AFR) + LATINO (EUR,AFR,AMR)<br/>ALL traits: MRD binary, OS/DFS time-to-event"]
+    TR["TRACTOR-GENESIS<br/>AAC (EUR,AFR) + LATINO (EUR,AFR,AMR)<br/>ALL traits: mrd binary, efs/os time-to-event"]
     META["META_ANALYSIS<br/>MR-MEGA across strata -> POOLED"]
     VIS["VISUALIZATION<br/>Manhattan, QQ, Miami"]
     FM["FINE_MAPPING<br/>PolyFun+SuSiE (within) / SuSiE-ME, MG-FLASH-FM (multi)"]
@@ -101,7 +101,7 @@ flowchart TD
 
 ## 3. Tractor-GENESIS: one engine for every trait
 
-Every trait goes through the same conditional score test so MRD, DFS and OS
+Every trait goes through the same conditional score test so mrd, efs and os
 are comparable. The trait's `model` (set in `main.nf` from `binary_traits` and
 `survival_traits`) only changes where the projection comes from.
 
@@ -115,7 +115,7 @@ flowchart LR
     end
     subgraph null["null model (fitted once)"]
         NB["binary / quantitative<br/>GENESIS fitNullModel<br/>kinship in Sigma"]
-        NS["survival (OS, DFS)<br/>coxme: Cox + frailty on 2*kinship<br/>Breslow baseline -> martingale residuals"]
+        NS["survival (efs, os)<br/>coxme: Cox + frailty on 2*kinship<br/>Breslow baseline -> martingale residuals"]
     end
     E["per-variant conditional score test<br/>D = [LA | Dose]<br/>U = D'Py, M = D'PD<br/>Dose block conditioned on LA block<br/>joint k-df test, per-ancestry beta/SE,<br/>covariance-aware heterogeneity, MAC gate"]
     O["tractor_genesis.tsv.gz<br/>P_JOINT, BETA/SE/P per ancestry, MAC per ancestry, P_HET, I2"]
@@ -168,9 +168,9 @@ Each pair reports Wald and LRT p-values with Bonferroni over pairs and BH FDR.
 
 | Setting | Nextflow | SLURM | Notes |
 |---|---|---|---|
-| Traits | `phenotype_cols` | `TRAITS_LIST` | any phenotype columns |
+| Traits | `phenotype_cols` | `TRAITS_LIST` (default `mrd,efs,os`) | phenotype columns; the launcher refuses a trait whose column(s) the phenotype file lacks |
 | Binary traits | `binary_traits` | everything not in `SURVIVAL_TRAITS` | 0/1 |
-| Time-to-event traits | `survival_traits` (+ `survival_time_cols`, `survival_event_cols`) | `SURVIVAL_TRAITS` | default columns `<trait>_time`, `<trait>_status` |
+| Time-to-event traits | `survival_traits` (+ `survival_time_cols`, `survival_event_cols`) | `SURVIVAL_TRAITS` (default `efs,os`); `TIME_COL_<trait>`, `EVENT_COL_<trait>` override one trait | columns `<trait>_time`, `<trait>_event`, as the handoff contract names them; each trait has its own |
 | Covariates | `covariate_cols`, `gxg_covariates` | `COVARIATES` | any phenotype columns |
 | Ancestry column | `gxg_ancestry_col` | `ANCESTRY_COL` | GRAF-ANC codes or labels |
 | Strata rules | `min_stratum_n`, `bin/ancestry_config.R` | `STRATA_LIST`, `MIN_STRATUM_N`, `bin/ancestry_config.R` | default 50 (decided 10 Nov 2026); a smaller stratum is skipped, or pools to OTHER where the script assigns strata |

@@ -38,6 +38,11 @@
 # keeps the empty exit status, and finalise fills it in from sacct.
 # ============================================================================
 
+# Sourced once per shell: a second source (slurm_utils.sh sources this file too) would reset
+# RR_SET_BY, the record of which switches you set.
+if [[ -n "${_RR_LOADED:-}" ]]; then return 0; fi
+_RR_LOADED=1
+
 _RR_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Number-changing switches, with the defaults the scripts use. One line each:
@@ -50,8 +55,8 @@ _RR_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # that sets one of them, rather than let it be silently ignored.
 RR_SWITCHES=(
     "STRATA_LIST|EUR,AAC,LAT1,LAT2,OTHER|strata analysed"
-    "TRAITS_LIST|OS,DFS,MRD|traits analysed"
-    "SURVIVAL_TRAITS|OS,DFS|traits run as time-to-event; the rest are binary"
+    "TRAITS_LIST|mrd,efs,os|traits analysed (phenotype columns, as docs/HANDOFF_CONTRACT.md names them)"
+    "SURVIVAL_TRAITS|efs,os|traits run as time-to-event, with columns <trait>_time and <trait>_event; the rest are binary"
     "COVARIATES|age,sex,PC1,PC2,PC3,PC4,PC5|model covariates (GWAS, GxG)"
     "MIN_STRATUM_N|50|smallest stratum analysed (--min_stratum_n); 50 decided by the user, 10 Nov 2026"
     "MAC_MIN|10|minor allele count needed to test an ancestry's dose term (--mac_min); open: the contract says 20"
@@ -74,8 +79,6 @@ RR_SWITCHES=(
     "ANCESTRY_COL|GRAF_ANC|phenotype column holding the ancestry label (GxG)"
     "PHENO|@job|phenotype file (default: PC-AiR output if present, else data/phenotypes/phenotypes.tsv)"
     "KINSHIP|@job|GRM (default: PC-Relate output if present, else data/kinship/kinship_matrix.rds)"
-    "TIME_COL|@job|survival time column (default <trait>_time)"
-    "EVENT_COL|@job|survival event column (default <trait>_status)"
     "GENO|@job|PLINK prefix for PC-AiR (default data/genotypes/cohort)"
     "PHENO_IN|@job|phenotype file PC-AiR reads (default data/phenotypes/phenotypes.tsv)"
     "KNOWN_LOCI|@job|known-loci table for GxG (default assets/known_leukemia_risk_loci.tsv)"
@@ -88,10 +91,12 @@ declare -A RR_SET_BY=()
 # Refuse a launch that sets a switch name no script reads.
 rr_refuse_unknown_switches() {
     local name
-    for name in STRATUM_MIN_N PC_SCALE MRMEGA_PCS BUNDLE_RULES; do
+    for name in STRATUM_MIN_N PC_SCALE MRMEGA_PCS BUNDLE_RULES TIME_COL EVENT_COL; do
         if [[ -n "${!name+x}" ]]; then
             if [[ "$name" == STRATUM_MIN_N ]]; then
                 echo "REFUSED: STRATUM_MIN_N is set, but the scripts read MIN_STRATUM_N; set that instead" >&2
+            elif [[ "$name" == TIME_COL || "$name" == EVENT_COL ]]; then
+                echo "REFUSED: ${name} is set, but each survival trait has its own columns now: set ${name}_<trait> (e.g. ${name}_efs) instead" >&2
             else
                 echo "REFUSED: ${name} is set, but no script reads it (it would be ignored); unset it" >&2
             fi
@@ -127,6 +132,8 @@ rr_params_tsv() {
         value="${!name-}"
         printf '%s\t%s\t%s\n' "$name" "${value//[$'\t\n']/ }" "${RR_SET_BY[$name]:-unresolved}"
     done
+    # Derived rows the launcher adds (e.g. each survival trait's columns): "name<TAB>value<TAB>set_by"
+    if [[ -n "${RR_EXTRA_PARAMS:-}" ]]; then printf '%s\n' "${RR_EXTRA_PARAMS}"; fi
 }
 
 _rr_git_sha()   { git -C "${_RR_REPO}" rev-parse HEAD 2>/dev/null || echo nogit; }

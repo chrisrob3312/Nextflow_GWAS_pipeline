@@ -48,7 +48,7 @@ and give those yourself:
 ```bash
 sbatch --partition="$SLURM_PARTITION" --account="$SLURM_ACCOUNT" \
        --output="$PWD/logs/gwas_%A_%a.out" --error="$PWD/logs/gwas_%A_%a.err" \
-       slurm/submit_gwas_array.sh EUR OS survival
+       slurm/submit_gwas_array.sh EUR os survival
 ```
 
 (or export `SBATCH_PARTITION` and `SBATCH_ACCOUNT`, which sbatch reads by itself). From the repo

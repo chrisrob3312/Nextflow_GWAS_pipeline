@@ -18,9 +18,9 @@
 # Usage (normally submitted by slurm/submit_full_pipeline.sh; by hand, from the repo root,
 # with the site arguments of docs/HPC_SITE.md "Submitting one script by hand"):
 #   sbatch <site args> slurm/submit_gxg_array.sh <trait> [model]
-#   sbatch <site args> slurm/submit_gxg_array.sh OS survival
-#   sbatch <site args> slurm/submit_gxg_array.sh relapse binary
-#   sbatch <site args> slurm/submit_gxg_array.sh MRD binary
+#   sbatch <site args> slurm/submit_gxg_array.sh os  survival
+#   sbatch <site args> slurm/submit_gxg_array.sh efs survival
+#   sbatch <site args> slurm/submit_gxg_array.sh mrd binary
 # ============================================================================
 
 set -euo pipefail
@@ -38,7 +38,7 @@ source "${SCRIPT_DIR}/bin/activate_env.sh" gwas-r     # conda env gwas-r, TMPDIR
 print_slurm_info
 set_thread_env
 
-TRAIT="${1:-OS}"
+TRAIT="${1:?trait required (mrd, efs, os)}"
 MODEL="${2:-survival}"
 STRATUM=$(get_array_item "POOLED,EUR,AAC,LAT1,LAT2,EAS,SAS,OTHER")
 
@@ -73,7 +73,7 @@ SUMSTATS="$(IFS=,; echo "${SUMSTATS_FILES[*]}")"
 
 SURV_ARGS=""
 if [[ "${MODEL}" == "survival" ]]; then
-    SURV_ARGS="--time_col ${TRAIT}_time --event_col ${TRAIT}_status"
+    SURV_ARGS="--time_col $(trait_time_col "${TRAIT}") --event_col $(trait_event_col "${TRAIT}")"
 fi
 
 # Optional: Tractor dosages for local-ancestry-aware epistasis (pooled task only). The ancestry list

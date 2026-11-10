@@ -60,10 +60,10 @@ export LOG_DIR
 # rr_resolve_switches fills in the unset ones and exports them, so every job sees the value
 # that params.tsv records.
 #   STRATA_LIST="EUR,AAC,LAT1,LAT2,OTHER"   ancestry strata (LAT1/LAT2 separate; OTHER = EAS+SAS+small groups)
-#   TRAITS_LIST="OS,DFS,MRD"                any phenotype columns
-#   SURVIVAL_TRAITS="OS,DFS"                traits run as time-to-event (<trait>_time, <trait>_status);
-#                                           everything else is binary (0/1) - DFS (relapse OR death)
-#                                           avoids the need for a competing-risk model
+#   TRAITS_LIST="mrd,efs,os"               phenotype columns, as the handoff contract names them
+#   SURVIVAL_TRAITS="efs,os"                traits run as time-to-event, each with its own columns
+#                                           <trait>_time and <trait>_event (TIME_COL_<trait> /
+#                                           EVENT_COL_<trait> override one trait); the rest are binary
 #   COVARIATES="age,sex,PC1,...,PC5"        any phenotype columns; used by GWAS and GxG
 #   GXG_CUSTOM_VARIANTS=/path/list.txt      optional GRCh38 variant list for GxG
 #   GXG_USE_DEFAULT_LOCI=true|false         include the default known-leukemia-loci table
@@ -73,7 +73,7 @@ export LOG_DIR
 #   MAC_MIN=10                              minor allele count per ancestry term; open question: the
 #                                           handoff contract says 20, the code default is still 10
 # ---------------------------------------------------------------------------
-source "${REPO}/bin/run_record.sh"
+source "${REPO}/bin/slurm_utils.sh"    # helpers, and bin/run_record.sh (the switch table, rr_*)
 rr_refuse_unknown_switches || exit 2
 rr_resolve_switches
 IFS=',' read -ra STRATA <<< "${STRATA_LIST}"
@@ -111,6 +111,39 @@ if [[ ${#MISSING_ANC[@]} -gt 0 ]]; then
     fi
 fi
 
+# Every trait's columns must be in the phenotype file: a binary trait its own column, a survival
+# trait <trait>_time and <trait>_event (or its TIME_COL_<trait> / EVENT_COL_<trait>). Checked
+# here, on the header, before anything is queued. A dry run warns; a launch refuses.
+PHENO_SOURCE="${PHENO_IN:-${REPO}/data/phenotypes/phenotypes.tsv}"
+PHENO_HEADER=""
+[[ -s "${PHENO_SOURCE}" ]] && PHENO_HEADER="$(head -1 "${PHENO_SOURCE}" | tr '\t' '\n')"
+SURV_COLS=()
+PHENO_PROBLEMS=()
+for trait in "${TRAITS[@]}"; do
+    [[ "$trait" =~ ^[A-Za-z][A-Za-z0-9_]*$ ]] || { echo "REFUSED: trait name '${trait}' (letters, digits and _ only)" >&2; exit 2; }
+    if trait_is_survival "$trait"; then
+        need=("$(trait_time_col "$trait")" "$(trait_event_col "$trait")")
+        SURV_COLS+=("${trait}:${need[0]}/${need[1]}")
+    else
+        need=("$trait")
+    fi
+    if [[ -s "${PHENO_SOURCE}" ]]; then
+        for c in "${need[@]}"; do
+            grep -qxF -- "$c" <<< "${PHENO_HEADER}" || PHENO_PROBLEMS+=("${trait}: column ${c} is not in ${PHENO_SOURCE}")
+        done
+    fi
+done
+[[ -s "${PHENO_SOURCE}" ]] || PHENO_PROBLEMS+=("phenotype file ${PHENO_SOURCE} is missing or empty")
+if [[ ${#PHENO_PROBLEMS[@]} -gt 0 ]]; then
+    if [[ $DRY_RUN == 1 ]]; then
+        printf 'WARNING: %s (a launch would refuse)\n' "${PHENO_PROBLEMS[@]}"
+    else
+        printf 'REFUSED: %s\n' "${PHENO_PROBLEMS[@]}" >&2
+        exit 2
+    fi
+fi
+RR_EXTRA_PARAMS="$(printf 'SURVIVAL_COLUMNS\t%s\tderived' "$(IFS=,; echo "${SURV_COLS[*]:-none}")")"
+
 DEFERRED=()
 for step in PRS COLOC VALIDATION GXG; do
     v="RUN_${step}"
@@ -130,7 +163,7 @@ GWAS_RUN_DIR="${RR_ROOT}/${GWAS_RUN_ID}"
 export GWAS_RUN_ID GWAS_RUN_DIR
 [[ $DRY_RUN == 1 ]] || rr_write_launch_record "${GWAS_RUN_DIR}" "$0" "$@"
 
-trait_model() { [[ ",${SURVIVAL_TRAITS}," == *",$1,"* ]] && echo survival || echo binary; }
+trait_model() { if trait_is_survival "$1"; then echo survival; else echo binary; fi; }
 
 # QTL types for colocalization
 QTL_TYPES=("eqtl" "sqtl" "pqtl" "mqtl" "caqtl" "hqtl")
@@ -204,7 +237,7 @@ fi
 # STEP 1: Tractor-GENESIS GWAS for every trait x stratum (array over chromosomes)
 # ============================================================================
 # ALL traits use the same adapter so they are comparable:
-#   MRD -> binary (logistic null), DFS/OS -> survival (Cox null + PC-Relate GRM)
+#   mrd -> binary (logistic null), efs/os -> survival (Cox null + PC-Relate GRM)
 echo ""
 echo "STEP 1: Submitting Tractor-GENESIS GWAS jobs..."
 declare -A GWAS_JOBS

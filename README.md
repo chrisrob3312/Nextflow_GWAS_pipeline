@@ -170,6 +170,9 @@ pipeline"); the run record is described in [docs/WORKFLOW.md](docs/WORKFLOW.md),
    with `RUN_PRS=true`, `RUN_COLOC=true`, `RUN_VALIDATION=true` (needs `RUN_PRS`) and
    `RUN_GXG=true`; every launch prints the ones it deferred, e.g.
    `deferred: PRS COLOC VALIDATION GXG (RUN_*=false)`.
+   Traits are `mrd` (binary), `efs` and `os` (time-to-event), the handoff contract's columns: each
+   survival trait reads its own `<trait>_time` and `<trait>_event` (override one trait with
+   `TIME_COL_<trait>` / `EVENT_COL_<trait>`); the launcher checks every column before queuing.
    The number-changing switches (all recorded in the run record) include `MIN_STRATUM_N`, the
    smallest stratum analysed (default 50, decided 10 Nov 2026), and `MAC_MIN`, the minor allele
    count an ancestry's dose term needs (default 10; the handoff contract says 20, still open).

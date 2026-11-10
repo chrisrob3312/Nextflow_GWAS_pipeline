@@ -152,7 +152,8 @@ workflow {
     ch_versions = ch_versions.mix(INPUT_CHECK.out.versions)
 
     // Parse traits and assign each one a Tractor-GENESIS model so every trait
-    // goes through the same adapter (MRD -> binary; OS, relapse -> survival)
+    // goes through the same adapter (mrd -> binary; efs, os -> survival, columns <trait>_time /
+    // <trait>_event as docs/HANDOFF_CONTRACT.md names them)
     def survival_traits = params.survival_traits ? params.survival_traits.split(',') as List : []
     def surv_time_cols  = params.survival_time_cols  ? params.survival_time_cols.split(',')  as List : []
     def surv_event_cols = params.survival_event_cols ? params.survival_event_cols.split(',') as List : []
@@ -163,7 +164,7 @@ workflow {
             def is_survival = survival_traits.contains(trait)
             def idx         = survival_traits.indexOf(trait)
             def time_col    = is_survival ? (idx < surv_time_cols.size()  ? surv_time_cols[idx]  : "${trait}_time")   : null
-            def event_col   = is_survival ? (idx < surv_event_cols.size() ? surv_event_cols[idx] : "${trait}_status") : null
+            def event_col   = is_survival ? (idx < surv_event_cols.size() ? surv_event_cols[idx] : "${trait}_event") : null
             def model       = is_survival ? 'survival' : (is_binary ? 'binary' : 'quantitative')
             [trait: trait, binary: is_binary, survival: is_survival, model: model,
              time_col: time_col, event_col: event_col]

@@ -118,6 +118,15 @@ should_run_stratum() {
     fi
 }
 
+# Survival columns, one pair per trait. The handoff contract names them <trait>_time and
+# <trait>_event (efs_time/efs_event, os_time/os_event: docs/HANDOFF_CONTRACT.md); TIME_COL_<trait>
+# and EVENT_COL_<trait> (e.g. TIME_COL_efs) override one trait's names. There is no setting that
+# applies to every trait at once.
+trait_time_col()  { local v="TIME_COL_$1";  printf '%s' "${!v:-$1_time}"; }
+trait_event_col() { local v="EVENT_COL_$1"; printf '%s' "${!v:-$1_event}"; }
+# Is a trait time-to-event? (SURVIVAL_TRAITS, comma-separated)
+trait_is_survival() { [[ ",${SURVIVAL_TRAITS:-efs,os}," == *",$1,"* ]]; }
+
 # Print a command so it can be read, and pasted back into a shell: plain words as they are,
 # anything with spaces or special characters quoted. Used by the DRY_RUN modes.
 print_cmd() {

@@ -12,20 +12,20 @@
 # ============================================================================
 # ALL traits go through the same Tractor-GENESIS adapter so results are
 # comparable:
-#   MRD      -> binary      (GENESIS logistic mixed model null)
-#   relapse  -> survival    (Cox null with kinship frailty, time-to-event)
-#   OS       -> survival
+#   mrd      -> binary      (GENESIS logistic mixed model null)
+#   efs      -> survival    (Cox null with kinship frailty, time-to-event)
+#   os       -> survival
 #
 # Usage (normally submitted by slurm/submit_full_pipeline.sh; by hand, from the repo root,
 # with the site arguments of docs/HPC_SITE.md "Submitting one script by hand"):
 #   sbatch <site args> slurm/submit_gwas_array.sh <stratum> <trait> <model>
 #
-#   sbatch <site args> slurm/submit_gwas_array.sh LAT1 OS      survival
-#   sbatch <site args> slurm/submit_gwas_array.sh LAT1 relapse survival
-#   sbatch <site args> slurm/submit_gwas_array.sh LAT1 MRD     binary
+#   sbatch <site args> slurm/submit_gwas_array.sh LAT1 os  survival
+#   sbatch <site args> slurm/submit_gwas_array.sh LAT1 efs survival
+#   sbatch <site args> slurm/submit_gwas_array.sh LAT1 mrd binary
 #
-# Survival traits expect columns <trait>_time and <trait>_status in the
-# phenotype file (override with TIME_COL / EVENT_COL env vars).
+# A survival trait reads columns <trait>_time and <trait>_event (efs_time/efs_event, os_time/os_event,
+# as docs/HANDOFF_CONTRACT.md names them); TIME_COL_<trait> / EVENT_COL_<trait> override one trait.
 # The adapter checks every sample in the stratum's Tractor files against STRATA_FILE
 # (default data/ancestry/strata.tsv, the handoff's ancestry/strata.tsv) when it exists, and
 # skips the stratum (exit 0, no results) below MIN_STRATUM_N analysable samples; the run
@@ -38,7 +38,7 @@
 #
 # DRY_RUN=1 prints the Rscript command one task would run and stops; nothing is
 # activated, created or run. Outside an array it shows chromosome 1:
-#   DRY_RUN=1 bash slurm/submit_gwas_array.sh EUR OS survival
+#   DRY_RUN=1 bash slurm/submit_gwas_array.sh EUR os survival
 # ============================================================================
 
 set -euo pipefail
@@ -60,7 +60,7 @@ if [[ "${DRY_RUN}" != 1 ]]; then
 fi
 
 STRATUM="${1:?stratum required (EUR, AAC, LAT1, LAT2, EAS, SAS, OTHER, POOLED)}"
-TRAIT="${2:?trait required (OS, relapse, MRD)}"
+TRAIT="${2:?trait required (mrd, efs, os)}"
 MODEL="${3:-survival}"
 CHR="${SLURM_ARRAY_TASK_ID:-}"
 if [[ -z "${CHR}" ]]; then
@@ -112,7 +112,7 @@ CMD=(Rscript "${SCRIPT_DIR}/bin/tractor_genesis_adapter.R"
     --trait "${TRAIT}"
     --model "${MODEL}")
 if [[ "${MODEL}" == "survival" ]]; then
-    CMD+=(--time_col "${TIME_COL:-${TRAIT}_time}" --event_col "${EVENT_COL:-${TRAIT}_status}")
+    CMD+=(--time_col "$(trait_time_col "${TRAIT}")" --event_col "$(trait_event_col "${TRAIT}")")
 fi
 STRATA_FILE="${STRATA_FILE:-${DATA_DIR}/ancestry/strata.tsv}"
 if [[ -f "${STRATA_FILE}" ]]; then

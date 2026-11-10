@@ -832,12 +832,22 @@ if (opt$validate && !is.null(opt$phenotype) && !is.null(opt$trait)) {
     prop_cols <- grep("^(EUR|AFR|AMR|EAS|SAS|NAT|HISP)(_prop|_frac)?$",
                       names(pheno), value = TRUE, ignore.case = TRUE)
 
-    # Check for survival data
-    time_cols <- c("time", "OS_time", "survival_time", "follow_up", "days", "months")
-    event_cols <- c("event", "status", "OS_status", "censored", "death")
-    time_col <- intersect(names(pheno), time_cols)
-    event_col <- intersect(names(pheno), event_cols)
+    # Survival data: the trait's own columns when given (--time_col / --event_col, as the SLURM
+    # path passes <trait>_time / <trait>_event); otherwise the old name search, kept for callers
+    # that pass neither.
+    if (!is.null(opt$time_col) || !is.null(opt$event_col)) {
+        if (is.null(opt$time_col) || is.null(opt$event_col)) stop("give both --time_col and --event_col")
+        missing_cols <- setdiff(c(opt$time_col, opt$event_col), names(pheno))
+        if (length(missing_cols) > 0) stop("survival column(s) not in the phenotype file: ", paste(missing_cols, collapse = ", "))
+        time_col <- opt$time_col; event_col <- opt$event_col
+    } else {
+        time_cols <- c("time", "OS_time", "survival_time", "follow_up", "days", "months")
+        event_cols <- c("event", "status", "OS_status", "censored", "death")
+        time_col <- intersect(names(pheno), time_cols)
+        event_col <- intersect(names(pheno), event_cols)
+    }
     is_survival <- length(time_col) > 0 && length(event_col) > 0
+    if (identical(opt$trait_type, "survival") && !is_survival) stop("--trait_type survival needs --time_col and --event_col")
 
     # Determine trait type
     trait_values <- pheno[[opt$trait]]
