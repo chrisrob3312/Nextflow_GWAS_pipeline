@@ -8,7 +8,8 @@
 #   mac_minor(alt, n_hap)            minor allele count
 #   test_variant_tractor(...)        the conditional score test of one variant
 #   result_row(...)                  one output row
-#   slice_chunk / test_chunk         a block of variants: its matrices, and its rows + status
+#   slice_chunk / test_chunk         a block of variants: its matrices (from a full read; the streamed
+#                                    reader in bin/tractor_io.R returns the same shape), its rows + status
 # ============================================================================
 `%||%` <- function(a, b) if (is.null(a)) b else a
 

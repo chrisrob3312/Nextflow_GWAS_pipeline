@@ -461,7 +461,7 @@ grep -q 'anc_code' "$A" && bad "adapter still derives a file number from the pos
 grep -q 'source(file.path(.adapter_dir, "tractor_io.R"))' "$A" && ok "adapter sources bin/tractor_io.R" || bad "adapter does not source tractor_io.R"
 grep -q 'check_stratum_membership(opt$stratum, tractor_ids, opt$strata_file, pheno)' "$A" && ok "adapter: --stratum checked against the Tractor files' samples" || bad "adapter: no stratum check"
 grep -q 'if (n_null < opt$min_stratum_n)' "$A" && grep -q 'quit(save = "no", status = 0)' "$A" && ok "adapter: below --min_stratum_n, skip with exit 0" || bad "adapter: no min_stratum_n gate"
-grep -q 'test_chunk(slice_chunk(tractor_data, idx), null_ops, ancestries, ref_anc, opt$mac_min, opt$stratum)' "$A" && grep -q 'if (!is.null(stratum)) row$STRATUM <- stratum' "${A%/*}/tractor_model.R" \
+grep -q 'run_chunk <- function(ch) test_chunk(ch, null_ops, ancestries, ref_anc, opt$mac_min, opt$stratum)' "$A" && grep -q 'if (!is.null(stratum)) row$STRATUM <- stratum' "${A%/*}/tractor_model.R" \
     && ok "adapter: outputs labelled with a STRATUM column (the first; result_row in bin/tractor_model.R)" || bad "adapter: no STRATUM label"
 grep -q 'write_run_counts(opt$output_prefix, run_counts)' "$A" && ok "adapter: writes <output_prefix>.run_counts.tsv" || bad "adapter: no counts file"
 grep -q '".ancdose.", k' "$REPO/bin/calculate_prs_admixed.R" && bad "PRS still reads Tractor files by position" || ok "PRS LA partial: no file number from the position either"
@@ -639,7 +639,7 @@ has "$out" "[DRY-RUN] QC gate: bin/qc_gate.sh --require pcair_pc_merge" && ok "D
 
 section "CP-08: covariates exist and are numeric; the list used is written above every results table"
 A="${C}/bin/tractor_genesis_adapter.R"
-l_chk="$(grep -n 'check_covariates(pheno, covariates_requested' "$A" | cut -d: -f1)"; l_rd="$(grep -n '^tractor_data <- read_tractor_files' "$A" | cut -d: -f1)"
+l_chk="$(grep -n 'check_covariates(pheno, covariates_requested' "$A" | cut -d: -f1)"; l_rd="$(grep -n 'tractor_read_full(tractor_files' "$A" | head -1 | cut -d: -f1)"
 l_fit="$(grep -n 'nullmod <- fitNullModel(' "$A" | cut -d: -f1)"; l_cox="$(grep -n 'cox_null <- coxph(' "$A" | cut -d: -f1)"
 [[ -n "$l_chk" && "$l_chk" -lt "$l_rd" && "$l_chk" -lt "$l_fit" && "$l_chk" -lt "$l_cox" ]] && grep -q 'if (length(covariates) > 0) check_covariates(pheno, covariates, opt\$phenotype)' "$A" \
     && ok "adapter: covariates checked right after the phenotype is read, before Tractor files or any fit (again with global-ancestry columns)" || bad "adapter check order: $l_chk $l_rd $l_fit $l_cox"
@@ -988,8 +988,29 @@ if [[ -n "${REAL_RSCRIPT}" ]] && "${REAL_RSCRIPT}" -e 'quit(status = !all(sapply
     chk="$("${REAL_RSCRIPT}" -e 'suppressPackageStartupMessages(library(data.table)); a <- fread(commandArgs(TRUE)[1])
             cat(identical(unique(a$STRATUM), "EUR"), names(a)[1], length(grep("^BETA_", names(a))), identical(a$P_JOINT, a$P_EUR), unique(a$DF_JOINT), "\n")' \
             "${TD}/out/chr22.tractor_genesis.genomic_order.tsv.gz" 2>&1)"
-    [[ $rc -eq 0 && "$chk" == "TRUE STRATUM 1 TRUE 1 " ]] && has "$out" "Hapcount: none (one ancestry: 2 for every sample)" && ! grep -qi "hapcount file\|no hapcount" <<< "$out" \
+    [[ $rc -eq 0 && "$chk" == "TRUE STRATUM 1 TRUE 1 " ]] && has "$out" "EUR: (one ancestry: hapcount 2 for every sample), eur.dosage.EUR.txt.gz" && ! grep -qi "hapcount file\|no hapcount" <<< "$out" \
         && ok "EUR-only toy stratum: STRATUM=EUR first, one BETA_EUR/SE_EUR/P_EUR set, P_JOINT identical to P_EUR (1 df), no hapcount file needed" || bad "k=1: rc=$rc chk=$chk $(tail -3 <<< "$out")"
+fi
+
+section "M-02: the Tractor matrices streamed chunk by chunk (default), the full read kept for comparison"
+if [[ -n "${REAL_RSCRIPT}" ]] && "${REAL_RSCRIPT}" -e 'quit(status = !all(sapply(c("data.table", "optparse", "survival", "Matrix"), requireNamespace, quietly = TRUE)))' >/dev/null 2>&1; then
+    TD="${W}/m02"; rm -rf "${TD:?}"; mkdir -p "$TD"
+    "${REAL_RSCRIPT}" "${C}/tests/toy/make_toy_tractor.R" "${TD}/toy" 120 300 AFR,EUR >/dev/null
+    ad() { (cd "$TD" && GWAS_QC_DIR="${TD}/qc" "${REAL_RSCRIPT}" "${C}/bin/tractor_genesis_adapter.R" --tractor_prefix toy --phenotype toy.phenotypes.tsv \
+            --trait os --model survival --time_col os_time --event_col os_event --ancestries AFR,EUR --ref_ancestry EUR \
+            --covariates sex,age_at_diagnosis --stratum TOY --min_stratum_n 50 --chromosome 22 --chunk_size 64 "$@" 2>&1); }
+    os="$(ad --read_mode stream --threads 2 --output_prefix s/chr22)"; of="$(ad --read_mode full --output_prefix f/chr22)"
+    same="$("${REAL_RSCRIPT}" -e 'suppressPackageStartupMessages(library(data.table)); a <- fread(commandArgs(TRUE)[1]); b <- fread(commandArgs(TRUE)[2]); cat(nrow(a), isTRUE(all.equal(a, b, tolerance = 0)), "\n")' \
+            "${TD}/s/chr22.tractor_genesis.genomic_order.tsv.gz" "${TD}/f/chr22.tractor_genesis.genomic_order.tsv.gz" 2>&1)"
+    [[ "$same" == "300 TRUE " ]] && has "$os" "read mode: stream" && has "$os" "Chunks: 5 | threads: 2" && has "$of" "Reading the Tractor files whole (--read_mode full)" \
+        && ok "300 variants in chunks of 64: --read_mode stream (default, 2 threads) gives exactly the --read_mode full results" || bad "stream vs full: $same"
+    has "$os" "Peak memory of this process:" && ok "the adapter reports its peak memory (VmHWM) at the end" || bad "peak memory line"
+    zcat "${TD}/toy.dosage.EUR.txt.gz" | sed '101d' | gzip > "${TD}/d.tmp" && mv "${TD}/d.tmp" "${TD}/toy.dosage.EUR.txt.gz"
+    out="$(ad --output_prefix x/chr22)"; rc=$?
+    [[ $rc -ne 0 ]] && has "$out" "Tractor files out of step in variants 65-128: toy.dosage.EUR.txt.gz (row 36: 22:201000:22:201000:A:G vs 22:200000:22:200000:A:G)" \
+        && ok "a dose file missing a row: stops, naming the file and the first variant out of step (no silent misalignment)" || bad "out of step: rc=$rc $(tail -2 <<< "$out")"
+else
+    echo "  (real R with data.table, optparse, survival and Matrix not available: M-02 checks skipped)"
 fi
 
 section "GxG: missing sumstats are left out and named; none at all stops the task"

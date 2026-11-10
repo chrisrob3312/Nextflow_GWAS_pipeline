@@ -143,7 +143,11 @@ fitted. The **MAC gate** counts the **minor** allele: a variant is tested only i
 minor allele count, `MAC_STRATUM = min(ALT, 2n - ALT)`, reaches `MAC_MIN`, and an ancestry's dose
 term only if that background's minor count, `MAC_<anc> = min(ALT_anc, haplotypes_anc - ALT_anc)`,
 does (an allele at ALT frequency 0.94 on a background has a small minor count). `MAC_MIN` stays 10
-until decided (the contract says 20). `STRATUM` is the first column of every table. Variants are tested in chunks of `--chunk_size` by `--threads` forked
+until decided (the contract says 20). `STRATUM` is the first column of every table. The Tractor files are streamed (M-02, `--read_mode stream`, the default): `--chunk_size` variants are
+read from every hapcount and dose file in lockstep (a file out of step stops the run, naming it and
+the first variant that differs), so memory grows with chunk x samples, not variants x samples;
+`--read_mode full` reads them whole first and gives identical results. The adapter prints its peak
+memory at the end. Variants are tested in chunks of `--chunk_size` by `--threads` forked
 workers (the GWAS array passes `SLURM_CPUS_PER_TASK`; the results do not depend on it). The null
 model is fitted once per stratum x trait and cached in `results/gwas/<trait>/<S>/null_model.rds`
 (`--null_model_rds`): the other chromosome tasks log `null loaded`, and a cache fitted on other

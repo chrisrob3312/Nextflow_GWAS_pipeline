@@ -94,6 +94,9 @@ option_list <- list(
                              "(min(ALT_a, haplotypes_a - ALT_a)) [default: 10]")),
 
     # Runtime
+    make_option(c("--read_mode"), type = "character", default = "stream",
+                help = paste("stream: read the Tractor files --chunk_size variants at a time, in lockstep (memory",
+                             "~ chunk x samples); full: read them whole first (the comparator) [default: stream]")),
     make_option(c("--chunk_size"), type = "integer", default = 1000,
                 help = "Variants per chunk; the chunks are tested in parallel [default: 1000]"),
     make_option(c("--threads"), type = "integer", default = 1,
@@ -151,6 +154,7 @@ if (is.null(opt$tractor_prefix) && is.null(opt$msp)) {
     stop("Required: --tractor_prefix OR (--msp and --gds)")
 }
 
+if (!opt$read_mode %in% c("stream", "full")) stop("--read_mode must be stream or full")
 if (!is.null(opt$msp) || !is.null(opt$gds)) {
     stop("--msp / --gds (RFMix input) is not implemented: pass the Tractor files with --tractor_prefix")
 }
@@ -412,87 +416,24 @@ if (n_null < opt$min_stratum_n) {
     quit(save = "no", status = 0)
 }
 
-# Function to read Tractor hapcount/dosage files (paths resolved above)
-read_tractor_files <- function(files, ancestries) {
-    hapcount <- list()
-    dosage <- list()
-    variant_info <- NULL
-
-    for (anc in ancestries) {
-        hc_file  <- files[[anc]]$hapcount$path          # NULL with one ancestry
-        dos_file <- files[[anc]]$dosage$path
-
-        cat("  Loading", anc, "...\n")
-        cat("    Hapcount:", if (is.null(hc_file)) "none (one ancestry: 2 for every sample)" else basename(hc_file), "\n")
-        cat("    Dosage:", basename(dos_file), "\n")
-
-        # Read files
-        # Tractor format: first cols are variant info, rest are samples
-        dos_data <- fread(dos_file)
-        hc_data <- if (is.null(hc_file)) NULL else fread(hc_file)
-
-        # Extract variant info from first file
-        if (is.null(variant_info)) {
-            # Variant info columns (CHR, POS, ID, REF, ALT or similar; else the first 5)
-            info_cols <- tractor_info_cols(names(dos_data))
-            variant_info <- dos_data[, ..info_cols]
-
-            # Standardize column names
-            names(variant_info) <- toupper(names(variant_info))
-            if ("#CHROM" %in% names(variant_info)) setnames(variant_info, "#CHROM", "CHR")
-            if ("CHROM" %in% names(variant_info)) setnames(variant_info, "CHROM", "CHR")
-            if ("BP" %in% names(variant_info)) setnames(variant_info, "BP", "POS")
-            if ("SNP" %in% names(variant_info) && !"ID" %in% names(variant_info)) {
-                setnames(variant_info, "SNP", "ID")
-            }
-        }
-
-        # Extract sample data (non-info columns)
-        sample_cols <- setdiff(names(dos_data), info_cols)
-
-        dosage[[anc]] <- as.matrix(dos_data[, ..sample_cols])
-        hapcount[[anc]] <- if (is.null(hc_data)) {
-            matrix(2L, nrow(dosage[[anc]]), ncol(dosage[[anc]]), dimnames = dimnames(dosage[[anc]]))
-        } else as.matrix(hc_data[, ..sample_cols])
-    }
-
-    # Get sample IDs from column names
-    sample_ids <- colnames(dosage[[ancestries[1]]])
-
-    cat("  Variants:", nrow(variant_info), "\n")
-    cat("  Samples:", length(sample_ids), "\n")
-
-    list(
-        hapcount = hapcount,
-        dosage = dosage,
-        variant_info = variant_info,
-        sample_ids = sample_ids
-    )
-}
-
-# Load Tractor data
-tractor_data <- read_tractor_files(tractor_files, ancestries)
-
 # The analysed samples: complete cases (above) that are in the Tractor files, in phenotype order
-common_samples <- intersect(analysable, tractor_data$sample_ids)
+common_samples <- intersect(analysable, tractor_ids)
 cat("  Samples analysed (complete cases with phenotype and Tractor data):", length(common_samples), "\n")
+if (length(common_samples) == 0) stop("No overlapping samples between phenotype and Tractor data!")
 
-if (length(common_samples) == 0) {
-    stop("No overlapping samples between phenotype and Tractor data!")
-}
-
-# Subset and align data
+# Subset and align the phenotype to them
 pheno <- pheno[sample_id %in% common_samples]
-pheno <- pheno[match(common_samples, sample_id)]  # Align order
-
-sample_idx <- match(common_samples, tractor_data$sample_ids)
-for (anc in ancestries) {
-    tractor_data$hapcount[[anc]] <- tractor_data$hapcount[[anc]][, sample_idx, drop = FALSE]
-    tractor_data$dosage[[anc]] <- tractor_data$dosage[[anc]][, sample_idx, drop = FALSE]
-}
-
+pheno <- pheno[match(common_samples, sample_id)]
 n_samples <- length(common_samples)
-n_variants <- nrow(tractor_data$variant_info)
+
+# The Tractor matrices (M-02, bin/tractor_io.R): streamed chunk by chunk during the tests (default),
+# or read whole here with --read_mode full. Either way the sample columns are common_samples, in order.
+tractor_data <- NULL
+if (opt$read_mode == "full") {
+    cat("  Reading the Tractor files whole (--read_mode full)...\n")
+    tractor_data <- tractor_read_full(tractor_files, ancestries, common_samples)
+    cat("  Variants:", nrow(tractor_data$variant_info), "\n")
+}
 
 # ============================================================================
 # Fit Null Model (no genetic terms)
@@ -638,24 +579,49 @@ if (is.null(opt$null_model_rds)) saveRDS(nullmod, paste0(opt$output_prefix, ".nu
 # Run Association Tests
 # ============================================================================
 cat("\nRunning association tests...\n")
-cat("  Variants:", n_variants, "\n")
-cat("  Chunk size:", opt$chunk_size, "\n")
+cat("  Chunk size:", opt$chunk_size, "| read mode:", opt$read_mode, "\n")
 
 # Chunks of --chunk_size variants, tested in parallel by forked workers (--threads); each worker
 # returns its rows and per-variant status, bound in chunk order, so the result does not depend on
 # the number of threads (tests/test_chassis.sh compares --threads 1 and 4).
-chunks <- split(seq_len(n_variants), ceiling(seq_len(n_variants) / opt$chunk_size))
-cat("  Chunks:", length(chunks), "| threads:", opt$threads, "\n")
 start_time <- Sys.time()
-run_chunk <- function(idx) test_chunk(slice_chunk(tractor_data, idx), null_ops, ancestries, ref_anc, opt$mac_min, opt$stratum)
-out <- if (opt$threads > 1 && length(chunks) > 1 && .Platform$OS.type == "unix") {
-    parallel::mclapply(chunks, run_chunk, mc.cores = opt$threads, mc.preschedule = FALSE)
-} else lapply(chunks, run_chunk)
-failed <- vapply(out, function(x) inherits(x, "try-error") || is.null(x), NA)
-if (any(failed)) stop("a worker failed on chunk ", which(failed)[1], ": ", as.character(out[[which(failed)[1]]]))
+par_apply <- function(x, f) {
+    r <- if (opt$threads > 1 && length(x) > 1 && .Platform$OS.type == "unix") {
+        parallel::mclapply(x, f, mc.cores = opt$threads, mc.preschedule = FALSE)
+    } else lapply(x, f)
+    bad <- vapply(r, function(y) inherits(y, "try-error") || is.null(y), NA)
+    if (any(bad)) stop("a worker failed on a chunk: ", as.character(r[[which(bad)[1]]]))
+    r
+}
+run_chunk <- function(ch) test_chunk(ch, null_ops, ancestries, ref_anc, opt$mac_min, opt$stratum)
+if (opt$read_mode == "full") {
+    n_v <- nrow(tractor_data$variant_info)
+    chunks <- split(seq_len(n_v), ceiling(seq_len(n_v) / opt$chunk_size))
+    cat("  Chunks:", length(chunks), "| threads:", opt$threads, "\n")
+    out <- par_apply(chunks, function(idx) run_chunk(slice_chunk(tractor_data, idx)))
+} else {
+    # read --threads chunks, test them in parallel, keep their rows, read the next ones
+    streams <- tractor_stream_open(tractor_files, ancestries, common_samples)
+    out <- list(); n_chunks <- 0L
+    repeat {
+        batch <- list()
+        for (b in seq_len(max(1L, opt$threads))) {
+            ch <- tractor_stream_next(streams, opt$chunk_size)
+            if (is.null(ch)) break
+            batch[[length(batch) + 1]] <- ch
+        }
+        if (length(batch) == 0) break
+        out <- c(out, par_apply(batch, run_chunk))
+        n_chunks <- n_chunks + length(batch)
+        rm(batch)
+    }
+    tractor_stream_close(streams)
+    cat("  Chunks:", n_chunks, "| threads:", opt$threads, "\n")
+}
 results <- rbindlist(lapply(out, `[[`, "dt"))       # STRATUM (with --stratum) is the first column (result_row)
 st <- unlist(lapply(out, `[[`, "status"), use.names = FALSE)
 n_status <- c(ok = sum(st == "ok"), mac = sum(st == "mac"), error = sum(st == "error"))
+n_variants <- length(st)
 cat(sprintf("  Tested %d variants in %.1f s (%d ok, %d below the MAC gate, %d failed)\n", n_variants,
             as.numeric(difftime(Sys.time(), start_time, units = "secs")), n_status[["ok"]], n_status[["mac"]], n_status[["error"]]))
 
@@ -799,4 +765,6 @@ run_counts$n_tested   <- sum(!is.na(results$P_JOINT))
 run_counts$n_failed   <- n_status[["error"]]
 cat("  Counts:", write_run_counts(opt$output_prefix, run_counts), "\n")
 
+peak <- tryCatch(grep("^VmHWM:", readLines("/proc/self/status"), value = TRUE), error = function(e) character())
+if (length(peak)) cat("  Peak memory of this process:", trimws(sub("^VmHWM:", "", peak)), "\n")
 cat("\nDone!\n")
