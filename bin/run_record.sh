@@ -47,57 +47,65 @@ _RR_BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"     # this file's direct
 _RR_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Number-changing switches, with the defaults the scripts use. One line each:
-#   NAME|DEFAULT|what it changes
-# DEFAULT "@job" means the job chooses at run time (e.g. PHENO is the PC-AiR output if that exists
-# when the job starts), so nothing is exported and params.tsv records it only if you set it.
-# tests/test_chassis.sh checks that each default here equals the ${NAME:-default} in the scripts.
+#   NAME|DEFAULT|what it changes|DOMAIN
+# DEFAULT is the only copy of the default: the scripts read it with $(rr_default NAME) (B-05).
+# DEFAULT "@job" means it is chosen at run time (e.g. PHENO is the structure step's output if that
+# exists when the job starts) or derived by the launcher (STRATA_LIST, COVARIATES: set_by bundle).
+# DOMAIN is what the launcher accepts (rr_check_domains, before anything is queued):
+#   bool  true | false          int1  a whole number >= 1          num  a number > 0
+#   enum:a,b,...  one of these   names  comma-separated names (letters, digits, _ .; names0: may be empty)
+#   props  LABEL:number,...      any  not checked here (a path, or checked where it is used)
+# tests/test_chassis.sh checks that no script carries a default of its own.
 # Asked for in the plan but read by no script, so not listed: STRATUM_MIN_N (the scripts use
-# MIN_STRATUM_N), PC_SCALE, BUNDLE_RULES; rr_refuse_unknown_switches stops a launch
-# that sets one of them, rather than let it be silently ignored.
+# MIN_STRATUM_N), BUNDLE_RULES (the bundling-rule table of the strata comparator, CP-04, which this
+# repo does not have yet); rr_refuse_unknown_switches stops a launch that sets one of them,
+# rather than let it be silently ignored.
 RR_SWITCHES=(
-    "STRATA_LIST|@job|strata analysed; default: every stratum in HANDOFF_DIR/ancestry/strata.tsv (set_by bundle)"
-    "TRAITS_LIST|mrd,efs,os|traits analysed (phenotype columns, as docs/HANDOFF_CONTRACT.md names them)"
-    "SURVIVAL_TRAITS|efs,os|traits run as time-to-event, with columns <trait>_time and <trait>_event; the rest are binary"
-    "COVARIATES|@job|model covariates (GWAS, GxG), numeric phenotype columns; default: the bundle's phenotypes/covariates.txt then PC1..PC5 (set_by bundle)"
-    "MIN_STRATUM_N|50|smallest stratum analysed (--min_stratum_n); 50 decided by the user, 10 Nov 2026"
-    "MAC_MIN|10|minor allele count needed to test an ancestry's dose term (--mac_min); open: the contract says 20"
-    "RUN_PRS|false|step 3, PRS"
-    "RUN_COLOC|false|step 4, colocalization"
-    "RUN_VALIDATION|false|step 5, PRS validation"
-    "RUN_GXG|false|step 6, GxG"
-    "RUN_MRMEGA|false|step 2b, MR-MEGA across strata per trait (slurm/submit_mrmega.sh)"
-    "MRMEGA_PCS|3|most MR-MEGA axes of genetic variation; each trait uses min(K-2, MRMEGA_PCS) for its K strata with sumstats"
-    "STRUCTURE_SOURCE|bundle|step 0: ingest the bundle's PCs and GRM (bundle), or compute them (compute, the comparator)"
-    "SKIP_PCAIR|false|skip step 0 and reuse the structure already in results/pcair"
-    "QC_GATE_OVERRIDE||assertion ids a QC gate lets through although failed or missing (bin/qc_gate.sh); each use is recorded in qc/qc_assertions.tsv"
-    "N_PCS|10|PC-AiR PCs written and used as covariates"
-    "N_PCS_PCRELATE|5|PCs used inside PC-Relate"
-    "KIN_THRESH|0.0442|kinship threshold for the PC-AiR unrelated set"
-    "LD_R2|0.1|LD pruning r2 for PC-AiR / PC-Relate"
-    "PCAIR_ITER|2|PC-AiR / PC-Relate iterations"
-    "GXG_P_THRESHOLD|1e-5|GWAS P below which a hit enters GxG"
-    "GXG_MAX_HITS|200|cap on GxG hits"
-    "GXG_PRUNE_MODE|conditional|how LD-correlated GxG hits are selected"
-    "GXG_COND_P|1e-4|conditional P that keeps an LD-correlated GxG hit"
-    "GXG_USE_DEFAULT_LOCI|true|include the known-leukemia-loci table in GxG"
-    "GXG_CUSTOM_VARIANTS||extra GRCh38 variant list for GxG"
-    "ANCESTRY_COL|GRAF_ANC|phenotype column holding the ancestry label (GxG)"
-    "PHENO|@job|phenotype file (default: PC-AiR output if present, else data/phenotypes/phenotypes.tsv)"
-    "KINSHIP|@job|GRM (default: PC-Relate output if present, else data/kinship/kinship_matrix.rds)"
-    "HANDOFF_DIR|@job|the handoff bundle directory (default <repo>/data/handoff)"
-    "GENO|@job|PLINK prefix for STRUCTURE_SOURCE=compute (default HANDOFF_DIR/genotypes/cohort.hardcall.maf01)"
-    "PHENO_IN|@job|the phenotype file (default HANDOFF_DIR/phenotypes/phenotypes.tsv)"
-    "KNOWN_LOCI|@job|known-loci table for GxG (default assets/known_leukemia_risk_loci.tsv)"
-    "STRATA_FILE|@job|sample_id/stratum table the adapter checks --stratum against (default HANDOFF_DIR/ancestry/strata.tsv)"
-    "ANC_INDEX_MAP|@job|anc_index/label map for numbered Tractor files (default HANDOFF_DIR/local_ancestry/flare_index_map.tsv)"
-    "PRS_ANCESTRY_PROPS|EUR:0.35,AFR:0.15,AMR:0.50|global ancestry proportions weighting the combined PRS; labels must match data/tractor/ancestries.txt"
+    "STRATA_LIST|@job|strata analysed; default: every stratum in HANDOFF_DIR/ancestry/strata.tsv (set_by bundle), MIX left out with MIX_RETAIN=false|names"
+    "TRAITS_LIST|mrd,efs,os|traits analysed (phenotype columns, as docs/HANDOFF_CONTRACT.md names them)|names"
+    "SURVIVAL_TRAITS|efs,os|traits run as time-to-event, with columns <trait>_time and <trait>_event; the rest are binary|names0"
+    "COVARIATES|@job|model covariates (GWAS, GxG), numeric phenotype columns; default: the bundle's phenotypes/covariates.txt then PC1..PC5 (set_by bundle)|names"
+    "MIN_STRATUM_N|50|smallest stratum analysed (--min_stratum_n); 50 decided by the user, 10 Nov 2026|int1"
+    "MAC_MIN|10|minor allele count needed to test an ancestry's dose term (--mac_min); open: the contract says 20|int1"
+    "MIX_RETAIN|true|analyse the bundle's MIX stratum (false: left out of the default STRATA_LIST, and refused in it)|bool"
+    "PC_SCALE|stratum|PCs a stratum's GWAS adjusts for: its within-stratum PCs (stratum) or the cohort PCs (cohort); POOLED always uses the cohort PCs|enum:stratum,cohort"
+    "RUN_PRS|false|step 3, PRS|bool"
+    "RUN_COLOC|false|step 4, colocalization|bool"
+    "RUN_VALIDATION|false|step 5, PRS validation|bool"
+    "RUN_GXG|false|step 6, GxG|bool"
+    "RUN_MRMEGA|false|step 2b, MR-MEGA across strata per trait (slurm/submit_mrmega.sh)|bool"
+    "MRMEGA_PCS|3|most MR-MEGA axes of genetic variation; each trait uses min(K-2, MRMEGA_PCS) for its K strata with sumstats|int1"
+    "STRUCTURE_SOURCE|bundle|step 0: ingest the bundle's PCs and GRM (bundle), or compute them (compute, the comparator)|enum:bundle,compute"
+    "SKIP_PCAIR|false|skip step 0 and reuse the structure already in results/pcair|bool"
+    "QC_GATE_OVERRIDE||assertion ids a QC gate lets through although failed or missing (bin/qc_gate.sh); each use is recorded in qc/qc_assertions.tsv|names0"
+    "N_PCS|10|PC-AiR PCs written by the comparator (STRUCTURE_SOURCE=compute)|int1"
+    "N_PCS_PCRELATE|5|PCs used inside PC-Relate|int1"
+    "KIN_THRESH|0.0442|kinship threshold for the PC-AiR unrelated set|num"
+    "LD_R2|0.1|LD pruning r2 for PC-AiR / PC-Relate|num"
+    "PCAIR_ITER|2|PC-AiR / PC-Relate iterations|int1"
+    "GXG_P_THRESHOLD|1e-5|GWAS P below which a hit enters GxG|num"
+    "GXG_MAX_HITS|200|cap on GxG hits|int1"
+    "GXG_PRUNE_MODE|conditional|how LD-correlated GxG hits are selected|enum:conditional,variant,pair"
+    "GXG_COND_P|1e-4|conditional P that keeps an LD-correlated GxG hit|num"
+    "GXG_USE_DEFAULT_LOCI|true|include the known-leukemia-loci table in GxG|bool"
+    "GXG_CUSTOM_VARIANTS||extra GRCh38 variant list for GxG|any"
+    "ANCESTRY_COL|GRAF_ANC|phenotype column holding the ancestry label (GxG)|names"
+    "PHENO|@job|phenotype file (default: the structure step's <stratum>.phenotypes.with_pcs.tsv)|any"
+    "KINSHIP|@job|GRM (default: the structure step's cohort.pcrelate.grm.rds)|any"
+    "HANDOFF_DIR|@job|the handoff bundle directory (default <repo>/data/handoff)|any"
+    "GENO|@job|PLINK prefix for STRUCTURE_SOURCE=compute (default HANDOFF_DIR/genotypes/cohort.hardcall.maf01)|any"
+    "PHENO_IN|@job|the phenotype file (default HANDOFF_DIR/phenotypes/phenotypes.tsv)|any"
+    "KNOWN_LOCI|@job|known-loci table for GxG (default assets/known_leukemia_risk_loci.tsv)|any"
+    "STRATA_FILE|@job|sample_id/stratum table the adapter checks --stratum against (default HANDOFF_DIR/ancestry/strata.tsv)|any"
+    "ANC_INDEX_MAP|@job|anc_index/label map for numbered Tractor files (default HANDOFF_DIR/local_ancestry/flare_index_map.tsv)|any"
+    "PRS_ANCESTRY_PROPS|EUR:0.35,AFR:0.15,AMR:0.50|global ancestry proportions weighting the combined PRS; labels must match data/tractor/ancestries.txt|props"
 )
 declare -A RR_SET_BY=()
 
 # Refuse a launch that sets a switch name no script reads.
 rr_refuse_unknown_switches() {
     local name
-    for name in STRATUM_MIN_N PC_SCALE BUNDLE_RULES TIME_COL EVENT_COL; do
+    for name in STRATUM_MIN_N BUNDLE_RULES TIME_COL EVENT_COL; do
         if [[ -n "${!name+x}" ]]; then
             if [[ "$name" == STRATUM_MIN_N ]]; then
                 echo "REFUSED: STRATUM_MIN_N is set, but the scripts read MIN_STRATUM_N; set that instead" >&2
@@ -109,6 +117,60 @@ rr_refuse_unknown_switches() {
             return 1
         fi
     done
+}
+
+# rr_default NAME: the switch's default from RR_SWITCHES (the only copy of it). Scripts use
+# ${NAME:-$(rr_default NAME)} so a job submitted by hand gets the same default as a launch.
+rr_default() {
+    local entry name default
+    for entry in "${RR_SWITCHES[@]}"; do
+        IFS='|' read -r name default _ <<< "$entry"
+        if [[ "$name" == "$1" ]]; then printf '%s' "$default"; return 0; fi
+    done
+    echo "rr_default: $1 is not in RR_SWITCHES (bin/run_record.sh)" >&2
+    return 1
+}
+
+# rr_domain_problem NAME VALUE: prints why VALUE is outside NAME's domain, nothing if it is fine
+rr_domain_problem() {
+    local name="$1" value="$2" entry n domain="" x
+    for entry in "${RR_SWITCHES[@]}"; do
+        n="${entry%%|*}"; [[ "$n" == "$name" ]] && { domain="${entry##*|}"; break; }
+    done
+    local re_name='^[A-Za-z_][A-Za-z0-9_.]*$' re_num='^([0-9]+[.]?[0-9]*|[.][0-9]+)([eE][-+]?[0-9]+)?$'
+    case "$domain" in
+        bool) [[ "$value" == true || "$value" == false ]] || echo "use true or false" ;;
+        int1) [[ "$value" =~ ^[1-9][0-9]*$ ]] || echo "use a whole number >= 1" ;;
+        num)  { [[ "$value" =~ $re_num ]] && awk -v v="$value" 'BEGIN {exit !(v + 0 > 0)}'; } || echo "use a number > 0" ;;
+        enum:*)
+            x="${domain#enum:}"
+            [[ ",${x}," == *",${value},"* ]] || { x="${x//,/, }"; echo "use ${x%, *} or ${x##*, }"; } ;;
+        names|names0)
+            if [[ -z "$value" ]]; then [[ "$domain" == names0 ]] || echo "use one or more comma-separated names"
+            else
+                local IFS=,; for x in $value; do
+                    [[ "$x" =~ $re_name ]] || { echo "use comma-separated names (letters, digits, _ and .; '${x}' is not one)"; break; }
+                done
+            fi ;;
+        props)
+            local IFS=,; for x in $value; do
+                [[ "$x" =~ ^[A-Za-z][A-Za-z0-9_]*:([0-9]+[.]?[0-9]*|[.][0-9]+)$ ]] || { echo "use LABEL:number,... ('${x}' is not one)"; break; }
+            done ;;
+        *) ;;
+    esac
+}
+
+# rr_check_domains [NAME...]: refuse (return 1, one REFUSED line per problem) when a switch that
+# is set lies outside its domain. Without names: every switch that has a value.
+rr_check_domains() {
+    local entry name problem bad=0 names=("$@")
+    if [[ ${#names[@]} -eq 0 ]]; then for entry in "${RR_SWITCHES[@]}"; do names+=("${entry%%|*}"); done; fi
+    for name in "${names[@]}"; do
+        [[ -n "${!name+x}" ]] || continue
+        problem="$(rr_domain_problem "$name" "${!name}")"
+        [[ -z "$problem" ]] || { echo "REFUSED: ${name}=${!name}; ${problem}" >&2; bad=1; }
+    done
+    return "$bad"
 }
 
 # Fill in every unset switch with its default and export it, so every job of the launch sees the
@@ -192,6 +254,8 @@ rr_write_launch_record() {
         printf 'account\t%s\n' "${SLURM_ACCOUNT:-}"
         printf 'log_dir\t%s\n' "${LOG_DIR:-}"
         printf 'deferred\t%s\n' "${RR_DEFERRED:-}"
+        printf 'run_label\t%s\n' "${RUN_LABEL:-}"
+        printf 'results_dir\t%s\n' "${GWAS_RESULTS:-}"
     } > "${dir}/run_info.tsv"
     printf 'label\tjob_id\n' > "${dir}/jobs.tsv"
 }
@@ -266,7 +330,7 @@ rr_begin() {
     else
         # Submitted by hand, not by the launcher: one directory per Slurm job (all tasks of an array share it)
         GWAS_RUN_ID="direct_${SLURM_ARRAY_JOB_ID:-${SLURM_JOB_ID:-local$$}}"
-        dir="${_RR_REPO}/results/run_record/${GWAS_RUN_ID}"
+        dir="${GWAS_RESULTS:-${_RR_REPO}/results}/run_record/${GWAS_RUN_ID}"
         export GWAS_RUN_ID GWAS_RUN_DIR="$dir"
     fi
     mkdir -p "${dir}/trace.d"

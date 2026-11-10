@@ -49,8 +49,8 @@ echo "Trait: ${TRAIT}   Model: ${MODEL}   Stratum: ${STRATUM}"
 echo "=============================================="
 
 DATA_DIR="${SCRIPT_DIR}/data"
-GWAS_DIR="${SCRIPT_DIR}/results/gwas/${TRAIT}"     # Tractor-GENESIS output for this trait (all strata + POOLED)
-RESULTS_DIR="${SCRIPT_DIR}/results/gxg/${TRAIT}"
+GWAS_DIR="${GWAS_RESULTS}/gwas/${TRAIT}"     # Tractor-GENESIS output for this trait (all strata + POOLED)
+RESULTS_DIR="${GWAS_RESULTS}/gxg/${TRAIT}"
 # Phenotype with PC-AiR PCs (step 0) if present, else the raw phenotype file
 PCAIR_PHENO="${SCRIPT_DIR}/results/pcair/cohort.phenotypes.with_pcs.tsv"
 PHENO="${PHENO:-$([[ -f "${PCAIR_PHENO}" ]] && echo "${PCAIR_PHENO}" || echo "${PHENO_IN:-${HANDOFF_DIR:-${SCRIPT_DIR}/data/handoff}/phenotypes/phenotypes.tsv}")}"
@@ -90,20 +90,20 @@ fi
 # ---- customisable (env vars) ----------------------------------------------
 # numeric phenotype columns; default the study's list (HANDOFF_DIR/phenotypes/covariates.txt) + PC1..PC5
 COVARIATES="${COVARIATES:-$(default_covariates)}" || exit 1
-ANCESTRY_COL="${ANCESTRY_COL:-GRAF_ANC}"
+ANCESTRY_COL="${ANCESTRY_COL:-$(rr_default ANCESTRY_COL)}"
 KNOWN_LOCI="${KNOWN_LOCI:-${SCRIPT_DIR}/assets/known_leukemia_risk_loci.tsv}"
 LOCI_ARGS="--known_loci ${KNOWN_LOCI}"
-[[ "${GXG_USE_DEFAULT_LOCI:-true}" == "false" ]] && LOCI_ARGS="${LOCI_ARGS} --no_default_loci"
+[[ "${GXG_USE_DEFAULT_LOCI:-$(rr_default GXG_USE_DEFAULT_LOCI)}" == "false" ]] && LOCI_ARGS="${LOCI_ARGS} --no_default_loci"
 [[ -n "${GXG_CUSTOM_VARIANTS:-}" ]] && LOCI_ARGS="${LOCI_ARGS} --custom_variants ${GXG_CUSTOM_VARIANTS}"   # GRCh38 list
-PRUNE_MODE="${GXG_PRUNE_MODE:-conditional}" # conditional = test LD-correlated hits conditional on kept hits; variant = strongest only; pair = keep all
-COND_P="${GXG_COND_P:-1e-4}"                # conditional P below which an LD-correlated hit is an independent signal
+PRUNE_MODE="${GXG_PRUNE_MODE:-$(rr_default GXG_PRUNE_MODE)}" # conditional = test LD-correlated hits conditional on kept hits; variant = strongest only; pair = keep all
+COND_P="${GXG_COND_P:-$(rr_default GXG_COND_P)}"                # conditional P below which an LD-correlated hit is an independent signal
 # ---------------------------------------------------------------------------
 
 rr_args "${TRAIT} ${MODEL} ${STRATUM}" "${PHENO}" "${SUMSTATS_FILES[@]}"
 Rscript "${SCRIPT_DIR}/bin/run_gxg_interaction.R" \
     --sumstats "${SUMSTATS}" \
-    --p_threshold "${GXG_P_THRESHOLD:-1e-5}" \
-    --max_hits "${GXG_MAX_HITS:-200}" \
+    --p_threshold "${GXG_P_THRESHOLD:-$(rr_default GXG_P_THRESHOLD)}" \
+    --max_hits "${GXG_MAX_HITS:-$(rr_default GXG_MAX_HITS)}" \
     ${LOCI_ARGS} \
     --prune_mode "${PRUNE_MODE}" \
     --cond_p_threshold "${COND_P}" \
@@ -116,7 +116,7 @@ Rscript "${SCRIPT_DIR}/bin/run_gxg_interaction.R" \
     --ancestry_col "${ANCESTRY_COL}" \
     --ancestry_config "${SCRIPT_DIR}/bin/ancestry_config.R" \
     --stratum "${STRATUM}" \
-    --min_stratum_n "${MIN_STRATUM_N:-50}" \
+    --min_stratum_n "${MIN_STRATUM_N:-$(rr_default MIN_STRATUM_N)}" \
     ${TRACTOR_ARGS} \
     --output_prefix "${RESULTS_DIR}/${TRAIT}" \
     --threads "${SLURM_CPUS_PER_TASK}" \
@@ -144,13 +144,13 @@ rr_begin gxg_het "${TRAIT} ${MODEL}" "${PHENO}"
 source "${SCRIPT_DIR}/bin/activate_env.sh" gwas-r
 set_thread_env
 Rscript "${SCRIPT_DIR}/bin/run_gxg_interaction.R" \\
-    --sumstats '${SUMSTATS}' --p_threshold ${GXG_P_THRESHOLD:-1e-5} --max_hits ${GXG_MAX_HITS:-200} \\
+    --sumstats '${SUMSTATS}' --p_threshold ${GXG_P_THRESHOLD:-$(rr_default GXG_P_THRESHOLD)} --max_hits ${GXG_MAX_HITS:-$(rr_default GXG_MAX_HITS)} \\
     ${LOCI_ARGS} --prune_mode ${PRUNE_MODE} --cond_p_threshold ${COND_P} \\
     --geno "${DATA_DIR}/genotypes/cohort" \\
     --phenotype "${PHENO}" \\
     --trait ${TRAIT} --model ${MODEL} ${SURV_ARGS} \\
     --covariates ${COVARIATES} --ancestry_col ${ANCESTRY_COL} \\
-    --ancestry_config "${SCRIPT_DIR}/bin/ancestry_config.R" --min_stratum_n ${MIN_STRATUM_N:-50} \\
+    --ancestry_config "${SCRIPT_DIR}/bin/ancestry_config.R" --min_stratum_n ${MIN_STRATUM_N:-$(rr_default MIN_STRATUM_N)} \\
     --output_prefix "${RESULTS_DIR}/${TRAIT}.het" --threads 16
 EOF
 fi

@@ -189,6 +189,9 @@ Each pair reports Wald and LRT p-values with Bonferroni over pairs and BH FDR.
 | Traits | `phenotype_cols` | `TRAITS_LIST` (default `mrd,efs,os`) | phenotype columns; the launcher refuses a trait whose column(s) the phenotype file lacks |
 | Binary traits | `binary_traits` | everything not in `SURVIVAL_TRAITS` | 0/1 |
 | Time-to-event traits | `survival_traits` (+ `survival_time_cols`, `survival_event_cols`) | `SURVIVAL_TRAITS` (default `efs,os`); `TIME_COL_<trait>`, `EVENT_COL_<trait>` override one trait | columns `<trait>_time`, `<trait>_event`, as the handoff contract names them; each trait has its own |
+| PC scale | (none) | `PC_SCALE` (`stratum` default, or `cohort`) | which PCs a stratum's GWAS adjusts for; POOLED always uses the cohort PCs |
+| MIX stratum | (none) | `MIX_RETAIN` (`true` default, or `false`) | `false` leaves the bundle's MIX stratum out of the default strata |
+| Run label | (none) | `RUN_LABEL` (empty default) | a sensitivity arm's results go under `results/<RUN_LABEL>/` |
 | Covariates | `covariate_cols`, `gxg_covariates` | `COVARIATES` (default: the bundle's `phenotypes/covariates.txt`, then `PC1..PC5`) | numeric phenotype columns: the launcher refuses a name that is not a column, the adapter one that is not numeric; the list used is written as `## covariates=` above every results table |
 | Ancestry column | `gxg_ancestry_col` | `ANCESTRY_COL` | GRAF-ANC codes or labels |
 | Strata rules | `min_stratum_n`, `bin/ancestry_config.R` | `STRATA_LIST` (default: every stratum of the bundle's `ancestry/strata.tsv`; a name it lacks is refused), `MIN_STRATUM_N`, `bin/ancestry_config.R` | `MIN_STRATUM_N` default 50 (decided 10 Nov 2026); a smaller stratum is skipped, and STEP 2 names it in the pooled file's `## strata_skipped=` |
@@ -319,8 +322,22 @@ them. A script submitted by hand, without the launcher, writes to
 
 In R: `trace <- read.delim("results/run_record/<run_id>/trace.tsv", na.strings = "NA")`.
 
-The switch names are the ones the scripts read; their defaults are in `RR_SWITCHES` in
-`bin/run_record.sh`. `STRATUM_MIN_N` (the scripts read `MIN_STRATUM_N`), `PC_SCALE` and
+The switch names are the ones the scripts read. Each has one default and one domain, in
+`RR_SWITCHES` in `bin/run_record.sh` (`NAME|DEFAULT|what it changes|DOMAIN`); the scripts read the
+default with `$(rr_default NAME)`, so a job submitted by hand gets the launcher's default, and a test
+fails if a script carries a default of its own (B-05). The launcher refuses, before anything is
+queued, any switch outside its domain (`bool` true / false, `int1` a whole number >= 1, `num` a
+number > 0, `enum:...`, `names`, `props`), naming each one: e.g. `REFUSED: MAC_MIN=abc; use a whole
+number >= 1`. `params.tsv` says where each value came from: `environment`, `default`, `job`, or
+`bundle` (STRATA_LIST and COVARIATES derived from the handoff bundle).
+
+Sensitivity arms (B-05): `RUN_LABEL=<name>` puts a launch's results under `results/<name>/`
+(`gwas/`, `prs/`, `coloc/`, `gxg/`, `run_record/`, the run's `qc/`); the structure step's
+`results/pcair/` and `results/strata/` stay shared, so step 0 runs once (`SKIP_PCAIR=true` for the
+later arms). `RUN_LABEL` is recorded in `run_info.tsv`, not in `params.tsv`, so two arms' `params.tsv`
+differ exactly in the switches that differ. A dry run prints the `params.tsv` it would write.
+`PC_SCALE` (`stratum`, default: each stratum's within-stratum PCs; `cohort`: the cohort PCs) and
+`MIX_RETAIN` (`true`, default; `false` leaves the bundle's MIX stratum out) are the other arm switches. `STRATUM_MIN_N` (the scripts read `MIN_STRATUM_N`), `PC_SCALE` and
 `BUNDLE_RULES` are read by no script; the launcher refuses to start if any of them is set,
 rather than ignore it.
 

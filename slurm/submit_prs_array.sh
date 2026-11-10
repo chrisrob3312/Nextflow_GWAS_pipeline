@@ -65,11 +65,11 @@ echo "=============================================="
 
 # Configuration
 DATA_DIR="${SCRIPT_DIR}/data"
-RESULTS_DIR="${SCRIPT_DIR}/results/prs/${TRAIT}"
+RESULTS_DIR="${GWAS_RESULTS}/prs/${TRAIT}"
 mkdir -p "${RESULTS_DIR}"
 
 # GWAS summary statistics directory (ancestry-specific for PRS-CSx)
-SUMSTATS_DIR="${SCRIPT_DIR}/results/gwas/sumstats_for_prs"
+SUMSTATS_DIR="${GWAS_RESULTS}/gwas/sumstats_for_prs"
 
 # LD reference (ancestry-matched)
 LD_REF="${DATA_DIR}/ld_reference"
@@ -88,7 +88,7 @@ PHENO="${PHENO_IN:-${HANDOFF_DIR:-${SCRIPT_DIR}/data/handoff}/phenotypes/phenoty
 # the same ancestries; a mismatch stops here instead of weighting the wrong backgrounds.
 ANC_FILE="${DATA_DIR}/tractor/ancestries.txt"
 PRS_ANCESTRIES="$(read_stratum_ancestries "${ANC_FILE}")" || exit 1
-PRS_ANCESTRY_PROPS="${PRS_ANCESTRY_PROPS:-EUR:0.35,AFR:0.15,AMR:0.50}"
+PRS_ANCESTRY_PROPS="${PRS_ANCESTRY_PROPS:-$(rr_default PRS_ANCESTRY_PROPS)}"
 props_labels="$(tr ',' '\n' <<< "${PRS_ANCESTRY_PROPS}" | cut -d: -f1 | sort | paste -sd, -)"
 if [[ "${props_labels}" != "$(tr ',' '\n' <<< "${PRS_ANCESTRIES}" | sort | paste -sd, -)" ]]; then
     echo "ERROR: PRS_ANCESTRY_PROPS (${PRS_ANCESTRY_PROPS}) names ${props_labels}, but ${ANC_FILE} lists ${PRS_ANCESTRIES}; set PRS_ANCESTRY_PROPS to match" >&2
@@ -126,7 +126,7 @@ if [[ "${METHOD}" == "prs_csx" && -d "${DATA_DIR}/tractor" ]]; then
         LA_WEIGHTS="${RESULTS_DIR}"                  # directory of <..>.<anc>.weights.tsv.gz
         echo "LA partial scores: using PRS-CSx per-ancestry weights"
     else
-        LA_WEIGHTS="${SCRIPT_DIR}/results/gwas/${TRAIT}/POOLED.ivw_descriptive.sumstats.gz"
+        LA_WEIGHTS="${GWAS_RESULTS}/gwas/${TRAIT}/POOLED.ivw_descriptive.sumstats.gz"
         echo "LA partial scores: PRS-CSx weights not found, falling back to Tractor-GENESIS betas (no shrinkage)"
     fi
     INDEX_MAP_ARGS=()

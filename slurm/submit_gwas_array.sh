@@ -77,7 +77,7 @@ echo "Stratum: ${STRATUM}   Trait: ${TRAIT}   Model: ${MODEL}   Chr: ${CHR}"
 echo "=============================================="
 
 DATA_DIR="${SCRIPT_DIR}/data"
-RESULTS_DIR="${SCRIPT_DIR}/results/gwas/${TRAIT}/${STRATUM}"
+RESULTS_DIR="${GWAS_RESULTS}/gwas/${TRAIT}/${STRATUM}"
 [[ "${DRY_RUN}" == 1 ]] || mkdir -p "${RESULTS_DIR}"
 
 # Phenotype with PCs and the GRM come from step 0 (slurm/submit_pcair.sh): this stratum's
@@ -87,14 +87,21 @@ RESULTS_DIR="${SCRIPT_DIR}/results/gwas/${TRAIT}/${STRATUM}"
 # stratum uses them (logged).
 PCAIR_DIR="${SCRIPT_DIR}/results/pcair"
 HANDOFF_DIR="${HANDOFF_DIR:-${SCRIPT_DIR}/data/handoff}"
+# PC_SCALE (B-05): stratum (default) = the stratum's within-stratum PCs; cohort = the cohort PCs
+PC_SCALE="${PC_SCALE:-$(rr_default PC_SCALE)}"
+USE_COHORT_PCS=0
+[[ "${STRATUM}" == POOLED || "${PC_SCALE}" == cohort ]] && USE_COHORT_PCS=1
 if [[ -z "${PHENO:-}" ]]; then
-    if [[ "${STRATUM}" != POOLED && -f "${PCAIR_DIR}/${STRATUM}.phenotypes.with_pcs.tsv" ]]; then
+    if [[ ${USE_COHORT_PCS} == 0 && -f "${PCAIR_DIR}/${STRATUM}.phenotypes.with_pcs.tsv" ]]; then
         PHENO="${PCAIR_DIR}/${STRATUM}.phenotypes.with_pcs.tsv"
-    elif [[ ( "${STRATUM}" == POOLED || "${STRUCTURE_SOURCE:-bundle}" == compute ) && -f "${PCAIR_DIR}/cohort.phenotypes.with_pcs.tsv" ]]; then
+    elif [[ ( ${USE_COHORT_PCS} == 1 || "${STRUCTURE_SOURCE:-$(rr_default STRUCTURE_SOURCE)}" == compute ) && -f "${PCAIR_DIR}/cohort.phenotypes.with_pcs.tsv" ]]; then
         PHENO="${PCAIR_DIR}/cohort.phenotypes.with_pcs.tsv"
-        [[ "${STRATUM}" == POOLED ]] || echo "Note: STRUCTURE_SOURCE=compute, so ${STRATUM} uses cohort-scale PCs"
+        if [[ "${STRATUM}" != POOLED ]]; then
+            if [[ "${PC_SCALE}" == cohort ]]; then echo "Note: PC_SCALE=cohort, so ${STRATUM} uses cohort-scale PCs"
+            else echo "Note: STRUCTURE_SOURCE=compute, so ${STRATUM} uses cohort-scale PCs"; fi
+        fi
     elif [[ "${DRY_RUN}" == 1 ]]; then
-        PHENO="${PCAIR_DIR}/$([[ "${STRATUM}" == POOLED ]] && echo cohort || echo "${STRATUM}").phenotypes.with_pcs.tsv"
+        PHENO="${PCAIR_DIR}/$([[ ${USE_COHORT_PCS} == 1 ]] && echo cohort || echo "${STRATUM}").phenotypes.with_pcs.tsv"
         echo "(dry run: ${PHENO} is written by step 0, which has not run)"
     else
         echo "ERROR: no phenotype with PCs for ${STRATUM} in ${PCAIR_DIR} (run step 0, slurm/submit_pcair.sh, first)" >&2
@@ -147,9 +154,9 @@ CMD+=(--ancestries "${STRATUM_ANCESTRIES}"
     --kinship "${KINSHIP}"
     --covariates "${COVARIATES}"
     --stratum "${STRATUM}"
-    --min_stratum_n "${MIN_STRATUM_N:-50}"
+    --min_stratum_n "${MIN_STRATUM_N:-$(rr_default MIN_STRATUM_N)}"
     --ancestry_config "${SCRIPT_DIR}/bin/ancestry_config.R"
-    --mac_min "${MAC_MIN:-10}"
+    --mac_min "${MAC_MIN:-$(rr_default MAC_MIN)}"
     --chromosome "${CHR}"
     --output_prefix "${RESULTS_DIR}/chr${CHR}"
     --threads "${SLURM_CPUS_PER_TASK:-1}"

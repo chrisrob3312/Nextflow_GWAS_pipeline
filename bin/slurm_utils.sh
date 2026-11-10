@@ -9,6 +9,11 @@
 # The run record (rr_begin, ...; bin/run_record.sh), so every job that sources this file has it
 source "$(dirname "${BASH_SOURCE[0]}")/run_record.sh"
 
+# Where a run's analysis results go (B-05): results/, or results/<RUN_LABEL>/ for a labelled run
+# (a sensitivity arm). The structure step's results/pcair and results/strata are shared by every
+# label (step 0 runs once). The launcher checks RUN_LABEL and exports GWAS_RESULTS.
+export GWAS_RESULTS="${GWAS_RESULTS:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/results${RUN_LABEL:+/${RUN_LABEL}}}"
+
 # ---------------------------------------------------------------------------
 # QC verdicts and gates (CP-11; bin/qc_assert.R, bin/qc_gate.sh)
 # ---------------------------------------------------------------------------
@@ -162,7 +167,7 @@ bundle_strata() {
     awk -F'\t' 'NR > 1 && $2 != "" {print $2}' "$f" | sort -u | paste -sd, -
 }
 
-trait_is_survival() { [[ ",${SURVIVAL_TRAITS:-efs,os}," == *",$1,"* ]]; }
+trait_is_survival() { [[ ",${SURVIVAL_TRAITS-$(rr_default SURVIVAL_TRAITS)}," == *",$1,"* ]]; }
 
 # Print a command so it can be read, and pasted back into a shell: plain words as they are,
 # anything with spaces or special characters quoted. Used by the DRY_RUN modes.

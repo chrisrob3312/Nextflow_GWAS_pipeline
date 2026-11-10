@@ -45,7 +45,7 @@ OUT_DIR="${SCRIPT_DIR}/results/pcair"
 mkdir -p "${OUT_DIR}"
 PHENO_FILE="${PHENO_IN:-${HANDOFF_DIR}/phenotypes/phenotypes.tsv}"
 
-case "${STRUCTURE_SOURCE:-bundle}" in
+case "${STRUCTURE_SOURCE:-$(rr_default STRUCTURE_SOURCE)}" in
     bundle)
         CMD=(Rscript "${SCRIPT_DIR}/bin/ingest_structure.R"
             --handoff_dir "${HANDOFF_DIR}"
@@ -61,11 +61,11 @@ case "${STRUCTURE_SOURCE:-bundle}" in
         CMD=(Rscript "${SCRIPT_DIR}/bin/genesis_pcair_pcrelate.R"
             --geno "${GENO_PREFIX}"
             --phenotype "${PHENO_FILE}"
-            --n_pcs "${N_PCS:-10}"
-            --n_pcs_pcrelate "${N_PCS_PCRELATE:-5}"
-            --kin_thresh "${KIN_THRESH:-0.0442}"
-            --ld_r2 "${LD_R2:-0.1}"
-            --iterations "${PCAIR_ITER:-2}"
+            --n_pcs "${N_PCS:-$(rr_default N_PCS)}"
+            --n_pcs_pcrelate "${N_PCS_PCRELATE:-$(rr_default N_PCS_PCRELATE)}"
+            --kin_thresh "${KIN_THRESH:-$(rr_default KIN_THRESH)}"
+            --ld_r2 "${LD_R2:-$(rr_default LD_R2)}"
+            --iterations "${PCAIR_ITER:-$(rr_default PCAIR_ITER)}"
             --output_prefix "${OUT_DIR}/cohort"
             --threads "${SLURM_CPUS_PER_TASK:-1}")
         INPUTS=("${GENO_PREFIX}.bed" "${GENO_PREFIX}.bim" "${GENO_PREFIX}.fam" "${PHENO_FILE}")
@@ -80,10 +80,10 @@ rr_args "$(print_cmd "${CMD[@]}")" "${INPUTS[@]}"
 
 # The comparator knows no strata: write each stratum's members from the bundle's strata.tsv, as the
 # ingest does, so the combine step can check them for overlap (CP-22)
-if [[ "${STRUCTURE_SOURCE:-bundle}" == compute ]]; then
+if [[ "${STRUCTURE_SOURCE:-$(rr_default STRUCTURE_SOURCE)}" == compute ]]; then
     mkdir -p "${SCRIPT_DIR}/results/strata"
     awk -F'\t' -v d="${SCRIPT_DIR}/results/strata" 'NR > 1 && $2 != "" {print $1 > (d "/" $2 ".samples.txt")}' \
         "${HANDOFF_DIR}/ancestry/strata.tsv"
 fi
 
-echo "Structure (${STRUCTURE_SOURCE:-bundle}) ready in ${OUT_DIR}"
+echo "Structure (${STRUCTURE_SOURCE:-$(rr_default STRUCTURE_SOURCE)}) ready in ${OUT_DIR}"

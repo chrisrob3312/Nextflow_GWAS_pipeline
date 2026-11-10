@@ -36,9 +36,9 @@ DRY_RUN="${DRY_RUN:-0}"
 [[ "${DRY_RUN}" == 1 ]] || rr_begin mrmega
 
 TRAIT="${1:?trait required (mrd, efs, os)}"
-MRMEGA_PCS="${MRMEGA_PCS:-3}"
+MRMEGA_PCS="${MRMEGA_PCS:-$(rr_default MRMEGA_PCS)}"
 [[ "${MRMEGA_PCS}" =~ ^[1-9][0-9]*$ ]] || { echo "ERROR: MRMEGA_PCS=${MRMEGA_PCS}; use a whole number >= 1" >&2; exit 2; }
-GWAS_DIR="${SCRIPT_DIR}/results/gwas/${TRAIT}"
+GWAS_DIR="${GWAS_RESULTS}/gwas/${TRAIT}"
 STRATA_RUN="${STRATA_LIST:-$(bundle_strata)}" || exit 1
 
 PRESENT=(); ABSENT=()

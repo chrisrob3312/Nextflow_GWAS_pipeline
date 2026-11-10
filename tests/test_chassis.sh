@@ -304,15 +304,17 @@ check "shell/README.md says 'debug-only, not the execution path'" grep -q "debug
 for f in "$REPO"/shell/*.sh; do check "$(basename "$f"): one-line DEBUG-ONLY header" bash -c "sed -n 2p '$f' | grep -q '^# DEBUG-ONLY, not the execution path'"; done
 
 # ============================================================================
-section "B-03: the switch table matches the scripts' own defaults"
+section "B-03 / B-05: one default per switch, in RR_SWITCHES; scripts read it with rr_default"
 out="$(bash -c 'source "$1/bin/run_record.sh"; printf "%s\n" "${RR_SWITCHES[@]}"' _ "$C" | while IFS='|' read -r name def _; do
     [[ "$def" == "@job" ]] && continue
-    grep -rhoE "\\\$\{${name}:-[^}]*\}" "$C/slurm/" | sort -u | while read -r m; do
-        got="${m#*:-}"; got="${got%\}}"
-        [[ "$got" == "$def" ]] || echo "${name}: table '${def}', script '${got}'"
+    grep -rhoE "\\\$\{${name}:?-[^}]*\}" "$C/slurm/" "$C/bin/slurm_utils.sh" | sort -u | while read -r m; do
+        got="${m#*-}"; got="${got%\}}"
+        [[ "$got" == "\$(rr_default ${name})" || ( -z "$got" && -z "$def" ) ]] || echo "${name}: script default '${got}' instead of \$(rr_default ${name})"
     done
 done)"
-[[ -z "$out" ]] && ok "every \${NAME:-default} in slurm/ equals RR_SWITCHES" || bad "defaults differ: $out"
+[[ -z "$out" ]] && ok "no script carries its own default for a switch: every \${NAME:-...} is \$(rr_default NAME)" || bad "literal defaults: $out"
+out="$(bash -c 'source "$1/bin/run_record.sh"; printf "%s\n" "${RR_SWITCHES[@]}"' _ "$C" | awk -F'|' 'NF != 4 || $4 == "" {print $1}')"
+[[ -z "$out" ]] && ok "every RR_SWITCHES entry has a domain (NAME|DEFAULT|what|DOMAIN)" || bad "no domain: $out"
 
 section "MIN_STRATUM_N = 50 (decided 10 Nov 2026); MAC_MIN stays 10, marked open"
 check "RR_SWITCHES: MIN_STRATUM_N default 50" grep -q '"MIN_STRATUM_N|50|' "$REPO/bin/run_record.sh"
@@ -878,6 +880,41 @@ mm="$(grep '\[DRY-RUN\] MR-MEGA' <<< "$out")"
     && ok "RUN_MRMEGA=true: one MR-MEGA job per trait, each after its own combine job" || bad "mrmega dry: $mm"
 out="$(cd /tmp && env "${SITE[@]}" MRMEGA_PCS=0 "$L" --dry-run 2>&1)"; rc=$?
 [[ $rc -eq 2 ]] && has "$out" "REFUSED: MRMEGA_PCS=0; use a whole number >= 1" && ok "MRMEGA_PCS outside 1, 2, ...: refused" || bad "MRMEGA_PCS=0: rc=$rc"
+
+section "B-05: switches checked against their domains at launch; RUN_LABEL; PC_SCALE; MIX_RETAIN"
+out="$(cd /tmp && env "${SITE[@]}" MAC_MIN=abc "$L" --dry-run 2>&1)"; rc=$?
+[[ $rc -eq 2 ]] && has "$out" "REFUSED: MAC_MIN=abc; use a whole number >= 1" && ! grep -q '\[DRY-RUN\]' <<< "$out" \
+    && ok "MAC_MIN=abc --dry-run: refused before any sbatch" || bad "MAC_MIN=abc: rc=$rc $(tail -2 <<< "$out")"
+out="$(cd /tmp && env "${SITE[@]}" PC_SCALE=global MIX_RETAIN=no KIN_THRESH=0 GXG_PRUNE_MODE=all "$L" --dry-run 2>&1)"; rc=$?
+[[ $rc -eq 2 ]] && has "$out" "REFUSED: PC_SCALE=global; use stratum or cohort" && has "$out" "REFUSED: MIX_RETAIN=no; use true or false" \
+    && has "$out" "REFUSED: KIN_THRESH=0; use a number > 0" && has "$out" "REFUSED: GXG_PRUNE_MODE=all; use conditional, variant or pair" \
+    && ok "every switch outside its domain is named, all at once" || bad "domains: rc=$rc $out"
+pa="$(cd /tmp && env "${SITE[@]}" MAC_MIN=20 RUN_LABEL=a "$L" --dry-run 2>&1)"; pb="$(cd /tmp && env "${SITE[@]}" MAC_MIN=30 RUN_LABEL=b "$L" --dry-run 2>&1)"
+ta="$(sed -n '/^params.tsv (dry run: not written):$/,/^end of params.tsv$/p' <<< "$pa")"; tb="$(sed -n '/^params.tsv (dry run: not written):$/,/^end of params.tsv$/p' <<< "$pb")"
+d="$(diff <(echo "$ta") <(echo "$tb") | grep '^[<>]')"
+has "$pa" "Results:   ${C}/results/a (RUN_LABEL=a)" && has "$pb" "Results:   ${C}/results/b (RUN_LABEL=b)" && [[ "$(wc -l <<< "$d")" -eq 2 ]] \
+    && grep -q $'^<   MAC_MIN\t20\tenvironment$' <<< "$d" && grep -q $'^>   MAC_MIN\t30\tenvironment$' <<< "$d" \
+    && ok "MAC_MIN=20 RUN_LABEL=a vs MAC_MIN=30 RUN_LABEL=b: results/a and results/b; params.tsv differs in exactly one row" || bad "labels: $d"
+out="$(cd /tmp && env "${SITE[@]}" RUN_LABEL=gwas "$L" --dry-run 2>&1)"; rc=$?; out2="$(cd /tmp && env "${SITE[@]}" "RUN_LABEL=a b" "$L" --dry-run 2>&1)"; rc2=$?
+[[ $rc -eq 2 && $rc2 -eq 2 ]] && has "$out" "RUN_LABEL=gwas is the name of a results folder" && has "$out2" "REFUSED: RUN_LABEL=a b; use letters, digits" \
+    && ok "RUN_LABEL: one plain folder name, not a results folder's name" || bad "bad labels: $rc $rc2"
+out="$(cd /tmp && env "${SITE[@]}" MIX_RETAIN=false "$L" --dry-run 2>&1)"
+has "$out" "Strata:    AFR AMR EUR" && ! grep -q 'GWAS .* / MIX' <<< "$out" && ok "MIX_RETAIN=false: MIX left out of the default strata" || bad "MIX out: $(grep Strata <<< "$out")"
+out="$(cd /tmp && env "${SITE[@]}" MIX_RETAIN=false STRATA_LIST=EUR,MIX "$L" --dry-run 2>&1)"; rc=$?
+[[ $rc -eq 2 ]] && has "$out" "REFUSED: STRATA_LIST names MIX, but MIX_RETAIN=false" && ok "... and refused when STRATA_LIST names it" || bad "MIX listed: rc=$rc"
+if [[ -n "${REAL_RSCRIPT}" ]] && ! grep -q "placeholder rds" "${C}/data/handoff/structure/cohort.pcrelate.grm.rds"; then
+    rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results" "${C:?}/logs"
+    out="$(cd /tmp && env "${SITE[@]}" STRATA_LIST=EUR,AFR TRAITS_LIST=os RUN_LABEL=mac30 MAC_MIN=30 FAKE_SBATCH_RUN=1 RR_SACCT_WAIT=0 "$L" 2>&1)"
+    RD="$(ls -d "${C}"/results/mac30/run_record/*/ 2>/dev/null | head -1)"; RD="${RD%/}"
+    [[ -s "${C}/results/mac30/gwas/os/POOLED.ivw_descriptive.sumstats.gz" && -s "${C}/results/mac30/gwas/os/EUR/chr1.run_counts.tsv" && -s "${C}/results/pcair/EUR.phenotypes.with_pcs.tsv" ]] \
+        && [[ ! -e "${C}/results/gwas" && ! -e "${C}/results/run_record" ]] && grep -q $'^run_label\tmac30$' "${RD}/run_info.tsv" && grep -q -- '--mac_min 30 ' "${C}"/logs/gwas_os_EUR_*_1.out \
+        && ok "RUN_LABEL=mac30: GWAS, pooled file and run record under results/mac30/; the structure stays shared in results/pcair" || bad "label run: $(ls "${C}/results" "${C}/results/mac30" 2>&1)"
+    out="$(cd /tmp && DRY_RUN=1 PC_SCALE=cohort bash "$G" EUR os survival 2>&1)"
+    has "$out" "--phenotype ${C}/results/pcair/cohort.phenotypes.with_pcs.tsv" && ok "PC_SCALE=cohort: a stratum's GWAS reads the cohort PCs" || bad "PC_SCALE=cohort: $(grep phenotype <<< "$out")"
+    out="$(cd /tmp && DRY_RUN=1 bash "$G" EUR os survival 2>&1)"
+    has "$out" "--phenotype ${C}/results/pcair/EUR.phenotypes.with_pcs.tsv" && ok "PC_SCALE=stratum (default): its within-stratum PCs" || bad "PC_SCALE default: $(grep phenotype <<< "$out")"
+    rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results" "${C:?}/logs"
+fi
 
 section "GxG: missing sumstats are left out and named; none at all stops the task"
 rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results" "${C:?}/logs"; mkdir -p "${C}/results/gwas/os" "${C}/logs"

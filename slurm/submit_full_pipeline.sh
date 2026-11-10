@@ -79,6 +79,17 @@ export LOG_DIR
 source "${REPO}/bin/slurm_utils.sh"    # helpers, and bin/run_record.sh (the switch table, rr_*)
 rr_refuse_unknown_switches || exit 2
 rr_resolve_switches
+# Every switch inside its domain (B-05; RR_SWITCHES in bin/run_record.sh), before anything else
+rr_check_domains || exit 2
+# RUN_LABEL (B-05): a labelled run (a sensitivity arm) writes its results under results/<RUN_LABEL>/
+if [[ -n "${RUN_LABEL:-}" ]]; then
+    [[ "${RUN_LABEL}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || { echo "REFUSED: RUN_LABEL=${RUN_LABEL}; use letters, digits, _ . - (one folder name)" >&2; exit 2; }
+    case "${RUN_LABEL}" in
+        gwas|prs|coloc|gxg|pcair|strata|run_record|qc|mrmega)
+            echo "REFUSED: RUN_LABEL=${RUN_LABEL} is the name of a results folder; choose another" >&2; exit 2 ;;
+    esac
+fi
+export GWAS_RESULTS="${REPO}/results${RUN_LABEL:+/${RUN_LABEL}}"
 export HANDOFF_DIR="${HANDOFF_DIR:-${REPO}/data/handoff}"   # the handoff bundle (docs/HPC_SITE.md)
 
 # Strata (CP-22): assigned upstream, listed in the bundle's ancestry/strata.tsv. STRATA_LIST unset
@@ -87,24 +98,21 @@ STRATA_TSV="${HANDOFF_DIR}/ancestry/strata.tsv"
 [[ -s "${STRATA_TSV}" ]] || { echo "REFUSED: ${STRATA_TSV} is missing or empty (the strata come from the handoff bundle)" >&2; exit 2; }
 BUNDLE_STRATA="$(bundle_strata)"
 if [[ "${RR_SET_BY[STRATA_LIST]}" == job ]]; then
-    export STRATA_LIST="${BUNDLE_STRATA}"; RR_SET_BY[STRATA_LIST]=bundle
+    # MIX_RETAIN=false leaves the bundle's MIX stratum out (B-05)
+    STRATA_LIST="$(tr ',' '\n' <<< "${BUNDLE_STRATA}" | { if [[ "${MIX_RETAIN}" == false ]]; then grep -vx MIX; else cat; fi; } | paste -sd, -)"
+    export STRATA_LIST; RR_SET_BY[STRATA_LIST]=bundle
 fi
+rr_check_domains STRATA_LIST || exit 2
 IFS=',' read -ra STRATA <<< "${STRATA_LIST}"
 for stratum in "${STRATA[@]}"; do
     [[ ",${BUNDLE_STRATA}," == *",${stratum},"* ]] \
         || { echo "REFUSED: stratum ${stratum} (STRATA_LIST) is not in ${STRATA_TSV} (it has: ${BUNDLE_STRATA})" >&2; exit 2; }
+    [[ "${MIX_RETAIN}" == false && "${stratum}" == MIX ]] \
+        && { echo "REFUSED: STRATA_LIST names MIX, but MIX_RETAIN=false" >&2; exit 2; }
 done
 IFS=',' read -ra TRAITS <<< "${TRAITS_LIST}"
 
-# Steps 2b and 3-6 run only when asked for. Anything but true/false is refused rather than guessed.
-for step in PRS COLOC VALIDATION GXG MRMEGA; do
-    v="RUN_${step}"
-    case "${!v}" in
-        true|false) ;;
-        *) echo "REFUSED: ${v}=${!v}; use true or false" >&2; exit 2 ;;
-    esac
-done
-[[ "${MRMEGA_PCS}" =~ ^[1-9][0-9]*$ ]] || { echo "REFUSED: MRMEGA_PCS=${MRMEGA_PCS}; use a whole number >= 1" >&2; exit 2; }
+# Steps 2b and 3-6 run only when asked for (their RUN_* are true / false: rr_check_domains above)
 if [[ "${RUN_VALIDATION}" == true && "${RUN_PRS}" != true ]]; then
     echo "REFUSED: RUN_VALIDATION=true needs RUN_PRS=true (validation summarises the PRS jobs of this launch)" >&2
     exit 2
@@ -161,10 +169,6 @@ if [[ ${#PHENO_PROBLEMS[@]} -gt 0 ]]; then
     fi
 fi
 # Step 0 ingests the bundle's structure (CP-07) unless STRUCTURE_SOURCE=compute: its files must be there
-case "${STRUCTURE_SOURCE}" in
-    bundle|compute) ;;
-    *) echo "REFUSED: STRUCTURE_SOURCE=${STRUCTURE_SOURCE}; use bundle or compute" >&2; exit 2 ;;
-esac
 if [[ "${STRUCTURE_SOURCE}" == bundle && "${SKIP_PCAIR}" != true ]]; then
     MISSING_STRUCT=()
     for f in genotypes/cohort.hardcall.maf01.fam ancestry/strata.tsv structure/cohort.pcair.pcs.tsv \
@@ -184,10 +188,12 @@ if [[ "${RR_SET_BY[COVARIATES]}" == job ]]; then
     if COVARIATES="$(default_covariates)"; then RR_SET_BY[COVARIATES]=bundle; else COVARIATES=""; fi
     export COVARIATES
 fi
+[[ -z "${COVARIATES}" ]] || rr_check_domains COVARIATES || exit 2
 COV_PROBLEMS=()
 [[ -n "${COVARIATES}" ]] || COV_PROBLEMS+=("no covariates: COVARIATES is not set and ${HANDOFF_DIR}/phenotypes/covariates.txt is missing")
 PC_FILES=()        # the files whose PC columns the tasks will use, where they exist already
-for S in cohort "${STRATA[@]}"; do
+PC_SETS=(cohort); [[ "${PC_SCALE}" == stratum ]] && PC_SETS+=("${STRATA[@]}")   # PC_SCALE=cohort: cohort PCs only
+for S in "${PC_SETS[@]}"; do
     if [[ "${SKIP_PCAIR}" == true ]]; then f="${REPO}/results/pcair/${S}.phenotypes.with_pcs.tsv"
     elif [[ "${STRUCTURE_SOURCE}" == bundle && "$S" == cohort ]]; then f="${HANDOFF_DIR}/structure/cohort.pcair.pcs.tsv"
     elif [[ "${STRUCTURE_SOURCE}" == bundle ]]; then f="${HANDOFF_DIR}/structure/strata/${S}.pcair.pcs.tsv"
@@ -222,7 +228,7 @@ RR_DEFERRED="${DEFERRED[*]:-none}"
 
 # Run record: the run_id is computed once, here, and exported with the directory, so every job
 # of this launch writes into the same results/run_record/<run_id>/.
-RR_ROOT="${REPO}/results/run_record"
+RR_ROOT="${GWAS_RESULTS}/run_record"
 if [[ $DRY_RUN == 1 ]]; then
     GWAS_RUN_ID="$(rr_preview_run_id "${RR_ROOT}")"
 else
@@ -247,8 +253,13 @@ echo "Traits:    ${TRAITS[*]}"
 echo "Partition: ${SLURM_PARTITION}"
 echo "Account:   ${SLURM_ACCOUNT}"
 echo "Logs:      ${LOG_DIR}"
+echo "Results:   ${GWAS_RESULTS}${RUN_LABEL:+ (RUN_LABEL=${RUN_LABEL})}"
 if [[ $DRY_RUN == 1 ]]; then
     echo "Record:    ${GWAS_RUN_DIR} (dry run: not created)"
+    # what params.tsv would hold, so two dry runs can be compared row by row
+    echo "params.tsv (dry run: not written):"
+    rr_params_tsv | sed 's/^/  /'
+    echo "end of params.tsv"
 else
     echo "Record:    ${GWAS_RUN_DIR}"
 fi
@@ -295,7 +306,7 @@ submit() {
 echo ""
 echo "STEP 0: Submitting structure (${STRUCTURE_SOURCE}: $([[ ${STRUCTURE_SOURCE} == bundle ]] && echo "ingest from ${HANDOFF_DIR}" || echo "PC-AiR / PC-Relate"))..."
 DEPEND_PCAIR=""
-if [[ "${SKIP_PCAIR:-false}" != "true" ]]; then
+if [[ "${SKIP_PCAIR}" != "true" ]]; then
     submit "structure (${STRUCTURE_SOURCE})" \
         --output="${LOG_DIR}/pcair_%j.out" --error="${LOG_DIR}/pcair_%j.err" \
         "${SCRIPT_DIR}/submit_pcair.sh"
@@ -368,7 +379,7 @@ rr_begin combine "${GWAS_TRAIT} ${STRATA_LIST}"
 # QC gate (CP-11): every GWAS task's join checks must be there and must not have failed
 qc_gate_or_exit "${QC_REQUIRE_GWAS}" "combine ${GWAS_TRAIT}"
 source "${SCRIPT_DIR}/bin/activate_env.sh" gwas-r
-GWAS_DIR="${SCRIPT_DIR}/results/gwas/${GWAS_TRAIT}"
+GWAS_DIR="${GWAS_RESULTS}/gwas/${GWAS_TRAIT}"
 STRATA_TSV="${HANDOFF_DIR}/ancestry/strata.tsv"
 IFS=',' read -ra STRATA <<< "${STRATA_LIST}"
 join() { local IFS=,; echo "$*"; }          # join a b c -> a,b,c
@@ -530,8 +541,8 @@ fi
 # Map array ID to QTL type
 QTL_TYPES=("eqtl" "sqtl" "pqtl" "mqtl" "caqtl" "hqtl")
 QTL_TYPE="${QTL_TYPES[$((SLURM_ARRAY_TASK_ID - 1))]}"
-GWAS_FILE="${SCRIPT_DIR}/results/gwas/${GWAS_TRAIT}/POOLED.ivw_descriptive.sumstats.gz"
-OUT_DIR="${SCRIPT_DIR}/results/coloc/${GWAS_TRAIT}"
+GWAS_FILE="${GWAS_RESULTS}/gwas/${GWAS_TRAIT}/POOLED.ivw_descriptive.sumstats.gz"
+OUT_DIR="${GWAS_RESULTS}/coloc/${GWAS_TRAIT}"
 mkdir -p "${OUT_DIR}"
 rr_args "${GWAS_TRAIT} ${QTL_TYPE}" "${GWAS_FILE}"
 
@@ -591,9 +602,9 @@ echo "Comparing PRS methods across strata..."
 # Combine all validation results
 IFS=',' read -ra TRAITS <<< "${TRAITS_LIST}"
 for trait in "${TRAITS[@]}"; do
-    cat "${SCRIPT_DIR}/results/prs/${trait}"/*.validation.tsv |
+    cat "${GWAS_RESULTS}/prs/${trait}"/*.validation.tsv |
         awk 'NR==1 || !/^method/' > \
-        "${SCRIPT_DIR}/results/prs/${trait}_all_validation.tsv"
+        "${GWAS_RESULTS}/prs/${trait}_all_validation.tsv"
 done
 
 # Generate summary report
