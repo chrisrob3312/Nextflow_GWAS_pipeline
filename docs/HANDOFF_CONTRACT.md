@@ -42,7 +42,8 @@ final data, and never redone.
 
 1. **One key.** The sample key is the `.fam` IID. `phenotypes.tsv` `sample_id`, every VCF header,
    `ancestry_calls.tsv`, and the FLARE VCFs must carry exactly that set, in the same order where order
-   matters (VCFs). The checker fails on the first mismatch.
+   matters (VCFs). The checker fails on the first mismatch, with `sample ID mismatch: <file> vs fam`, and
+   names PLINK's FID_IID VCF export (`F_S001_S001`) when that is the cause (`docs/SUMSTATS_SCHEMA.md`).
 2. **Two hard-call sets, one sample set.** `maf01` is the GWAS input — the cohort at MAF ≥ 1 %, QC-complete.
    `nomaf` is the same QC-complete cohort with no MAF filter, for rare-variant association and for anyone who
    wants QC-ready data without re-running QC. Same `.fam`, byte-exact, and every `maf01` site is in `nomaf`.

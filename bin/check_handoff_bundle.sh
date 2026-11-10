@@ -9,13 +9,20 @@
 #   --allow-missing-tools accept a bundle even when bcftools / Rscript are absent: their checks are then
 #                         SKIPPED and named in the ACCEPTED line. Without it a missing tool is a refusal,
 #                         because "did not run" must never read as "passed".
+#   --qc-dir DIR          also file the sample-ID verdict (handoff_sample_ids, PASS or FAIL) and its
+#                         sample-accounting row there, as bin/qc_assert.R does (default: $GWAS_QC_DIR when
+#                         set; otherwise nothing is filed). The bundle itself is never written.
 #   The dosage VCFs must carry per-haplotype dosages: every chromosome's header declares FORMAT/HDS with
 #   Number=2, and on a sample of records (first and last chromosome) |HDS1 + HDS2 - DS| <= 0.01.
+#   One sample key (M-06): VCF header sample IDs == .fam IID (same order) == phenotypes IID/sample_id; a
+#   mismatch is refused as "sample ID mismatch: <file> vs fam", naming PLINK's FID_IID export when that is
+#   the cause.
 set -euo pipefail
 B="${1:?bundle dir}"; shift; NOSHA=""
-CHROM_SPEC="1-22"; ALLOW_MISSING=0
+CHROM_SPEC="1-22"; ALLOW_MISSING=0; QC_DIR="${GWAS_QC_DIR:-}"
 while [[ $# -gt 0 ]]; do case "$1" in
   --no-sha) NOSHA="--no-sha"; shift;;
+  --qc-dir) [[ $# -ge 2 ]] || { echo "--qc-dir needs a directory" >&2; exit 1; }; QC_DIR="$2"; shift 2;;
   --chromosomes) [[ $# -ge 2 ]] || { echo "--chromosomes needs a value (e.g. 1-22 or 21,22)" >&2; exit 1; }; CHROM_SPEC="$2"; shift 2;;
   --allow-missing-tools) ALLOW_MISSING=1; shift;;
   *) echo "unknown arg $1" >&2; exit 1;; esac; done
@@ -25,7 +32,16 @@ CHROMS=(); for part in ${CHROM_SPEC//,/ }; do
   else echo "bad --chromosomes value: $CHROM_SPEC" >&2; exit 1; fi; done
 [[ ${#CHROMS[@]} -gt 0 ]] || { echo "empty --chromosomes" >&2; exit 1; }
 for n in "${CHROMS[@]}"; do [[ "$n" -ge 1 && "$n" -le 22 ]] || { echo "--chromosomes: $n is outside 1-22 (the contract carries autosomes only)" >&2; exit 1; }; done
+[[ -z "$QC_DIR" ]] || { mkdir -p "$QC_DIR" && QC_DIR="$(cd "$QC_DIR" && pwd)"; }   # absolute before the cd below
+# qc_row ID VERDICT N MESSAGE / acct_row STEP N_IN N_OUT REASON: one file per row under QC_DIR (bin/qc_assert.R's layout)
+qc_row()   { [[ -n "$QC_DIR" ]] || return 0; mkdir -p "$QC_DIR/assertions.d"
+             printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "${4//$'\t'/ }" > "$QC_DIR/assertions.d/$1.handoff.$$.tsv"; }
+acct_row() { [[ -n "$QC_DIR" ]] || return 0; mkdir -p "$QC_DIR/accounting.d"
+             printf '%s\tcohort\tNA\tNA\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$(($2 - $3))" "$4" > "$QC_DIR/accounting.d/$1.handoff.$$.tsv"; }
 fail() { echo "HANDOFF REFUSED: $*" >&2; exit 2; }
+# id_fail FILE N_MATCHING MESSAGE: a sample-ID refusal, filed as a FAIL with its accounting row first
+id_fail() { qc_row handoff_sample_ids FAIL "$NS" "sample ID mismatch: $1 vs fam: $3"
+            acct_row handoff_sample_ids "$NS" "$2" "fam IIDs matched in $1"; fail "sample ID mismatch: $1 vs fam: $3"; }
 [[ -d "$B" ]] || fail "$B is not a directory"
 B="$(cd "$B" && pwd)"                       # absolute, so a relative bundle path works after the cd below
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT  # scratch lives outside the bundle; a refused or read-only bundle stays clean
@@ -93,7 +109,7 @@ for c in FID IID sample_id mrd efs_time efs_event os_time os_event protocol; do
 col() { awk -F'\t' -v n="$1" 'NR==1{for(i=1;i<=NF;i++) if($i==n) {print i; exit}}' phenotypes/phenotypes.tsv; }
 IC=$(col IID); SC=$(col sample_id); PC=$(col protocol)
 awk -F'\t' -v i="$IC" -v s="$SC" 'NR>1 && $i != $s {print $i; exit 1}' phenotypes/phenotypes.tsv > "$T/badrow" \
-  || fail "phenotypes.tsv row where IID != sample_id (IID $(cat "$T/badrow")); the contract keys everything on one id"
+  || id_fail phenotypes.tsv "$NS" "a row where IID != sample_id (IID $(cat "$T/badrow")); the contract keys everything on one id"
 awk -F'\t' -v p="$PC" 'NR>1 && ($p == "" || $p ~ /^[[:space:]]+$/) {exit 1}' phenotypes/phenotypes.tsv \
   || fail "phenotypes.tsv has a blank protocol (use NA where unknown; the value is a short protocol code, never free text)"
 for pair in efs os; do
@@ -104,7 +120,8 @@ done
 for bad in mrn dob comments cyto_text oth_features death_cause relapse_site_oth; do
   grep -qiP "(^|\t)${bad}(\t|$)" <<<"$H" && fail "phenotypes.tsv carries forbidden column '$bad'"; done
 awk -F'\t' -v c="$SC" 'NR>1{print $c}' phenotypes/phenotypes.tsv | LC_ALL=C sort > "$T/ph_id"
-cmp -s "$T/fam_iid" "$T/ph_id" || fail "phenotypes.tsv sample_id set differs from .fam IID set (first diff: $(LC_ALL=C comm -3 "$T/fam_iid" "$T/ph_id" | head -1))"
+cmp -s "$T/fam_iid" "$T/ph_id" || id_fail phenotypes.tsv "$(LC_ALL=C comm -12 "$T/fam_iid" "$T/ph_id" | wc -l)" \
+  "the sample_id set differs from the .fam IID set (first difference: $(LC_ALL=C comm -3 "$T/fam_iid" "$T/ph_id" | head -1 | tr -d '\t'))"
 ANC_HDR=$'sample_id\tAncGroupID\tMajorGroup\tGD1\tGD2\tGD3\tEA1\tEA2\tEA3\tEA4\tAF1\tAF2\tAF3\tEU1\tEU2\tEU3\tSA1\tSA2\tIC1\tIC2\tIC3\tPe\tPf\tPa'
 [[ "$(head -1 ancestry/ancestry_calls.tsv)" == "$ANC_HDR" ]] || fail "ancestry_calls.tsv header is not the 24-column GrafAnc-normalised header (sample_id AncGroupID MajorGroup GD1-3 EA1-4 AF1-3 EU1-3 SA1-2 IC1-3 Pe Pf Pa)"
 awk -F'\t' 'NR>1{print $1}' ancestry/ancestry_calls.tsv | LC_ALL=C sort > "$T/anc_id"
@@ -151,15 +168,30 @@ if command -v bcftools >/dev/null; then
     END { printf "%d %d %d %d %.4f %s\n", n, vals, miss, bad, maxd, (first == "" ? "-" : first) }'
   for n in "${CHROMS[0]}" "${CHROMS[-1]}"; do
     v="genotypes/chr${n}.phased.dose.vcf.gz"
-    bcftools query -l "$v" | cmp -s - "$T/fam_order" || fail "chr${n}.phased.dose.vcf.gz samples differ from the .fam IID list or are in a different order"
+    bcftools query -l "$v" > "$T/vcf_ids"
+    if ! cmp -s "$T/vcf_ids" "$T/fam_order"; then
+      # PLINK writes FID_IID as the VCF sample name unless told otherwise; say so when that is the cause
+      awk '{print $1 "_" $2}' genotypes/cohort.hardcall.maf01.fam > "$T/fid_iid"
+      n_match=$(LC_ALL=C comm -12 <(LC_ALL=C sort "$T/vcf_ids") "$T/fam_iid" | wc -l)
+      if cmp -s "$T/vcf_ids" "$T/fid_iid"; then
+        id_fail "chr${n}.phased.dose.vcf.gz" "$n_match" "the VCF names its samples FID_IID (e.g. $(head -1 "$T/vcf_ids"), .fam IID $(head -1 "$T/fam_order")), PLINK's default VCF naming; the contract keys on the .fam IID (export with plink2 --export vcf id-paste=iid, or bcftools reheader)"
+      elif cmp -s <(LC_ALL=C sort "$T/vcf_ids") "$T/fam_iid"; then
+        id_fail "chr${n}.phased.dose.vcf.gz" "$n_match" "same samples, different order (first difference at line $(cmp "$T/vcf_ids" "$T/fam_order" 2>/dev/null | awk '{print $NF}'))"
+      else
+        id_fail "chr${n}.phased.dose.vcf.gz" "$n_match" "$n_match of $NS .fam IIDs are VCF samples (e.g. VCF $(head -1 "$T/vcf_ids"), .fam $(head -1 "$T/fam_order"))"
+      fi
+    fi
     # the reader stops after $HDS_RECORDS records; '|| true' absorbs the writer's SIGPIPE, and a reader that saw no record fails
     read -r h_rec h_vals h_miss h_bad h_max h_first <<<"$( { bcftools query -f '%CHROM:%POS[\t%SAMPLE\t%DS\t%HDS]\n' "$v" 2>/dev/null || true; } | awk -v max="$HDS_RECORDS" "$HDS_AWK")"
     [[ "$h_rec" -gt 0 ]] || fail "chr${n}.phased.dose.vcf.gz: no record could be read for the FORMAT/HDS-against-FORMAT/DS check"
     [[ "$h_bad" -eq 0 ]] || fail "chr${n}.phased.dose.vcf.gz: FORMAT/HDS disagrees with FORMAT/DS (|HDS1+HDS2-DS| must be <= 0.01) at $h_first; $h_bad bad of the sample values in the first $h_rec records"
   done
+  qc_row handoff_sample_ids PASS "$NS" "VCF samples (chr${CHROMS[0]}, chr${CHROMS[-1]}) == .fam IID in order == phenotypes.tsv IID == sample_id"
+  acct_row handoff_sample_ids "$NS" "$NS" "fam IIDs that are VCF samples and phenotype rows"
 else
   [[ "$ALLOW_MISSING" -eq 1 ]] || fail "bcftools is not on PATH, so the VCF sample-order, FORMAT/DS, FORMAT/HDS and INFO/MRSQX checks cannot run (pass --allow-missing-tools to accept the bundle with those checks SKIPPED)"
   SKIPPED+=("VCF sample order / FORMAT/DS / FORMAT/HDS / INFO/MRSQX (no bcftools)")
+  qc_row handoff_sample_ids INFO "$NS" "phenotypes.tsv IID == sample_id == .fam IID; the VCF samples were NOT checked (no bcftools)"
 fi
 
 # 5b. strata and structure: every sample has a stratum; cohort PCs and one PC file per stratum; GRM dimnames

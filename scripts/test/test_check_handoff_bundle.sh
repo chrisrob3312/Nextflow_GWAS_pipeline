@@ -64,6 +64,25 @@ if ! command -v bcftools >/dev/null || ! command -v Rscript >/dev/null; then
   b=$(fresh tools_default); out=$("$CHECK" "$b" 2>&1); rc=$?
   if [[ $rc -ne 0 && "$out" == *"is not on PATH"* ]]; then ok "missing tools refused by default (no --allow-missing-tools)"; else bad "missing tools: rc=$rc $out"; fi
 fi
+# M-06: one sample key; PLINK's FID_IID VCF naming is named as the cause
+if command -v bcftools >/dev/null; then
+  rehead() { local b=$1 names=$2; for v in "$b"/genotypes/chr*.phased.dose.vcf.gz; do
+      bcftools reheader -s "$names" -o "$v.new" "$v" && mv "$v.new" "$v" && bcftools index -f -c "$v"; done; remanifest "$b"; }
+  b=$(fresh fid_iid); awk '{print $1 "_" $2}' "$b/genotypes/cohort.hardcall.maf01.fam" > "$W/fid_iid.txt"; rehead "$b" "$W/fid_iid.txt"
+  expect_refuse "VCF header uses FID_IID" "$b" "sample ID mismatch: chr1.phased.dose.vcf.gz vs fam: the VCF names its samples FID_IID (e.g. F_S001_S001, .fam IID S001)"
+  out=$("$CHECK" "$b" "${TOOLS[@]}" --qc-dir "$W/qc_fid" 2>&1)
+  grep -q $'^handoff_sample_ids\tFAIL\t8\tsample ID mismatch: chr1.phased.dose.vcf.gz vs fam' "$W"/qc_fid/assertions.d/*.tsv 2>/dev/null \
+    && grep -q $'^handoff_sample_ids\tcohort\tNA\tNA\t8\t0\t8\t' "$W"/qc_fid/accounting.d/*.tsv 2>/dev/null \
+    && ok "--qc-dir: the FID_IID refusal is filed as handoff_sample_ids FAIL with an accounting row 8 -> 0" || bad "qc-dir fail rows: $(cat "$W"/qc_fid/*/*.tsv 2>&1)"
+  b=$(fresh vcf_order); awk '{print $2}' "$b/genotypes/cohort.hardcall.maf01.fam" | sed '1{h;d};2{G}' > "$W/swapped.txt"; rehead "$b" "$W/swapped.txt"
+  expect_refuse "VCF samples in another order" "$b" "sample ID mismatch: chr1.phased.dose.vcf.gz vs fam: same samples, different order (first difference at line 1)"
+  b=$(fresh ids_agree); out=$("$CHECK" "$b" "${TOOLS[@]}" --qc-dir "$W/qc_ok" 2>&1); rc=$?
+  [[ $rc -eq 0 ]] && grep -q $'^handoff_sample_ids\tPASS\t8\tVCF samples (chr1, chr22) == .fam IID in order == phenotypes.tsv IID == sample_id$' "$W"/qc_ok/assertions.d/*.tsv \
+    && grep -q $'^handoff_sample_ids\tcohort\tNA\tNA\t8\t8\t0\t' "$W"/qc_ok/accounting.d/*.tsv \
+    && ok "IDs agree: accepted; --qc-dir gets handoff_sample_ids PASS and an accounting row 8 -> 8" || bad "ids agree: rc=$rc $out"
+fi
+b=$(fresh pheno_id); sed -i 's/^F_S008\tS008\tS008\t/F_S008\tS999\tS999\t/' "$b/phenotypes/phenotypes.tsv"; remanifest "$b"
+                                                           expect_refuse "phenotype sample_id not a .fam IID" "$b" "sample ID mismatch: phenotypes.tsv vs fam: the sample_id set differs from the .fam IID set"
 b=$(fresh rel_path); ( cd "$W" && "$CHECK" rel_path "${TOOLS[@]}" >/dev/null 2>&1 ) && ok "relative bundle path accepted" || bad "relative bundle path refused"
 b=$(fresh many_extra); awk 'BEGIN{for(i=1;i<=200000;i++) printf "3\tchr3:%d:A:T\t0\t%d\tT\tA\n", i, i}' >> "$b/genotypes/cohort.hardcall.maf01.bim"; head -c $((2 * 200000)) /dev/zero >> "$b/genotypes/cohort.hardcall.maf01.bed"; remanifest "$b"
                                                            expect_refuse "200,000 maf01 sites absent from nomaf (no SIGPIPE death)" "$b" "maf01 carries 200000 site(s) absent from nomaf"
