@@ -456,6 +456,7 @@ else
         --input_dir "${GWAS_DIR}" \
         --strata "$(join "${ANALYSED[@]}")" \
         --strata_skipped "$(join ${SKIPPED[@]+"${SKIPPED[@]}"})" \
+        --method random \
         --output "${POOLED_OUT}" \
         --threads 8
 fi

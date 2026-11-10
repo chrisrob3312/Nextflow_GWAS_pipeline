@@ -25,6 +25,19 @@ Every effect is per **ALT** allele (`ALT` is the effect allele, `REF` the other)
 `BETA` columns are log odds ratios (binary `mrd`), log hazard ratios (`efs`, `os`) or trait units
 (quantitative), from a one-step score estimate: accurate near zero, conservative for large effects.
 
+## The pooled file (`POOLED.ivw_descriptive.sumstats.gz`, `bin/meta_analyze_strata.R`)
+
+Per variant, over the strata that have it: `N` (summed), `N_STRATA`, `STRATA`; `BETA_TOTAL`,
+`SE_TOTAL`, `P_TOTAL` (the total-dose effect pooled; the file is sorted on `P_TOTAL`),
+`I2_STRATA_TOTAL`, `N_STRATA_TOTAL`, `METHOD` (`REML` with metafor, `IVW`, or `IVW (REML failed)`);
+`P_JOINT`, the strata's `P_JOINT` combined with Fisher's method (descriptive); per background
+`MAC_<anc>` (summed over the strata that contribute to that background's estimate only), `BETA_`,
+`SE_`, `Z_`, `P_<anc>`, `I2_STRATA_<anc>`, `N_STRATA_<anc>`; and `Q_HET_NAIVE`, `DF_HET_NAIVE`,
+`P_HET_NAIVE`, `I2_NAIVE`, a Cochran's Q across the pooled background estimates that ignores their
+covariance (named apart from the adapter's covariance-aware `Q_HET` / `P_HET` / `I2`). A variant
+(or a background) in fewer than two strata is not pooled: its estimates are `NA`. `##` lines:
+`strata`, `strata_skipped`, `backgrounds`, `method`, `sorted_on`, `P_JOINT`, `covariates`.
+
 ## The MR-MEGA input (`bin/sumstats_to_mrmega.py`)
 
 One file per stratum, `results/mrmega/<trait>/<S>.mrmega_in.tsv`, MR-MEGA's column names:
@@ -83,6 +96,7 @@ A table may start with lines `## key=value` (no tab in them) before its column h
 | `method` | the adapter, every table | the tests (conditional Tractor score test + total-dose 1-df test) and the null model actually fitted (GENESIS logistic / linear, with or without the GRM; Cox with coxme frailty on the GRM, or Cox without it) |
 | `covariates` | the adapter, every table; kept once by the combine step; `meta_analyze_strata.R` | the covariate list the null model used, global-ancestry columns included (`none` when there are none); `covariates_<stratum>` per stratum in the pooled file when the strata differ |
 | `strata` | `meta_analyze_strata.R` (pooled file) | the strata pooled |
+| `method`, `sorted_on`, `P_JOINT` | `meta_analyze_strata.R` (pooled file) | how it pooled (IVW fixed effect, or metafor REML random effects), the column it is sorted on, and what its `P_JOINT` is (Fisher's combination) |
 | `strata_skipped` | `meta_analyze_strata.R` (pooled file) | the strata left out because they were skipped below `MIN_STRATUM_N` (`none` when none) |
 | `backgrounds` | `meta_analyze_strata.R` (pooled file) | the ancestry backgrounds pooled (from the `BETA_<anc>` columns) |
 

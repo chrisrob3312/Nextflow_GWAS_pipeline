@@ -840,7 +840,7 @@ if [[ -n "${REAL_RSCRIPT}" ]] && "${REAL_RSCRIPT}" -e 'quit(status = !all(sapply
     grep -q $'^STRATA_LIST\tAFR,AMR,EUR,MIX\tbundle$' "${RD}/params.tsv" && ok "STRATA_LIST unset: the bundle's strata (AFR,AMR,EUR,MIX), set_by bundle in params.tsv" || bad "default strata: $(grep STRATA_LIST "${RD}/params.tsv")"
     P="${C}/results/gwas/os/POOLED.ivw_descriptive.sumstats.gz"
     [[ "$CX" == 0 ]] && has "$CL" "Strata disjoint: AFR,AMR,EUR,MIX (8 samples)" && [[ -s "$P" && ! -e "${C}/results/gwas/os/POOLED.sumstats.gz" ]] \
-        && [[ "$(zcat "$P" | grep '^##' | paste -sd'|' -)" == "## strata=AFR,AMR,EUR,MIX|## strata_skipped=none|## backgrounds=EUR|## covariates=sex,age_at_diagnosis,cd19_pos_pct,storage_days,PC1,PC2,PC3,PC4,PC5" ]] \
+        && [[ "$(zcat "$P" | grep '^## \(strata\|strata_skipped\|backgrounds\|covariates\)=' | paste -sd'|' -)" == "## strata=AFR,AMR,EUR,MIX|## strata_skipped=none|## backgrounds=EUR|## covariates=sex,age_at_diagnosis,cd19_pos_pct,storage_days,PC1,PC2,PC3,PC4,PC5" ]] \
         && ok "four strata: disjoint, all 22 chromosomes each, pooled into POOLED.ivw_descriptive.sumstats.gz with ## strata= / strata_skipped= / backgrounds= / covariates=" || bad "pooled: CX=$CX $(zcat "$P" 2>&1 | head -5) $CL"
     e2e STRATA_LIST=EUR,AFR,AMR FAKE_SKIP_STRATUM=AFR
     [[ "$CX" == 0 ]] && has "$CL" "Stratum AFR: skipped on every chromosome (below MIN_STRATUM_N); not pooled" && zcat "$P" | grep -qx '## strata=EUR,AMR' && zcat "$P" | grep -qx '## strata_skipped=AFR' \
@@ -1063,6 +1063,31 @@ if [[ -n "${REAL_RSCRIPT}" ]] && "${REAL_RSCRIPT}" -e 'quit(status = !all(sapply
     rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results" "${C:?}/logs"
 else
     echo "  (real R with data.table, optparse, survival and Matrix, or pandas, not available: CP-19 checks skipped)"
+fi
+
+section "CP-23: meta_analyze_strata.R: no single-stratum 'pooled' values, MAC over contributors, METHOD, sorted on the pooled P"
+check "STEP 2 passes --method explicitly" grep -q -- '--method random' "${C}/slurm/submit_full_pipeline.sh"
+if [[ -n "${REAL_RSCRIPT}" ]] && "${REAL_RSCRIPT}" -e 'quit(status = !all(sapply(c("data.table", "optparse"), requireNamespace, quietly = TRUE)))' >/dev/null 2>&1; then
+    TD="${W}/cp23"; rm -rf "${TD:?}"; mkdir -p "$TD"
+    "${REAL_RSCRIPT}" -e '
+        suppressPackageStartupMessages(library(data.table)); source(file.path(commandArgs(TRUE)[1], "sumstats_io.R")); set.seed(3)
+        mk <- function(s, ids) { n <- length(ids); data.table(STRATUM = s, CHR = 1L, POS = 100L * seq_along(ids), ID = ids, REF = "A", ALT = "G", N = 100L,
+            MAC_STRATUM = 50, EAF = 0.2, BETA_TOTAL = rnorm(n, 0.1, 0.05), SE_TOTAL = 0.1, P_TOTAL = runif(n), STAT_JOINT = 1, DF_JOINT = 2L, P_JOINT = runif(n),
+            MAC_AFR = c(30, NA, rep(20, n - 2)), EAF_AFR = 0.2, BETA_AFR = c(0.2, NA, rnorm(n - 2, 0, 0.1)), SE_AFR = c(0.1, NA, rep(0.1, n - 2)), Z_AFR = 1, P_AFR = 0.3,
+            MAC_EUR = 25, EAF_EUR = 0.2, BETA_EUR = rnorm(n, 0, 0.1), SE_EUR = 0.1, Z_EUR = 1, P_EUR = 0.3, Q_HET = 1, DF_HET = 1L, P_HET = 0.3, I2 = 0) }
+        a <- mk("S1", c("v1", "v2", "v3", "solo")); b <- mk("S2", c("v1", "v2", "v3"))
+        a[ID == "v3", `:=`(BETA_TOTAL = 0.9, SE_TOTAL = 0.05)]; b[ID == "v3", `:=`(BETA_TOTAL = 0.9, SE_TOTAL = 0.05)]
+        d <- commandArgs(TRUE)[2]; fwrite_sumstats(a, file.path(d, "S1.sumstats.gz"), c(covariates = "sex")); fwrite_sumstats(b, file.path(d, "S2.sumstats.gz"), c(covariates = "sex"))
+        b[, STRATUM := "S9"]; fwrite_sumstats(b, file.path(d, "S3.sumstats.gz"), c(covariates = "sex"))' "${C}/bin" "$TD"
+    "${REAL_RSCRIPT}" "${C}/bin/meta_analyze_strata.R" --input_dir "$TD" --strata S1,S2 --method fixed --output "${TD}/P.gz" --threads 1 >/dev/null 2>&1
+    out="$("${REAL_RSCRIPT}" -e 'suppressPackageStartupMessages(library(data.table)); p <- fread(commandArgs(TRUE)[1])
+        solo <- p[ID == "solo"]; cat(solo$N_STRATA, is.na(solo$BETA_TOTAL) && is.na(solo$P_TOTAL) && is.na(solo$BETA_AFR) && is.na(solo$BETA_EUR), "|",
+        p[ID == "v1"]$MAC_AFR, p[ID == "v2"]$MAC_AFR, p[ID == "v3"]$MAC_AFR, "|", p$ID[1], p$P_TOTAL[1] == min(p$P_TOTAL, na.rm = TRUE), "|",
+        unique(p[N_STRATA == 2]$METHOD), "|", all(c("Q_HET_NAIVE", "P_HET_NAIVE", "I2_NAIVE") %in% names(p)), any(c("Q_HET", "P_HET", "I2") %in% names(p)), "\n")' "${TD}/P.gz" 2>&1)"
+    [[ "$out" == "1 TRUE | 60 NA 40 | v3 TRUE | IVW | TRUE FALSE " ]] && zcat "${TD}/P.gz" | head -6 | grep -qx '## sorted_on=P_TOTAL (pooled total-dose effect)' \
+        && ok "a variant in one stratum: N_STRATA 1, every pooled value NA; MAC over contributing strata (60, NA, 40); METHOD set; top row the smallest P_TOTAL; heterogeneity *_NAIVE" || bad "meta CP-23: $out"
+    out="$("${REAL_RSCRIPT}" "${C}/bin/meta_analyze_strata.R" --input_dir "$TD" --strata S1,S3 --method fixed --output "${TD}/Q.gz" --threads 1 2>&1)"; rc=$?
+    [[ $rc -ne 0 ]] && has "$out" "is pooled as stratum S3 but its STRATUM column says S9" && ok "the input's STRATUM column is kept and checked, not re-derived" || bad "STRATUM check: rc=$rc"
 fi
 
 section "GxG: missing sumstats are left out and named; none at all stops the task"
