@@ -15,6 +15,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "${HERE}/.." && pwd)"
 W="${1:-$(mktemp -d)}"; mkdir -p "$W"; W="$(cd "$W" && pwd)"
 pass=0; failn=0
+# Under pipefail, `producer | grep -q` can fail at random: grep -q exits at the first match and the
+# producer, if still writing, dies of SIGPIPE. Multi-line checks below match against "$(producer)".
 ok()      { echo "  ok   $1"; pass=$((pass + 1)); }
 bad()     { echo "  FAIL $1"; failn=$((failn + 1)); }
 check()   { local name="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$name"; else bad "$name"; fi; }
@@ -204,12 +206,12 @@ logs="$(grep -o -- '--\(output\|error\)=[^ ]*' <<< "$sb")"
 [[ -n "$logs" ]] && ! grep -qv -- "=${C}/logs/" <<< "$logs" && ok "every --output/--error is absolute, under ${C}/logs" || bad "log paths: $(grep -v -- "=${C}/logs/" <<< "$logs" | head -3)"
 has "$out" "deferred: PRS COLOC VALIDATION GXG (RUN_*=false)" && ok "prints 'deferred: PRS COLOC VALIDATION GXG (RUN_*=false)'" || bad "deferred line missing"
 grep -q 'submit_prs_array\|colocalization\|PRS validation\|submit_gxg_array' <<< "$sb" && bad "a deferred step was submitted" || ok "no sbatch for PRS, coloc, validation or GxG"
-has "$sb" "run record finalise: sbatch" && grep 'finalise' <<< "$sb" | grep -q -- '--dependency=afterany:dry1:dry2:' && ok "finalise job waits on every job (afterany)" || bad "finalise line"
+has "$sb" "run record finalise: sbatch" && grep -q -- '--dependency=afterany:dry1:dry2:' <<< "$(grep 'finalise' <<< "$sb")" && ok "finalise job waits on every job (afterany)" || bad "finalise line"
 [[ ! -e "${C}/results" ]] && ok "a dry run creates no run record" || bad "dry run wrote ${C}/results"
 
 section "CP-03: RUN_* gates"
 out="$(cd /tmp && env "${SITE[@]}" RUN_PRS=true "$L" --dry-run 2>&1)"
-grep '\[DRY-RUN\]' <<< "$out" | grep -q 'submit_prs_array.sh OS' && ok "RUN_PRS=true prints the PRS sbatch" || bad "RUN_PRS=true: no PRS sbatch"
+grep -q 'submit_prs_array.sh OS' <<< "$(grep '\[DRY-RUN\]' <<< "$out")" && ok "RUN_PRS=true prints the PRS sbatch" || bad "RUN_PRS=true: no PRS sbatch"
 has "$out" "deferred: COLOC VALIDATION GXG (RUN_*=false)" && ok "RUN_PRS=true: deferred list shrinks" || bad "deferred with RUN_PRS"
 out="$(cd /tmp && env "${SITE[@]}" RUN_GXG=true "$L" --dry-run 2>&1)"
 gx="$(grep '\[DRY-RUN\] GxG' <<< "$out")"
@@ -228,9 +230,9 @@ out="$(cd /tmp && env "${SITE[@]}" STRATUM_MIN_N=50 "$L" --dry-run 2>&1)"; rc=$?
 section "CP-28: submit_gwas_array.sh reads data/tractor/<stratum>/ancestries.txt"
 G="${C}/slurm/submit_gwas_array.sh"
 out="$(cd /tmp && DRY_RUN=1 bash "$G" EUR OS survival 2>&1)"; rc=$?
-[[ $rc -eq 0 ]] && grep '^\[DRY-RUN\]' <<< "$out" | grep -q -- '--ancestries EUR ' && ok "ancestries.txt 'EUR': prints --ancestries EUR" || bad "EUR: rc=$rc $out"
+[[ $rc -eq 0 ]] && grep -q -- '--ancestries EUR ' <<< "$(grep '^\[DRY-RUN\]' <<< "$out")" && ok "ancestries.txt 'EUR': prints --ancestries EUR" || bad "EUR: rc=$rc $out"
 out="$(cd /tmp && DRY_RUN=1 SLURM_ARRAY_TASK_ID=5 bash "$G" AAC MRD binary 2>&1)"
-grep '^\[DRY-RUN\]' <<< "$out" | grep -q -- '--ancestries AFR,EUR .*--chromosome 5 ' && ok "two labels, one per line: --ancestries AFR,EUR (chr from the task id)" || bad "AAC: $out"
+grep -q -- '--ancestries AFR,EUR .*--chromosome 5 ' <<< "$(grep '^\[DRY-RUN\]' <<< "$out")" && ok "two labels, one per line: --ancestries AFR,EUR (chr from the task id)" || bad "AAC: $out"
 mv "${C}/data/tractor/LAT1/ancestries.txt" "${W}/anc.away"
 out="$(cd /tmp && DRY_RUN=1 bash "$G" LAT1 OS survival 2>&1)"; rc=$?
 [[ $rc -ne 0 ]] && has "$out" "${C}/data/tractor/LAT1/ancestries.txt does not exist" && ok "without the file: exits non-zero naming it" || bad "absent: rc=$rc $out"
@@ -241,7 +243,7 @@ out="$(cd /tmp && env "${SITE[@]}" "$L" 2>&1)"; rc=$?
 mv "${W}/anc.away" "${C}/data/tractor/LAT1/ancestries.txt"
 rm -rf "${C:?}/results" "${C:?}/logs"
 out="$(cd /tmp && DRY_RUN=1 MAC_MIN=30 MIN_STRATUM_N=50 bash "$G" EUR OS survival 2>&1)"
-grep '^\[DRY-RUN\]' <<< "$out" | grep -q -- '--min_stratum_n 50 .*--mac_min 30 ' && ok "MAC_MIN and MIN_STRATUM_N reach the adapter" || bad "switches: $out"
+grep -q -- '--min_stratum_n 50 .*--mac_min 30 ' <<< "$(grep '^\[DRY-RUN\]' <<< "$out")" && ok "MAC_MIN and MIN_STRATUM_N reach the adapter" || bad "switches: $out"
 check "shell/README.md says 'debug-only, not the execution path'" grep -q "debug-only, not the execution path" "$REPO/shell/README.md"
 for f in "$REPO"/shell/*.sh; do check "$(basename "$f"): one-line DEBUG-ONLY header" bash -c "sed -n 2p '$f' | grep -q '^# DEBUG-ONLY, not the execution path'"; done
 
@@ -367,7 +369,7 @@ T="${E2E}/trace.tsv"
 steps="$(awk -F'\t' 'NR > 1 {n[$1]++} END {for (s in n) printf "%s=%d ", s, n[s]}' "$T" | tr ' ' '\n' | sort | paste -sd' ' -)"
 [[ "$steps" == "combine=1 gwas=22 pcair=1" ]] && ok "trace rows per step: ${steps}" || bad "steps: ${steps}"
 [[ "$(awk -F'\t' 'NR > 1 && $14 != "0"' "$T" | wc -l)" -eq 0 ]] && ok "every task exit 0, recorded by the task itself" || bad "exits: $(awk -F'\t' 'NR>1{print $1, $14}' "$T" | sort | uniq -c)"
-awk -F'\t' 'NR > 1 && $1 == "gwas" {print $10}' "$T" | grep -q -- '--ancestries EUR .*--mac_min 10 ' && ok "gwas rows carry the adapter command line" || bad "gwas args"
+grep -q -- '--ancestries EUR .*--mac_min 10 ' <<< "$(awk -F'\t' 'NR > 1 && $1 == "gwas" {print $10}' "$T")" && ok "gwas rows carry the adapter command line" || bad "gwas args"
 grep -q 'ERROR: cannot find the repo' "${C}"/logs/*.out 2>/dev/null && bad "a job could not find the repo from the spool copy" || ok "every job found the repo while running from a spool copy"
 [[ "$(grep -l 'activate_env: gwas-r' "${C}"/logs/gwas_OS_EUR_*.out 2>/dev/null | wc -l)" -eq 22 ]] && ok "all 22 GWAS tasks activated gwas-r" || bad "activation in GWAS logs"
 
