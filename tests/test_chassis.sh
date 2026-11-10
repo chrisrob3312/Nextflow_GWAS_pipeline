@@ -978,6 +978,20 @@ else
     echo "  (real R with data.table, optparse, survival and Matrix not available: CP-17 performance checks skipped)"
 fi
 
+section "B-01: a one-ancestry stratum (k = 1) through the adapter, no hapcount file"
+if [[ -n "${REAL_RSCRIPT}" ]] && "${REAL_RSCRIPT}" -e 'quit(status = !all(sapply(c("data.table", "optparse", "survival", "Matrix"), requireNamespace, quietly = TRUE)))' >/dev/null 2>&1; then
+    TD="${W}/b01"; rm -rf "${TD:?}"; mkdir -p "$TD"
+    "${REAL_RSCRIPT}" "${C}/tests/toy/make_toy_tractor.R" "${TD}/eur" 120 40 EUR >/dev/null; rm -f "${TD}/eur.hapcount.EUR.txt.gz"
+    out="$(cd "$TD" && GWAS_QC_DIR="${TD}/qc" "${REAL_RSCRIPT}" "${C}/bin/tractor_genesis_adapter.R" --tractor_prefix eur --phenotype eur.phenotypes.tsv \
+            --trait os --model survival --time_col os_time --event_col os_event --ancestries EUR --ref_ancestry EUR \
+            --covariates sex,age_at_diagnosis --stratum EUR --min_stratum_n 50 --chromosome 22 --output_prefix out/chr22 2>&1)"; rc=$?
+    chk="$("${REAL_RSCRIPT}" -e 'suppressPackageStartupMessages(library(data.table)); a <- fread(commandArgs(TRUE)[1])
+            cat(identical(unique(a$STRATUM), "EUR"), names(a)[1], length(grep("^BETA_", names(a))), identical(a$P_JOINT, a$P_EUR), unique(a$DF_JOINT), "\n")' \
+            "${TD}/out/chr22.tractor_genesis.genomic_order.tsv.gz" 2>&1)"
+    [[ $rc -eq 0 && "$chk" == "TRUE STRATUM 1 TRUE 1 " ]] && has "$out" "Hapcount: none (one ancestry: 2 for every sample)" && ! grep -qi "hapcount file\|no hapcount" <<< "$out" \
+        && ok "EUR-only toy stratum: STRATUM=EUR first, one BETA_EUR/SE_EUR/P_EUR set, P_JOINT identical to P_EUR (1 df), no hapcount file needed" || bad "k=1: rc=$rc chk=$chk $(tail -3 <<< "$out")"
+fi
+
 section "GxG: missing sumstats are left out and named; none at all stops the task"
 rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results" "${C:?}/logs"; mkdir -p "${C}/results/gwas/os" "${C}/logs"
 echo x | gzip > "${C}/results/gwas/os/POOLED.ivw_descriptive.sumstats.gz"; echo x | gzip > "${C}/results/gwas/os/EUR.sumstats.gz"

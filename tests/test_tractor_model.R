@@ -48,6 +48,13 @@ r <- tv(g, mac_min = 1, ops = ops1)
 f1 <- coxph(Surv(time, event) ~ age + g, ties = "breslow", init = c(coef(fit0), 0), control = coxph.control(iter.max = 0))
 check(sprintf("with a covariate: score statistic %.6f equals coxph's %.6f", r$joint$stat, f1$score), abs(r$joint$stat - f1$score) < 1e-6)
 
+# --- k = 1 (B-01): one ancestry, no local-ancestry term, hapcount 2 for every sample ----------
+r <- test_variant_tractor(list(), list(EUR = g), list(EUR = two), ops0, "EUR", "EUR", mac_min = 1)
+check(sprintf("k=1: Cox score statistic %.6f equals coxph's %.6f", r$joint$stat, sc), r$status == "ok" && abs(r$joint$stat - sc) < 1e-6)
+check("k=1: P_JOINT identical to P_EUR, 1 df, no heterogeneity test", identical(r$joint$p, r$marginal$EUR$p) && r$joint$df == 1 && is.na(r$het$Q))
+r <- test_variant_tractor(list(), list(EUR = dose30), list(EUR = two), ops0, "EUR", "EUR", mac_min = 31)
+check("k=1: below the MAC gate -> status mac", r$status == "mac")
+
 # --- k = 2: joint, per-ancestry, heterogeneity -----------------------------------------------
 la <- rbinom(n, 2, 0.5)                                         # AFR haplotypes per person
 dA <- rbinom(n, la, 0.4); dE <- rbinom(n, 2 - la, 0.2)

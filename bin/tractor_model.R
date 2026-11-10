@@ -136,7 +136,8 @@ test_variant_tractor <- function(
 
     # Build design: LA terms then Dose terms; mean-impute sporadic missingness
     D <- matrix(0, nrow = n, ncol = length(non_ref) + n_dose)
-    colnames(D) <- c(paste0("LA_", non_ref), paste0("Dose_", ancestries))
+    la_names <- if (length(non_ref) > 0) paste0("LA_", non_ref) else character(0)   # none with one ancestry
+    colnames(D) <- c(la_names, paste0("Dose_", ancestries))
     for (anc in non_ref)    D[, paste0("LA_", anc)]   <- as.numeric(la_vec[[anc]])
     for (anc in ancestries) D[, paste0("Dose_", anc)] <- as.numeric(dose_vec[[anc]])
     n_missing <- sum(!complete.cases(D))
@@ -154,8 +155,7 @@ test_variant_tractor <- function(
     if (length(testable) == 0) return(empty_result(ancestries, n_dose, mac, mac_stratum, "mac"))
 
     # Drop LA columns with no variation (e.g. no AFR tracts in this chunk)
-    la_cols <- paste0("LA_", non_ref)
-    la_cols <- la_cols[apply(D[, la_cols, drop = FALSE], 2, var) > 1e-10]
+    la_cols <- la_names[apply(D[, la_names, drop = FALSE], 2, var) > 1e-10]
     g_cols  <- paste0("Dose_", testable)
     Dk <- D[, c(la_cols, g_cols), drop = FALSE]
 
@@ -180,6 +180,7 @@ test_variant_tractor <- function(
         # Per-ancestry one-step estimates
         beta <- as.numeric(V_inv %*% U_c); se <- sqrt(diag(V_inv))
         z <- beta / se; p <- 2 * pnorm(-abs(z))
+        if (df_joint == 1) p_joint <- p[1]       # one dose term (k = 1, or one testable background): the same test
         marginal <- setNames(lapply(ancestries, function(a) list(ancestry = a, beta = NA, se = NA, z = NA, p = NA)), ancestries)
         for (i in seq_along(testable)) {
             marginal[[testable[i]]] <- list(ancestry = testable[i], beta = beta[i], se = se[i], z = z[i], p = p[i])

@@ -317,20 +317,25 @@ cat("\nLoading Tractor data...\n")
 # Which file holds which ancestry: named by label, or numbered and mapped through
 # --ancestry_index_map; never by position in --ancestries (bin/tractor_io.R)
 index_map <- if (!is.null(opt$ancestry_index_map)) read_index_map(opt$ancestry_index_map) else NULL
+# One ancestry (k = 1, B-01): there is no local ancestry to model, so no hapcount file is read;
+# every sample carries two haplotypes of that ancestry, and the dose file is the hard-call dosage
+# (docs/SUMSTATS_SCHEMA.md). The test then reduces to the standard 1-df score test (P_JOINT = P_<anc>),
+# with the GRM in the null as for every stratum.
+single_ancestry <- n_anc == 1
 tractor_files <- lapply(setNames(ancestries, ancestries), function(a) list(
-    hapcount = resolve_tractor_file(opt$tractor_prefix, a, "hapcount", index_map),
-    dosage   = resolve_tractor_file(opt$tractor_prefix, a, "dosage",   index_map)
+    hapcount = if (single_ancestry) NULL else resolve_tractor_file(opt$tractor_prefix, a, "hapcount", index_map),
+    dosage   = resolve_tractor_file(opt$tractor_prefix, a, "dosage", index_map)
 ))
 for (a in ancestries) {
-    cat("  ", a, ": ", basename(tractor_files[[a]]$hapcount$path), ", ", basename(tractor_files[[a]]$dosage$path),
-        " (", tractor_files[[a]]$dosage$how, ")\n", sep = "")
+    cat("  ", a, ": ", if (single_ancestry) "(one ancestry: hapcount 2 for every sample)" else basename(tractor_files[[a]]$hapcount$path),
+        ", ", basename(tractor_files[[a]]$dosage$path), " (", tractor_files[[a]]$dosage$how, ")\n", sep = "")
 }
 
 # --stratum and --min_stratum_n, from the file headers, before the matrices are read.
 # Every join below writes one sample_accounting row and the checks file verdicts (CP-11); the
 # combine step's gate requires adapter_stratum_check, adapter_sample_join, adapter_grm_cover and
 # adapter_model_n from every task, so a skipped or failed join cannot pass unseen.
-tractor_ids <- tractor_sample_ids(tractor_files[[1]]$hapcount$path)
+tractor_ids <- tractor_sample_ids(tractor_files[[1]]$dosage$path)
 qc_where <- sprintf("%s / %s / chr%s", opt$trait, opt$stratum %||% "unnamed", opt$chromosome %||% "all")
 acct <- function(step, n_in, n_out, reason) {
     qc_account(step, n_in, n_out, reason, stratum = opt$stratum %||% NA, trait = opt$trait, chromosome = opt$chromosome %||% NA)
@@ -414,23 +419,23 @@ read_tractor_files <- function(files, ancestries) {
     variant_info <- NULL
 
     for (anc in ancestries) {
-        hc_file  <- files[[anc]]$hapcount$path
+        hc_file  <- files[[anc]]$hapcount$path          # NULL with one ancestry
         dos_file <- files[[anc]]$dosage$path
 
         cat("  Loading", anc, "...\n")
-        cat("    Hapcount:", basename(hc_file), "\n")
+        cat("    Hapcount:", if (is.null(hc_file)) "none (one ancestry: 2 for every sample)" else basename(hc_file), "\n")
         cat("    Dosage:", basename(dos_file), "\n")
 
         # Read files
         # Tractor format: first cols are variant info, rest are samples
-        hc_data <- fread(hc_file)
         dos_data <- fread(dos_file)
+        hc_data <- if (is.null(hc_file)) NULL else fread(hc_file)
 
         # Extract variant info from first file
         if (is.null(variant_info)) {
             # Variant info columns (CHR, POS, ID, REF, ALT or similar; else the first 5)
-            info_cols <- tractor_info_cols(names(hc_data))
-            variant_info <- hc_data[, ..info_cols]
+            info_cols <- tractor_info_cols(names(dos_data))
+            variant_info <- dos_data[, ..info_cols]
 
             # Standardize column names
             names(variant_info) <- toupper(names(variant_info))
@@ -443,14 +448,16 @@ read_tractor_files <- function(files, ancestries) {
         }
 
         # Extract sample data (non-info columns)
-        sample_cols <- setdiff(names(hc_data), info_cols)
+        sample_cols <- setdiff(names(dos_data), info_cols)
 
-        hapcount[[anc]] <- as.matrix(hc_data[, ..sample_cols])
         dosage[[anc]] <- as.matrix(dos_data[, ..sample_cols])
+        hapcount[[anc]] <- if (is.null(hc_data)) {
+            matrix(2L, nrow(dosage[[anc]]), ncol(dosage[[anc]]), dimnames = dimnames(dosage[[anc]]))
+        } else as.matrix(hc_data[, ..sample_cols])
     }
 
     # Get sample IDs from column names
-    sample_ids <- colnames(hapcount[[ancestries[1]]])
+    sample_ids <- colnames(dosage[[ancestries[1]]])
 
     cat("  Variants:", nrow(variant_info), "\n")
     cat("  Samples:", length(sample_ids), "\n")

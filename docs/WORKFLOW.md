@@ -130,6 +130,11 @@ flowchart LR
     E --> O
 ```
 
+A stratum with one ancestry (k = 1; its `ancestries.txt` has one line, e.g. EUR) needs only the
+dose file (the hard-call dosage): no hapcount file is read, every sample carries two haplotypes of
+that ancestry, there is no local-ancestry term, and the test is the standard 1-df score test, so
+`P_JOINT` is identical to `P_<anc>` (B-01). The GRM stays in the null model as for every stratum.
+
 Samples (CP-17): the adapter analyses the phenotype rows that are in the Tractor files, in the
 stratum's `results/strata/<S>.samples.txt` (`--sample_include`), in the GRM (a joined sample missing
 from it stops the run: `sample X missing from GRM`), and complete on the outcome and every
