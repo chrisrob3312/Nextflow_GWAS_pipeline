@@ -461,7 +461,8 @@ grep -q 'anc_code' "$A" && bad "adapter still derives a file number from the pos
 grep -q 'source(file.path(.adapter_dir, "tractor_io.R"))' "$A" && ok "adapter sources bin/tractor_io.R" || bad "adapter does not source tractor_io.R"
 grep -q 'check_stratum_membership(opt$stratum, tractor_ids, opt$strata_file, pheno)' "$A" && ok "adapter: --stratum checked against the Tractor files' samples" || bad "adapter: no stratum check"
 grep -q 'if (n_null < opt$min_stratum_n)' "$A" && grep -q 'quit(save = "no", status = 0)' "$A" && ok "adapter: below --min_stratum_n, skip with exit 0" || bad "adapter: no min_stratum_n gate"
-grep -q 'results\[, STRATUM := opt$stratum\]' "$A" && ok "adapter: outputs labelled with a STRATUM column" || bad "adapter: no STRATUM label"
+grep -q 'rows\[\[v\]\] <- result_row(var_info, res, ancestries, opt$stratum)' "$A" && grep -q 'if (!is.null(stratum)) row$STRATUM <- stratum' "${A%/*}/tractor_model.R" \
+    && ok "adapter: outputs labelled with a STRATUM column (the first; result_row in bin/tractor_model.R)" || bad "adapter: no STRATUM label"
 grep -q 'write_run_counts(opt$output_prefix, run_counts)' "$A" && ok "adapter: writes <output_prefix>.run_counts.tsv" || bad "adapter: no counts file"
 grep -q '".ancdose.", k' "$REPO/bin/calculate_prs_admixed.R" && bad "PRS still reads Tractor files by position" || ok "PRS LA partial: no file number from the position either"
 for m in modules/local/tractor_genesis_adapter/main.nf modules/local/prs_admixed/main.nf; do
@@ -558,7 +559,7 @@ out="$("$QG" --dir "$QD" 2>&1)"; rc=$?
 filed="$(grep -o 'qc_assert("adapter_[a-z_]*"' "${C}/bin/tractor_genesis_adapter.R" | sed 's/qc_assert("//; s/"//' | sort -u | paste -sd, -)"
 req="$(bash -c "source '${C}/bin/slurm_utils.sh'; echo \"\${QC_REQUIRE_GWAS}\"" | tr ',' '\n' | sort -u | paste -sd, -)"
 [[ -n "$filed" && "$filed" == "$req" ]] && ok "the adapter files exactly the ids the combine gate requires ($req)" || bad "adapter ids '$filed' vs gate '$req'"
-grep -q 'stop(length(off_grm), " samples with phenotype and Tractor data are not in the GRM' "${C}/bin/tractor_genesis_adapter.R" \
+grep -q 'stop("sample ", off_grm\[1\], " missing from GRM "' "${C}/bin/tractor_genesis_adapter.R" \
     && ! grep -q 'Warning: Kinship matrix missing' "${C}/bin/tractor_genesis_adapter.R" && ok "adapter: a joined sample missing from the GRM is a FAIL and a stop, not a warning" || bad "adapter GRM stop"
 ! grep -q 'all.x = TRUE' "${C}/bin/genesis_pcair_pcrelate.R" && grep -q 'merge_pcs_checked(ph, pcs' "${C}/bin/genesis_pcair_pcrelate.R" \
     && ok "comparator: the all.x merge with a stdout-only count is gone; merge_pcs_checked files pcair_pc_merge" || bad "comparator merge"
@@ -914,6 +915,36 @@ if [[ -n "${REAL_RSCRIPT}" ]] && ! grep -q "placeholder rds" "${C}/data/handoff/
     out="$(cd /tmp && DRY_RUN=1 bash "$G" EUR os survival 2>&1)"
     has "$out" "--phenotype ${C}/results/pcair/EUR.phenotypes.with_pcs.tsv" && ok "PC_SCALE=stratum (default): its within-stratum PCs" || bad "PC_SCALE default: $(grep phenotype <<< "$out")"
     rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results" "${C:?}/logs"
+fi
+
+section "CP-17 correctness: the adapter itself on toy Tractor files (survival; runs here without GENESIS)"
+if [[ -n "${REAL_RSCRIPT}" ]] && "${REAL_RSCRIPT}" -e 'quit(status = !all(sapply(c("data.table", "optparse", "survival", "Matrix"), requireNamespace, quietly = TRUE)))' >/dev/null 2>&1; then
+    out="$("${REAL_RSCRIPT}" "${C}/tests/test_tractor_model.R" 2>&1)"; rc=$?
+    [[ $rc -eq 0 ]] && ok "tests/test_tractor_model.R: $(tail -1 <<< "$out") (minor-allele MAC, stratum gate, Cox score test == coxph's)" || bad "test_tractor_model.R: $out"
+    TD="${W}/cp17"; rm -rf "${TD:?}"; mkdir -p "$TD"
+    "${REAL_RSCRIPT}" "${C}/tests/toy/make_toy_tractor.R" "${TD}/toy" 120 60 AFR,EUR na_rows=5 >/dev/null
+    ad() { (cd "$TD" && GWAS_QC_DIR="${TD}/qc" "${REAL_RSCRIPT}" "${C}/bin/tractor_genesis_adapter.R" --tractor_prefix toy --phenotype toy.phenotypes.tsv \
+            --trait os --model survival --time_col os_time --event_col os_event --ancestries AFR,EUR --ref_ancestry EUR \
+            --covariates sex,age_at_diagnosis --stratum TOY --min_stratum_n 50 --chromosome 22 "$@" 2>&1); }
+    out="$(ad --sample_include toy.samples.txt --output_prefix out/chr22)"; rc=$?
+    O="${TD}/out/chr22.tractor_genesis.genomic_order.tsv.gz"
+    [[ $rc -eq 0 ]] && has "$out" "Complete cases: 115 of 120 joined samples; 5 dropped for a missing os_time / os_event / sex / age_at_diagnosis value" \
+        && [[ "$(zcat "$O" | grep -v '^##' | head -1 | cut -f1-8)" == $'STRATUM\tCHR\tPOS\tID\tREF\tALT\tN\tMAC_STRATUM' ]] \
+        && [[ "$(zcat "$O" | grep -v '^##' | awk -F'\t' 'NR > 1 && $7 != 115' | wc -l)" -eq 0 ]] \
+        && grep -qx $'n_null\t115' "${TD}/out/chr22.run_counts.tsv" && grep -qx $'n_failed\t0' "${TD}/out/chr22.run_counts.tsv" \
+        && ok "5 rows with NA os_time: reported and dropped before the fit; N 115 on every row, no failed test; STRATUM is the first column" || bad "toy run: rc=$rc $(tail -5 <<< "$out")"
+    [[ "$(zcat "$O" | grep -v '^##' | awk -F'\t' 'NR > 1 && $11 == "NA"' | wc -l)" -eq 0 ]] && ok "no all-NA rows: every toy variant has a P_JOINT" || bad "NA rows: $(zcat "$O" | awk -F'\t' '$11 == "NA"' | head -2)"
+    head -100 "${TD}/toy.samples.txt" > "${TD}/keep100.txt"
+    out="$(ad --sample_include keep100.txt --output_prefix out100/chr22)"
+    has "$out" "samples sample_include: 120 -> 100" && grep -qx $'n_null\t95' "${TD}/out100/chr22.run_counts.tsv" \
+        && ok "--sample_include (the stratum's samples.txt): 120 -> 100 joined, 95 complete cases" || bad "sample_include: $(grep -i 'sample_include\|n_null' <<< "$out")"
+    "${REAL_RSCRIPT}" -e 'ids <- readLines(commandArgs(TRUE)[1]); ids <- ids[ids != "T0007"]; m <- diag(0.5, length(ids)); dimnames(m) <- list(ids, ids); saveRDS(m, commandArgs(TRUE)[2])' "${TD}/toy.samples.txt" "${TD}/kin.rds"
+    out="$(ad --kinship kin.rds --output_prefix outk/chr22)"; rc=$?
+    [[ $rc -ne 0 ]] && has "$out" "sample T0007 missing from GRM kin.rds (1 joined sample(s) are not in it: T0007)" && ! has "$out" "subscript out of bounds" && ! has "$out" "Fitting null model" \
+        && ok "a sample absent from the GRM: 'sample T0007 missing from GRM', before any fit (no subscript error)" || bad "grm missing: rc=$rc $(tail -3 <<< "$out")"
+    grep -q 'CMD+=(--sample_include "${SAMPLE_INCLUDE}")' "${C}/slurm/submit_gwas_array.sh" && ok "submit_gwas_array.sh passes results/strata/<S>.samples.txt as --sample_include" || bad "gwas array sample_include"
+else
+    echo "  (real R with data.table, optparse, survival and Matrix not available: CP-17 adapter checks skipped)"
 fi
 
 section "GxG: missing sumstats are left out and named; none at all stops the task"

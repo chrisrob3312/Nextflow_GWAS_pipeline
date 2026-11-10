@@ -141,6 +141,12 @@ CMD=(Rscript "${SCRIPT_DIR}/bin/tractor_genesis_adapter.R"
 if [[ "${MODEL}" == "survival" ]]; then
     CMD+=(--time_col "$(trait_time_col "${TRAIT}")" --event_col "$(trait_event_col "${TRAIT}")")
 fi
+# The stratum's members (step 0 writes them from strata.tsv): the adapter analyses only these (CP-17)
+SAMPLE_INCLUDE=""
+if [[ "${STRATUM}" != POOLED && -s "${SCRIPT_DIR}/results/strata/${STRATUM}.samples.txt" ]]; then
+    SAMPLE_INCLUDE="${SCRIPT_DIR}/results/strata/${STRATUM}.samples.txt"
+    CMD+=(--sample_include "${SAMPLE_INCLUDE}")
+fi
 STRATA_FILE="${STRATA_FILE:-${HANDOFF_DIR}/ancestry/strata.tsv}"
 if [[ -f "${STRATA_FILE}" ]]; then
     CMD+=(--strata_file "${STRATA_FILE}")
@@ -172,6 +178,7 @@ qc_gate_or_exit "${QC_REQUIRE_STRUCTURE}" "GWAS ${TRAIT} / ${STRATUM} chr${CHR}"
 # Run record: the command line and inputs (phenotype, GRM, ancestry list, strata, index map, this
 # chromosome's Tractor files), and the adapter's counts file (read when the task ends)
 INPUTS=("${PHENO}" "${KINSHIP}" "${ANC_FILE}" "${STRATA_FILE}" "${TRACTOR_PREFIX}".*)
+[[ -n "${SAMPLE_INCLUDE}" ]] && INPUTS+=("${SAMPLE_INCLUDE}")
 [[ -f "${ANC_INDEX_MAP}" ]] && INPUTS+=("${ANC_INDEX_MAP}")
 rr_args "$(print_cmd "${CMD[@]}")" "${INPUTS[@]}"
 rr_sidecar "${RESULTS_DIR}/chr${CHR}.run_counts.tsv"

@@ -130,6 +130,19 @@ flowchart LR
     E --> O
 ```
 
+Samples (CP-17): the adapter analyses the phenotype rows that are in the Tractor files, in the
+stratum's `results/strata/<S>.samples.txt` (`--sample_include`), in the GRM (a joined sample missing
+from it stops the run: `sample X missing from GRM`), and complete on the outcome and every
+covariate. Rows dropped for a missing value are counted and reported before the null model is
+fitted. The **MAC gate** counts the **minor** allele: a variant is tested only if its stratum-wide
+minor allele count, `MAC_STRATUM = min(ALT, 2n - ALT)`, reaches `MAC_MIN`, and an ancestry's dose
+term only if that background's minor count, `MAC_<anc> = min(ALT_anc, haplotypes_anc - ALT_anc)`,
+does (an allele at ALT frequency 0.94 on a background has a small minor count). `MAC_MIN` stays 10
+until decided (the contract says 20). `STRATUM` is the first column of every table. The score test
+itself is in `bin/tractor_model.R`; `tests/test_tractor_model.R` checks it against `survival::coxph`
+(the Cox score statistic agrees to 1e-6, with and without covariates). The survival path needs no
+GENESIS, which is loaded only for the binary / quantitative null.
+
 Every covariate must be a numeric phenotype column: the adapter stops, naming the column
 (`covariate PCX not found in ...`, `covariate sex is not numeric ...`), before it reads a Tractor
 file or fits anything. Each results table starts with `## covariates=<the list used>` (global

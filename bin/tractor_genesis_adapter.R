@@ -32,21 +32,18 @@
 #   From Tractor ExtractTracts:
 #     - {prefix}.hapcount.{anc}.txt.gz: Haplotype counts per ancestry
 #     - {prefix}.dosage.{anc}.txt.gz: Ancestry-deconvoluted allele dosages
-#   Or from RFMix directly:
-#     - {prefix}.msp.tsv.gz: Local ancestry calls (MSP format)
-#     - VCF/GDS for genotypes
+#   (--msp / --gds, RFMix input, is not implemented: the run stops if it is given)
 #
 # ============================================================================
 
 suppressPackageStartupMessages({
-    library(GENESIS)
-    library(SeqArray)
-    library(SeqVarTools)
     library(survival)
     library(data.table)
     library(optparse)
     library(Matrix)
 })
+# GENESIS (fitNullModel, with GWASTools' ScanAnnotationDataFrame) is loaded below only for the
+# binary / quantitative null model; the survival path needs survival (+ coxme with a GRM).
 
 # ============================================================================
 # Command-line Arguments
@@ -92,7 +89,9 @@ option_list <- list(
 
     # Variant filters
     make_option(c("--mac_min"), type = "integer", default = 10,
-                help = "Minimum minor allele count on an ancestry background to test that ancestry's dose term [default: 10]"),
+                help = paste("Minimum MINOR allele count: a variant is tested only if its stratum-wide minor allele count",
+                             "(min(ALT, 2n - ALT)) reaches it, and an ancestry's dose term only if that background's does",
+                             "(min(ALT_a, haplotypes_a - ALT_a)) [default: 10]")),
 
     # Runtime
     make_option(c("--chunk_size"), type = "integer", default = 1000,
@@ -117,6 +116,9 @@ option_list <- list(
                              "column of the phenotype file); the outputs carry it in a STRATUM column")),
     make_option(c("--strata_file"), type = "character", default = NULL,
                 help = "sample_id<TAB>stratum table to check --stratum against (the handoff's ancestry/strata.tsv)"),
+    make_option(c("--sample_include"), type = "character", default = NULL,
+                help = paste("File of sample IDs (one per line; results/strata/<S>.samples.txt) the analysis is",
+                             "restricted to, intersected with the phenotype and Tractor samples")),
     make_option(c("--min_stratum_n"), type = "integer", default = 50,
                 help = paste("Fewer analysable samples than this: the stratum is skipped (exit 0, no results,",
                              "status skipped_below_min_stratum_n in <output_prefix>.run_counts.tsv) [default: 50]")),
@@ -144,9 +146,10 @@ if (is.null(opt$tractor_prefix) && is.null(opt$msp)) {
     stop("Required: --tractor_prefix OR (--msp and --gds)")
 }
 
-if (!is.null(opt$msp) && is.null(opt$gds)) {
-    stop("--gds required when using --msp input")
+if (!is.null(opt$msp) || !is.null(opt$gds)) {
+    stop("--msp / --gds (RFMix input) is not implemented: pass the Tractor files with --tractor_prefix")
 }
+if (opt$model != "survival") suppressPackageStartupMessages({ library(GENESIS); library(GWASTools) })
 
 # ============================================================================
 # SLURM Array Job Detection
@@ -189,7 +192,9 @@ if (!is.null(opt$ancestry_config) && file.exists(opt$ancestry_config)) {
 })
 source(file.path(.adapter_dir, "tractor_io.R"))
 source(file.path(.adapter_dir, "qc_assert.R"))    # qc_assert / qc_account (CP-11), check_covariates (CP-08)
-source(file.path(.adapter_dir, "sumstats_io.R"))  # fwrite_sumstats: "## covariates=" above every table (CP-08)
+source(file.path(.adapter_dir, "sumstats_io.R"))
+source(file.path(.adapter_dir, "tractor_model.R")) # the score test (genesis_ops, cox_ops, test_variant_tractor)
+dir.create(dirname(opt$output_prefix), recursive = TRUE, showWarnings = FALSE)  # fwrite_sumstats: "## covariates=" above every table (CP-08)
 
 # Parse ancestries
 ancestries <- strsplit(opt$ancestries, ",")[[1]]
@@ -339,6 +344,13 @@ acct("tractor_join", nrow(pheno), length(joined),
      sprintf("phenotype rows also in the Tractor files (%d Tractor samples have no phenotype row)", sum(!tractor_ids %in% pheno$sample_id)))
 qc_assert("adapter_sample_join", length(joined) > 0, n = length(joined),
           message = sprintf("%s: %d of %d phenotype rows and %d Tractor samples joined", qc_where, length(joined), nrow(pheno), length(tractor_ids)))
+if (!is.null(opt$sample_include)) {
+    if (!file.exists(opt$sample_include)) stop("--sample_include ", opt$sample_include, " does not exist")
+    keep_ids <- unique(trimws(readLines(opt$sample_include)))
+    n_j <- length(joined)
+    joined <- intersect(joined, keep_ids)
+    acct("sample_include", n_j, length(joined), paste("joined samples listed in", basename(opt$sample_include)))
+}
 if (!is.null(kinship)) {
     # The GRM is keyed by the .fam IID (docs/HANDOFF_CONTRACT.md rule 1): a joined sample missing
     # from it is a broken input, not something to drop quietly.
@@ -348,15 +360,33 @@ if (!is.null(kinship)) {
               message = if (length(off_grm) == 0) paste0(qc_where, ": every joined sample is in the GRM") else
                   sprintf("%s: %d joined samples are not in %s, e.g. %s", qc_where, length(off_grm), basename(opt$kinship),
                           paste(head(off_grm, 3), collapse = ", ")))
-    if (length(off_grm) > 0) stop(length(off_grm), " samples with phenotype and Tractor data are not in the GRM ",
-                                  opt$kinship, " (e.g. ", paste(head(off_grm, 3), collapse = ", "), ")")
+    if (length(off_grm) > 0) stop("sample ", off_grm[1], " missing from GRM ", opt$kinship, " (", length(off_grm),
+                                  " joined sample(s) are not in it: ", paste(head(off_grm, 5), collapse = ", "), ")")
 } else {
     qc_assert("adapter_grm_cover", verdict = "INFO", n = length(joined), message = paste0(qc_where, ": no --kinship; fitted without relatedness"))
 }
+# Covariates: the ones asked for, plus the global-ancestry columns when --global_ancestry_prefix
+covariates <- if (length(covariates_requested) > 0) covariates_requested else NULL
+if (!is.null(opt$global_ancestry_prefix)) {
+    ga_cols <- intersect(paste0(opt$global_ancestry_prefix, non_ref_anc), names(pheno))
+    if (length(ga_cols) > 0) {
+        covariates <- c(covariates, ga_cols)
+        cat("  Added global ancestry covariates:", paste(ga_cols, collapse = ", "), "\n")
+    }
+}
+# Complete cases (CP-17): the null model and the score test use only the joined samples with the
+# outcome and every covariate; the others are dropped here and counted, never left for a model
+# function to drop on its own (which misaligned residuals and genotypes before).
 outcome_cols <- if (opt$model == "survival") c(opt$time_col, opt$event_col) else opt$trait
-gate_covariates <- if (length(covariates_requested) > 0) covariates_requested else NULL
-n_null <- n_analysable(pheno, joined, outcome_cols, gate_covariates)
-acct("complete_cases", length(joined), n_null, paste("joined samples with", paste(c(outcome_cols, gate_covariates), collapse = ", ")))
+missing_cols <- setdiff(outcome_cols, names(pheno))
+if (length(missing_cols) > 0) stop("outcome column(s) not in ", opt$phenotype, ": ", paste(missing_cols, collapse = ", "))
+cc_cols <- c(outcome_cols, covariates)
+in_joined <- pheno$sample_id %in% joined
+analysable <- pheno$sample_id[in_joined & complete.cases(pheno[, cc_cols, with = FALSE])]
+n_null <- length(analysable)
+acct("complete_cases", length(joined), n_null, paste("joined samples with", paste(cc_cols, collapse = ", ")))
+if (n_null < length(joined)) cat("  Complete cases:", n_null, "of", length(joined), "joined samples;", length(joined) - n_null,
+                                 "dropped for a missing", paste(cc_cols, collapse = " / "), "value\n")
 acct("min_stratum_n", n_null, if (n_null < opt$min_stratum_n) 0 else n_null, paste("--min_stratum_n", opt$min_stratum_n))
 run_counts <- list(status = "ok", stratum = opt$stratum %||% NA, stratum_check = stratum_check$status,
                    min_stratum_n = opt$min_stratum_n, n_null = n_null, n_variants = NA,
@@ -431,9 +461,9 @@ read_tractor_files <- function(files, ancestries) {
 # Load Tractor data
 tractor_data <- read_tractor_files(tractor_files, ancestries)
 
-# Match samples between phenotype and Tractor data
-common_samples <- intersect(pheno$sample_id, tractor_data$sample_ids)
-cat("  Samples with both phenotype and genotype:", length(common_samples), "\n")
+# The analysed samples: complete cases (above) that are in the Tractor files, in phenotype order
+common_samples <- intersect(analysable, tractor_data$sample_ids)
+cat("  Samples analysed (complete cases with phenotype and Tractor data):", length(common_samples), "\n")
 
 if (length(common_samples) == 0) {
     stop("No overlapping samples between phenotype and Tractor data!")
@@ -457,18 +487,6 @@ n_variants <- nrow(tractor_data$variant_info)
 # ============================================================================
 cat("\nFitting null model...\n")
 
-# Parse covariates
-covariates <- if (length(covariates_requested) > 0) covariates_requested else NULL
-
-# Add global ancestry proportions as covariates if specified
-if (!is.null(opt$global_ancestry_prefix)) {
-    ga_cols <- paste0(opt$global_ancestry_prefix, non_ref_anc)
-    ga_cols <- intersect(ga_cols, names(pheno))
-    if (length(ga_cols) > 0) {
-        covariates <- c(covariates, ga_cols)
-        cat("  Added global ancestry covariates:", paste(ga_cols, collapse = ", "), "\n")
-    }
-}
 
 if (!is.null(covariates)) {
     cat("  Covariates:", paste(covariates, collapse = ", "), "\n")
@@ -502,85 +520,6 @@ cov_mat <- if (length(covariates) > 0) {
     m <- as.matrix(pheno[, covariates, with = FALSE]); storage.mode(m) <- "double"; m
 } else NULL
 
-# --- helpers for GENESIS null-model geometry ---------------------------------
-# GENESIS stores cholSigmaInv = L with SigmaInv = L L'; CX = L'X; CXCXI = CX (CX'CX)^-1
-.as_L <- function(nm, n) {
-    L <- nm$cholSigmaInv
-    if (is.null(L)) stop("GENESIS null model has no cholSigmaInv; update GENESIS (>= 2.16)")
-    if (is.matrix(L) || inherits(L, "Matrix")) return(L)
-    if (length(L) == n) return(Matrix::Diagonal(n, x = as.numeric(L)))
-    Matrix::Diagonal(n, x = rep(as.numeric(L)[1], n))
-}
-.crossL <- function(L, M) as.matrix(Matrix::crossprod(L, M))   # L'M
-.multL  <- function(L, v) as.numeric(L %*% v)                    # L v
-
-genesis_ops <- function(nm, n) {
-    L <- .as_L(nm, n)
-    CX <- as.matrix(nm$CX); CXCXI <- as.matrix(nm$CXCXI)
-    PY <- nm$fit$resid.PY %||% nm$resid
-    if (is.null(PY)) {
-        Y  <- nm$fit$workingY %||% nm$workingY
-        Yt <- .crossL(L, Y)
-        PY <- .multL(L, Yt - CXCXI %*% crossprod(CX, Yt))
-    }
-    list(
-        type = "genesis",
-        PY = as.numeric(PY),
-        # projected cross-product  D'PD  for a design matrix D (n x p)
-        proj_crossprod = function(D) {
-            Dt <- .crossL(L, D)
-            crossprod(Dt) - crossprod(Dt, CXCXI) %*% crossprod(CX, Dt)
-        }
-    )
-}
-
-cox_ops <- function(time, event, eta, Xc) {
-    w <- exp(eta)
-    n <- length(time)
-    # Breslow baseline hazard and martingale residuals under the null
-    ord_asc <- order(time, -event)
-    t_a <- time[ord_asc]; w_a <- w[ord_asc]; e_a <- event[ord_asc]
-    S0_a <- rev(cumsum(rev(w_a)))                      # sum_{j: t_j >= t_i} w_j
-    S0_a <- S0_a[match(t_a, t_a)]                      # ties share one risk set
-    dL   <- ifelse(e_a == 1, 1 / S0_a, 0)
-    Lam  <- ave(cumsum(dL), t_a, FUN = max)            # Lambda0(t_i) incl. all events at t_i
-    mart <- numeric(n); mart[ord_asc] <- e_a - Lam * w_a
-
-    # Risk-set machinery in DESCENDING time: risk set of t_k = positions 1..last(tie group)
-    ord_d <- order(-time, event)
-    t_d <- time[ord_d]; w_d <- w[ord_d]; e_d <- event[ord_d]
-    last_idx <- ave(seq_along(t_d), t_d, FUN = max)
-    ev_pos <- which(e_d == 1)
-    Xc_d <- if (!is.null(Xc)) Xc[ord_d, , drop = FALSE] else NULL
-
-    # Observed information (Breslow) for full design A = [D | Xc], then project on Xc
-    info <- function(A_d) {
-        p <- ncol(A_d)
-        S0 <- cumsum(w_d)[last_idx]
-        S1 <- apply(w_d * A_d, 2, cumsum)[last_idx, , drop = FALSE]
-        I  <- matrix(0, p, p)
-        for (a in 1:p) for (b in a:p) {
-            S2 <- cumsum(w_d * A_d[, a] * A_d[, b])[last_idx]
-            v  <- sum((S2 / S0 - (S1[, a] / S0) * (S1[, b] / S0))[ev_pos])
-            I[a, b] <- v; I[b, a] <- v
-        }
-        I
-    }
-    q <- if (is.null(Xc_d)) 0 else ncol(Xc_d)
-    list(
-        type = "cox",
-        PY = mart,
-        proj_crossprod = function(D) {
-            A <- if (q > 0) cbind(D[ord_d, , drop = FALSE], Xc_d) else D[ord_d, , drop = FALSE]
-            I <- info(A)
-            p <- ncol(D)
-            if (q == 0) return(I)
-            iD <- 1:p; iX <- (p + 1):(p + q)
-            I[iD, iD] - I[iD, iX] %*% solve(I[iX, iX] + diag(1e-8, q)) %*% I[iX, iD]
-        }
-    )
-}
-
 # --- fit the null model ------------------------------------------------------
 if (opt$model == "survival") {
     if (!all(c(opt$time_col, opt$event_col) %in% names(pheno))) {
@@ -588,7 +527,7 @@ if (opt$model == "survival") {
     }
     surv_time  <- as.numeric(pheno[[opt$time_col]])
     surv_event <- as.integer(pheno[[opt$event_col]])
-    if (anyNA(surv_time) || anyNA(surv_event)) stop("Missing time/event values - filter the phenotype file first")
+    if (anyNA(surv_time) || anyNA(surv_event)) stop("missing time / event values after the complete-case filter (a bug)")
 
     surv_df <- data.frame(time = surv_time, event = surv_event)
     if (!is.null(cov_mat)) surv_df <- cbind(surv_df, as.data.frame(cov_mat))
@@ -650,147 +589,15 @@ qc_assert("adapter_model_n", model_n == n_null, n = model_n,
 saveRDS(nullmod, paste0(opt$output_prefix, ".null_model.rds"))
 
 # ============================================================================
-# Association Testing Functions
-# ============================================================================
-
-# Main test function for a single variant
-#
-# Conditional score test (identical for binary / quantitative / survival):
-#   D = [LA_1..LA_{k-1} | Dose_1..Dose_k]
-#   U = D' P y ,  M = D' P D      (P, Py supplied by null_ops)
-#   Dose block conditioned on the LA block (Schur complement):
-#     U_c = U_G - M_GZ M_ZZ^-1 U_Z ,   V_c = M_GG - M_GZ M_ZZ^-1 M_ZG
-#   Joint (k-df):    U_c' V_c^-1 U_c  ~ chi2_k       (H0: all dose effects 0)
-#   Per-ancestry:    beta = V_c^-1 U_c (one-step estimate), se = sqrt(diag V_c^-1)
-#   Heterogeneity:   contrasts C beta (beta_j - beta_1),  Q = (Cb)'(C V_c^-1 C')^-1 (Cb) ~ chi2_{k-1}
-#                    - uses the full covariance, so correlated dose terms are handled
-empty_result <- function(ancestries, n_dose, mac, status) list(
-    joint = list(stat = NA, df = n_dose, p = NA),
-    marginal = setNames(lapply(ancestries, function(a) list(ancestry = a, beta = NA, se = NA, z = NA, p = NA)), ancestries),
-    het = list(Q = NA, df = n_dose - 1, p = NA, I2 = NA),
-    n_eff = NA, mac = mac,
-    status = status          # "mac": no ancestry passed the MAC gate; "error": the test failed
-)
-
-test_variant_tractor <- function(
-    la_vec,      # Named list: LA counts per ancestry (k-1 non-ref ancestries)
-    dose_vec,    # Named list: Dosages per ancestry (all k ancestries)
-    null_ops,    # list(PY, proj_crossprod) from the null model
-    ancestries,  # All ancestry names
-    ref_anc,     # Reference ancestry
-    mac_min = 10
-) {
-    n <- length(dose_vec[[1]])
-    non_ref <- setdiff(ancestries, ref_anc)
-    n_dose <- length(ancestries)
-
-    # Build design: LA terms then Dose terms; mean-impute sporadic missingness
-    D <- matrix(0, nrow = n, ncol = length(non_ref) + n_dose)
-    colnames(D) <- c(paste0("LA_", non_ref), paste0("Dose_", ancestries))
-    for (anc in non_ref)    D[, paste0("LA_", anc)]   <- as.numeric(la_vec[[anc]])
-    for (anc in ancestries) D[, paste0("Dose_", anc)] <- as.numeric(dose_vec[[anc]])
-    n_missing <- sum(!complete.cases(D))
-    if (n_missing > 0) {
-        for (j in seq_len(ncol(D))) { miss <- is.na(D[, j]); if (any(miss)) D[miss, j] <- mean(D[, j], na.rm = TRUE) }
-    }
-
-    # Minor allele count per ancestry background
-    mac <- sapply(ancestries, function(a) sum(D[, paste0("Dose_", a)]))
-    names(mac) <- ancestries
-    testable <- ancestries[mac >= mac_min & apply(D[, paste0("Dose_", ancestries), drop = FALSE], 2, var) > 1e-10]
-    if (length(testable) == 0) return(empty_result(ancestries, n_dose, mac, "mac"))
-
-    # Drop LA columns with no variation (e.g. no AFR tracts in this chunk)
-    la_cols <- paste0("LA_", non_ref)
-    la_cols <- la_cols[apply(D[, la_cols, drop = FALSE], 2, var) > 1e-10]
-    g_cols  <- paste0("Dose_", testable)
-    Dk <- D[, c(la_cols, g_cols), drop = FALSE]
-
-    res <- tryCatch({
-        U <- as.numeric(crossprod(Dk, null_ops$PY))
-        M <- as.matrix(null_ops$proj_crossprod(Dk))
-        iZ <- seq_along(la_cols); iG <- length(la_cols) + seq_along(g_cols)
-
-        if (length(iZ) > 0) {
-            MZZi <- solve(M[iZ, iZ, drop = FALSE] + diag(1e-8, length(iZ)))
-            U_c <- U[iG] - M[iG, iZ, drop = FALSE] %*% MZZi %*% U[iZ]
-            V_c <- M[iG, iG, drop = FALSE] - M[iG, iZ, drop = FALSE] %*% MZZi %*% M[iZ, iG, drop = FALSE]
-        } else { U_c <- U[iG]; V_c <- M[iG, iG, drop = FALSE] }
-        V_c <- (V_c + t(V_c)) / 2
-        V_inv <- solve(V_c + diag(1e-8, nrow(V_c)))
-
-        # Joint test
-        stat_joint <- as.numeric(t(U_c) %*% V_inv %*% U_c)
-        df_joint <- length(iG)
-        p_joint <- pchisq(stat_joint, df_joint, lower.tail = FALSE)
-
-        # Per-ancestry one-step estimates
-        beta <- as.numeric(V_inv %*% U_c); se <- sqrt(diag(V_inv))
-        z <- beta / se; p <- 2 * pnorm(-abs(z))
-        marginal <- setNames(lapply(ancestries, function(a) list(ancestry = a, beta = NA, se = NA, z = NA, p = NA)), ancestries)
-        for (i in seq_along(testable)) {
-            marginal[[testable[i]]] <- list(ancestry = testable[i], beta = beta[i], se = se[i], z = z[i], p = p[i])
-        }
-
-        # Heterogeneity across ancestry backgrounds (covariance-aware)
-        if (length(testable) >= 2) {
-            k <- length(testable)
-            C <- cbind(-1, diag(k - 1))               # beta_j - beta_1
-            Cb <- C %*% beta
-            Q <- as.numeric(t(Cb) %*% solve(C %*% V_inv %*% t(C) + diag(1e-10, k - 1)) %*% Cb)
-            df_het <- k - 1
-            p_het <- pchisq(Q, df_het, lower.tail = FALSE)
-            I2 <- max(0, (Q - df_het) / Q * 100)
-        } else { Q <- NA; df_het <- n_dose - 1; p_het <- NA; I2 <- NA }
-
-        list(joint = list(stat = stat_joint, df = df_joint, p = p_joint),
-             marginal = marginal,
-             het = list(Q = Q, df = df_het, p = p_het, I2 = I2),
-             n_eff = n - n_missing, mac = mac, status = "ok")
-    }, error = function(e) empty_result(ancestries, n_dose, mac, "error"))
-
-    res
-}
-
-# ============================================================================
 # Run Association Tests
 # ============================================================================
 cat("\nRunning association tests...\n")
 cat("  Variants:", n_variants, "\n")
 cat("  Chunk size:", opt$chunk_size, "\n")
 
-# Initialize results storage
-results <- data.table(
-    CHR = character(),
-    POS = integer(),
-    ID = character(),
-    REF = character(),
-    ALT = character(),
-    N = integer(),
-
-    # Joint test
-    STAT_JOINT = numeric(),
-    DF_JOINT = integer(),
-    P_JOINT = numeric()
-)
-
-# Add ancestry-specific columns dynamically
-for (anc in ancestries) {
-    results[[paste0("MAC_", anc)]] <- numeric()     # minor allele count on this background
-    results[[paste0("BETA_", anc)]] <- numeric()
-    results[[paste0("SE_", anc)]] <- numeric()
-    results[[paste0("Z_", anc)]] <- numeric()
-    results[[paste0("P_", anc)]] <- numeric()
-}
-
-# Heterogeneity columns
-results$Q_HET <- numeric()
-results$DF_HET <- integer()
-results$P_HET <- numeric()
-results$I2 <- numeric()
-
 # Process variants
 n_status <- c(ok = 0L, mac = 0L, error = 0L)      # per-variant outcome, for <output_prefix>.run_counts.tsv
+rows <- vector("list", n_variants)
 pb_interval <- max(1, floor(n_variants / 20))
 start_time <- Sys.time()
 
@@ -798,22 +605,16 @@ for (v in 1:n_variants) {
     # Get variant info
     var_info <- tractor_data$variant_info[v, ]
 
-    # Extract LA and Dose for this variant
-    la_vec <- list()
-    dose_vec <- list()
-
-    for (anc in ancestries) {
-        dose_vec[[anc]] <- tractor_data$dosage[[anc]][v, ]
-
-        if (anc != ref_anc) {
-            la_vec[[anc]] <- tractor_data$hapcount[[anc]][v, ]
-        }
-    }
+    # LA (non-reference hapcounts), dose and hapcount (every ancestry) for this variant
+    dose_vec <- lapply(setNames(ancestries, ancestries), function(a) tractor_data$dosage[[a]][v, ])
+    hap_vec  <- lapply(setNames(ancestries, ancestries), function(a) tractor_data$hapcount[[a]][v, ])
+    la_vec   <- hap_vec[non_ref_anc]
 
     # Run test (same conditional score test for binary / quantitative / survival)
     res <- test_variant_tractor(
         la_vec = la_vec,
         dose_vec = dose_vec,
+        hap_vec = hap_vec,
         null_ops = null_ops,
         ancestries = ancestries,
         ref_anc = ref_anc,
@@ -822,35 +623,7 @@ for (v in 1:n_variants) {
 
     n_status[[res$status]] <- n_status[[res$status]] + 1L
 
-    # Build result row
-    row <- data.table(
-        CHR = as.character(var_info$CHR),
-        POS = as.integer(var_info$POS),
-        ID = if ("ID" %in% names(var_info)) as.character(var_info$ID) else paste0(var_info$CHR, ":", var_info$POS),
-        REF = if ("REF" %in% names(var_info)) as.character(var_info$REF) else NA_character_,
-        ALT = if ("ALT" %in% names(var_info)) as.character(var_info$ALT) else NA_character_,
-        N = res$n_eff,
-        STAT_JOINT = res$joint$stat,
-        DF_JOINT = res$joint$df,
-        P_JOINT = res$joint$p
-    )
-
-    # Add ancestry-specific results
-    for (anc in ancestries) {
-        row[[paste0("MAC_", anc)]] <- as.numeric(res$mac[[anc]])
-        row[[paste0("BETA_", anc)]] <- res$marginal[[anc]]$beta
-        row[[paste0("SE_", anc)]] <- res$marginal[[anc]]$se
-        row[[paste0("Z_", anc)]] <- res$marginal[[anc]]$z
-        row[[paste0("P_", anc)]] <- res$marginal[[anc]]$p
-    }
-
-    # Add heterogeneity results
-    row$Q_HET <- res$het$Q
-    row$DF_HET <- res$het$df
-    row$P_HET <- res$het$p
-    row$I2 <- res$het$I2
-
-    results <- rbind(results, row)
+    rows[[v]] <- result_row(var_info, res, ancestries, opt$stratum)
 
     # Progress
     if (v %% pb_interval == 0 || v == n_variants) {
@@ -862,6 +635,7 @@ for (v in 1:n_variants) {
     }
 }
 cat("\n")
+results <- rbindlist(rows)       # STRATUM (with --stratum) is the first column (result_row)
 
 # ============================================================================
 # Write Results
@@ -872,8 +646,6 @@ cat("\nWriting results...\n")
 # 1. Genomic order (for LD, fine-mapping, visualization)
 # 2. P-value order (for quick interpretation)
 
-# --stratum labels every output table
-if (!is.null(opt$stratum)) results[, STRATUM := opt$stratum]
 
 results_genomic <- copy(results)
 results_genomic[, CHR_NUM := as.integer(gsub("chr|X|Y|M", "", CHR, ignore.case = TRUE))]
