@@ -51,7 +51,7 @@ GWAS_DIR="${SCRIPT_DIR}/results/gwas/${TRAIT}"     # Tractor-GENESIS output for 
 RESULTS_DIR="${SCRIPT_DIR}/results/gxg/${TRAIT}"
 # Phenotype with PC-AiR PCs (step 0) if present, else the raw phenotype file
 PCAIR_PHENO="${SCRIPT_DIR}/results/pcair/cohort.phenotypes.with_pcs.tsv"
-PHENO="${PHENO:-$([[ -f "${PCAIR_PHENO}" ]] && echo "${PCAIR_PHENO}" || echo "${DATA_DIR}"/phenotypes/phenotypes.tsv)}"
+PHENO="${PHENO:-$([[ -f "${PCAIR_PHENO}" ]] && echo "${PCAIR_PHENO}" || echo "${PHENO_IN:-${HANDOFF_DIR:-${SCRIPT_DIR}/data/handoff}/phenotypes/phenotypes.tsv}")}"
 echo "Phenotype: ${PHENO}"
 mkdir -p "${RESULTS_DIR}"
 

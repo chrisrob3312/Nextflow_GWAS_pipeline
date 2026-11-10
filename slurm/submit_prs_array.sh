@@ -81,7 +81,7 @@ GENO="${DATA_DIR}/genotypes/cohort"
 LOCAL_ANC="${DATA_DIR}/local_ancestry/cohort.msp.tsv.gz"
 
 # Phenotype for validation
-PHENO="${DATA_DIR}/phenotypes/phenotypes.tsv"
+PHENO="${PHENO_IN:-${HANDOFF_DIR:-${SCRIPT_DIR}/data/handoff}/phenotypes/phenotypes.tsv}"
 
 # Ancestries: the cohort's list, next to the cohort-wide Tractor files (data/tractor/ancestries.txt).
 # PRS_ANCESTRY_PROPS (global ancestry proportions for the weighted combined score) must name exactly

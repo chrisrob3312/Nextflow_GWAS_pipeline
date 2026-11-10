@@ -36,14 +36,19 @@ unset -f conda 2>/dev/null
 C="${W}/repo"
 rm -rf "${C:?}" "${W:?}/slurm" "${W:?}/envs" "${W:?}/scratch"; mkdir -p "$C"
 tar -C "$REPO" --exclude=./.git --exclude=./results --exclude=./logs --exclude=./data --exclude=./work -cf - . | tar -C "$C" -xf -
+REAL_RSCRIPT="$(command -v Rscript || true)"     # before the fakes go on PATH
 export FAKE_SLURM_DIR="${W}/slurm"; mkdir -p "$FAKE_SLURM_DIR"
 export PATH="${C}/tests/fakes:${PATH}"
 export GWAS_ENVS_DIR="${W}/envs" GWAS_SCRATCH="${W}/scratch"
 mkdir -p "${W}/envs/"{gwas-r,gwas-py,lai,mrmega}/bin "${W}/scratch"
 # Stub Rscript inside the gwas-r env: emulates bin/check_r_libs.R (packages in FAKE_R_MISSING are
 # missing), and stands in for every analysis script (prints its arguments, exits FAKE_RSCRIPT_EXIT).
-cat > "${W}/envs/gwas-r/bin/Rscript" <<'EOF'
+cat > "${W}/envs/gwas-r/bin/Rscript" <<EOF
 #!/usr/bin/env bash
+# Scripts that need only base R + data.table run in the real R (when there is one)
+case "\${1:-}" in */ingest_structure.R) [[ -n "${REAL_RSCRIPT}" ]] && exec "${REAL_RSCRIPT}" "\$@" ;; esac
+EOF
+cat >> "${W}/envs/gwas-r/bin/Rscript" <<'EOF'
 if [[ "${1:-}" == */check_r_libs.R ]]; then
     shift; bad=0
     for p in "$@"; do
@@ -73,9 +78,8 @@ printf 'EUR\n' > "${C}/data/tractor/EUR/ancestries.txt"
 printf 'AFR\nEUR\n' > "${C}/data/tractor/AAC/ancestries.txt"
 for s in LAT1 LAT2 OTHER; do printf 'AFR\nAMR\nEUR\n' > "${C}/data/tractor/${s}/ancestries.txt"; done
 printf 'AFR\nAMR\nEUR\n' > "${C}/data/tractor/ancestries.txt"       # cohort-wide list (GxG pooled, PRS)
-mkdir -p "${C}/data/phenotypes"     # the handoff contract's phenotype header (docs/HANDOFF_CONTRACT.md)
-printf 'FID\tIID\tsample_id\tmrd\tefs_time\tefs_event\tos_time\tos_event\tprotocol\tage\tsex\nF1\tS1\tS1\t0\t10\t1\t20\t0\tP1\t5\t1\n' \
-    > "${C}/data/phenotypes/phenotypes.tsv"
+# the handoff bundle (HANDOFF_DIR default <repo>/data/handoff): the stub the checker's tests use
+bash "${C}/scripts/test/make_stub_bundle.sh" "${C}/data/handoff" >/dev/null 2>&1 || echo "  (make_stub_bundle.sh failed)"
 L="${C}/slurm/submit_full_pipeline.sh"
 G="${C}/slurm/submit_gwas_array.sh"
 SITE=(SLURM_PARTITION=testpart SLURM_ACCOUNT=testacct)
@@ -400,7 +404,7 @@ rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results" "${C:?}/logs"; mkdir -p "${C}/lo
 out="$(cd "$C" && env "${SITE[@]}" FAKE_SBATCH_RUN=1 sbatch --parsable --partition=testpart --account=testacct \
         --output="${C}/logs/pcair_%j.out" slurm/submit_pcair.sh 2>&1)"
 jid="$(tail -1 <<< "$out")"
-grep -q 'stub Rscript: .*genesis_pcair_pcrelate.R' "${C}/logs/pcair_${jid}.out" 2>/dev/null \
+grep -q 'structure ingested from bundle\|stub Rscript: .*ingest_structure.R' "${C}/logs/pcair_${jid}.out" 2>/dev/null \
     && ok "from the repo root: the job finds the repo through SLURM_SUBMIT_DIR and runs" || bad "direct submit: $(cat "${C}/logs/pcair_${jid}.out" 2>&1 | tail -3)"
 ls "${C}/results/run_record/direct_${jid}/trace.d/"pcair.*.tsv >/dev/null 2>&1 && ok "its trace row goes to results/run_record/direct_${jid}/" || bad "direct trace row"
 out="$(cd /tmp && env "${SITE[@]}" FAKE_SBATCH_RUN=1 sbatch --parsable --output="${W}/pcair_elsewhere.out" "${C}/slurm/submit_pcair.sh" 2>&1)"
@@ -435,14 +439,58 @@ grep -q 'EUR,AFR,AMR' "$REPO/slurm/submit_gxg_array.sh" "$REPO/slurm/submit_prs_
 grep -q '^TRAITS=' "$REPO/bin/slurm_utils.sh" && bad "slurm_utils.sh still sets TRAITS" || ok "slurm_utils.sh no longer sets or exports TRAITS"
 
 section "GWAS array: strata file and index map reach the adapter when present"
-out="$(cd /tmp && DRY_RUN=1 bash "$G" EUR os survival 2>&1)"
-has "$out" "data/ancestry/strata.tsv not found" && ! grep -q -- '--strata_file' <<< "$(grep '^\[DRY-RUN\]' <<< "$out")" && ok "no strata file: not passed, and the log says the check falls back" || bad "no strata file: $out"
-mkdir -p "${C}/data/ancestry"; printf 'sample_id\tstratum\nS1\tEUR\n' > "${C}/data/ancestry/strata.tsv"
-printf 'anc_index\tlabel\n0\tAFR\n1\tAMR\n2\tEUR\n' > "${C}/data/tractor/flare_index_map.tsv"
+out="$(cd /tmp && DRY_RUN=1 STRATA_FILE=/nonexistent/strata.tsv bash "$G" EUR os survival 2>&1)"
+has "$out" "/nonexistent/strata.tsv not found" && ! grep -q -- '--strata_file' <<< "$(grep '^\[DRY-RUN\]' <<< "$out")" && ok "no strata file: not passed, and the log says the check falls back" || bad "no strata file: $out"
 out="$(cd /tmp && DRY_RUN=1 bash "$G" EUR os survival 2>&1 | grep '^\[DRY-RUN\]')"
-has "$out" "--strata_file ${C}/data/ancestry/strata.tsv" && has "$out" "--ancestry_index_map ${C}/data/tractor/flare_index_map.tsv" && has "$out" "--min_stratum_n 50 " \
-    && ok "strata file, index map and MIN_STRATUM_N 50 passed" || bad "args: $out"
-rm -f "${C}/data/ancestry/strata.tsv" "${C}/data/tractor/flare_index_map.tsv"
+has "$out" "--strata_file ${C}/data/handoff/ancestry/strata.tsv" && has "$out" "--ancestry_index_map ${C}/data/handoff/local_ancestry/flare_index_map.tsv" && has "$out" "--min_stratum_n 50 " \
+    && ok "the bundle's strata.tsv and flare_index_map.tsv (HANDOFF_DIR) and MIN_STRATUM_N 50 passed" || bad "args: $out"
+
+section "CP-07: step 0 ingests the bundle's structure (no PC-AiR); refuses rather than recomputes"
+if [[ -n "${REAL_RSCRIPT}" ]] && "${REAL_RSCRIPT}" -e 'quit(status = !requireNamespace("data.table", quietly = TRUE))' >/dev/null 2>&1 \
+   && ! grep -q "placeholder rds" "${C}/data/handoff/structure/cohort.pcrelate.grm.rds"; then
+    rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results" "${C:?}/logs"; mkdir -p "${C}/logs"
+    pcair() { (cd "$C" && env "${SITE[@]}" GWAS_REPO="$C" FAKE_SBATCH_RUN=1 "$@" sbatch --parsable --output="${C}/logs/pcair_%j.out" slurm/submit_pcair.sh 2>&1 | head -1); }
+    jid="$(pcair)"; lg="${C}/logs/pcair_${jid}.out"
+    grep -q "structure ingested from bundle" "$lg" && ! grep -q "genesis_pcair_pcrelate" "$lg" && grep -q "^${jid}|COMPLETED|0:0" "${FAKE_SLURM_DIR}/sacct.db" \
+        && ok "exit 0, logs 'structure ingested from bundle', PC-AiR not run" || bad "ingest: $(tail -5 "$lg")"
+    grep -q "dimnames == .fam IID" "$lg" && ok "GRM and kinship dimnames checked against the .fam IIDs" || bad "dimnames check: $(grep -i dimnames "$lg")"
+    for S in AFR AMR EUR MIX; do [[ -s "${C}/results/pcair/${S}.phenotypes.with_pcs.tsv" && -s "${C}/results/strata/${S}.samples.txt" ]] || bad "no ${S} outputs"; done
+    eur_h="$(head -1 "${C}/results/pcair/EUR.phenotypes.with_pcs.tsv")"; coh_h="$(head -1 "${C}/results/pcair/cohort.phenotypes.with_pcs.tsv")"
+    [[ "$eur_h" == *$'\tPC1\tPC2' && "$coh_h" == *$'\tPC1\tPC2\tPC3' && "$(wc -l < "${C}/results/pcair/EUR.phenotypes.with_pcs.tsv")" -eq 4 ]] \
+        && ok "per stratum: its members (EUR: 3) with its own within-stratum PCs; cohort PCs for POOLED" || bad "with_pcs: $eur_h / $coh_h"
+    [[ "$(cat "${C}/results/strata/EUR.samples.txt" | paste -sd, -)" == "S001,S002,S003" ]] && ok "results/strata/<S>.samples.txt from strata.tsv" || bad "samples.txt"
+    [[ "$(readlink "${C}/results/pcair/cohort.pcrelate.grm.rds")" == "${C}/data/handoff/structure/cohort.pcrelate.grm.rds" ]] \
+        && ok "the GRM is the shipped file, linked unchanged (the adapter's --kinship)" || bad "grm link: $(ls -l "${C}/results/pcair/")"
+    out="$(cd /tmp && DRY_RUN=1 bash "$G" EUR os survival 2>&1 | grep '^\[DRY-RUN\]')"
+    has "$out" "--phenotype ${C}/results/pcair/EUR.phenotypes.with_pcs.tsv" && has "$out" "--kinship ${C}/results/pcair/cohort.pcrelate.grm.rds" \
+        && ok "GWAS EUR task: within-stratum phenotype and the shipped GRM" || bad "gwas inputs: $out"
+    out="$(cd /tmp && DRY_RUN=1 bash "$G" POOLED os survival 2>&1)"   # POOLED has no ancestries.txt in the fixture; only check the phenotype choice
+    has "$out" "Phenotype: ${C}/results/pcair/cohort.phenotypes.with_pcs.tsv" && ok "POOLED task: cohort PCs" || bad "pooled pheno: $(grep Phenotype <<< "$out")"
+    mv "${C}/data/handoff/structure/strata/AMR.pcair.pcs.tsv" "${W}/AMR.away"
+    jid="$(pcair)"; lg="${C}/logs/pcair_${jid}.out"
+    grep -q "REFUSED: structure ingest: missing or empty .*structure/strata/AMR.pcair.pcs.tsv" "$lg" && grep -q "^${jid}|FAILED|2:0" "${FAKE_SLURM_DIR}/sacct.db" \
+        && ok "a stratum without its PC file: refused, naming the file" || bad "missing stratum PCs: $(tail -3 "$lg")"
+    mv "${W}/AMR.away" "${C}/data/handoff/structure/strata/AMR.pcair.pcs.tsv"
+    mv "${C}/data/handoff/structure" "${W}/structure.away"
+    jid="$(pcair)"; lg="${C}/logs/pcair_${jid}.out"
+    grep -q "REFUSED: structure ingest: missing or empty .*structure/cohort.pcair.pcs.tsv" "$lg" && ! grep -q "genesis_pcair_pcrelate" "$lg" \
+        && ok "structure/ removed: refused, naming the file, nothing recomputed" || bad "no structure: $(tail -3 "$lg")"
+    out="$(cd /tmp && env "${SITE[@]}" "$L" 2>&1)"; rc=$?
+    [[ $rc -ne 0 ]] && has "$out" "REFUSED: missing ${C}/data/handoff/structure/cohort.pcair.pcs.tsv" && ok "the launcher refuses before queuing, too" || bad "launcher: rc=$rc"
+    mv "${W}/structure.away" "${C}/data/handoff/structure"
+    cp "${C}/data/handoff/structure/cohort.pcrelate.grm.rds" "${W}/grm.keep"
+    "${REAL_RSCRIPT}" -e 'm <- readRDS(commandArgs(TRUE)[1]); dimnames(m) <- list(paste0("X", rownames(m)), paste0("X", colnames(m))); saveRDS(m, commandArgs(TRUE)[1])' "${C}/data/handoff/structure/cohort.pcrelate.grm.rds"
+    jid="$(pcair)"; lg="${C}/logs/pcair_${jid}.out"
+    grep -q "dimnames are not the .fam IIDs" "$lg" && ok "a GRM keyed by other IDs: refused" || bad "grm dimnames: $(tail -3 "$lg")"
+    cp "${W}/grm.keep" "${C}/data/handoff/structure/cohort.pcrelate.grm.rds"
+    out="$(cd /tmp && env "${SITE[@]}" STRUCTURE_SOURCE=compute "$L" --dry-run 2>&1)"
+    has "$out" "STEP 0: Submitting structure (compute: PC-AiR / PC-Relate)" && ok "STRUCTURE_SOURCE=compute runs the comparator instead, only when asked" || bad "compute: $(grep 'STEP 0' <<< "$out")"
+    out="$(cd /tmp && env "${SITE[@]}" STRUCTURE_SOURCE=recompute "$L" --dry-run 2>&1)"; rc=$?
+    [[ $rc -ne 0 ]] && has "$out" "STRUCTURE_SOURCE=recompute; use bundle or compute" && ok "STRUCTURE_SOURCE outside {bundle, compute}: refused" || bad "bogus source: rc=$rc"
+    rm -rf "${C:?}/results" "${C:?}/logs"
+else
+    echo "  (real R with data.table, or real .rds files in the stub bundle, not available: CP-07 checks skipped)"
+fi
 
 section "Run record: the adapter's counts and a stratum skipped below MIN_STRATUM_N"
 rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results" "${C:?}/logs"

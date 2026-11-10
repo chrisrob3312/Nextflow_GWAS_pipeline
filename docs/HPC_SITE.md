@@ -11,6 +11,7 @@ per cluster, then export the variables before launching (for example from a smal
 |---|---|---|---|
 | partition | `SLURM_PARTITION` | ________ | every sbatch; the launcher refuses to run without it |
 | account | `SLURM_ACCOUNT` | ________ | every sbatch; the launcher refuses to run without it |
+| handoff bundle | `HANDOFF_DIR` | ________ (default `<repo>/data/handoff`) | everything shipped: structure, strata, phenotypes, index map |
 | log directory | `LOG_DIR` | default `<repo>/logs` | every job's `--output` / `--error` (always an absolute path) |
 | scratch | `GWAS_SCRATCH` | ________ | `TMPDIR` is `$GWAS_SCRATCH/tmp` unless the site sets `SLURM_TMPDIR` (see TMPDIR below) |
 | does the site set `SLURM_TMPDIR` in jobs? | `SLURM_TMPDIR` | yes / no, filesystem: ________ | first choice for `TMPDIR` |

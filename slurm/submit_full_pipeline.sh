@@ -5,7 +5,8 @@
 # Submits complete multi-ancestry GWAS pipeline with proper dependencies
 #
 # Workflow:
-#   0. PC-AiR / PC-Relate (skip with SKIP_PCAIR=true)
+#   0. Structure: ingest the bundle's PCs and GRM (STRUCTURE_SOURCE=bundle, default), or
+#      compute them with PC-AiR / PC-Relate (=compute); skip with SKIP_PCAIR=true
 #   1. GWAS: Run Tractor-GENESIS for each ancestry stratum (22 chr × 5 strata)
 #   2. Combine: Merge chromosomes, run meta-analysis for OTHER
 #   3. PRS: Run 6 methods × 3 traits                         only with RUN_PRS=true
@@ -114,7 +115,8 @@ fi
 # Every trait's columns must be in the phenotype file: a binary trait its own column, a survival
 # trait <trait>_time and <trait>_event (or its TIME_COL_<trait> / EVENT_COL_<trait>). Checked
 # here, on the header, before anything is queued. A dry run warns; a launch refuses.
-PHENO_SOURCE="${PHENO_IN:-${REPO}/data/phenotypes/phenotypes.tsv}"
+export HANDOFF_DIR="${HANDOFF_DIR:-${REPO}/data/handoff}"   # the handoff bundle (docs/HPC_SITE.md)
+PHENO_SOURCE="${PHENO_IN:-${HANDOFF_DIR}/phenotypes/phenotypes.tsv}"
 PHENO_HEADER=""
 [[ -s "${PHENO_SOURCE}" ]] && PHENO_HEADER="$(head -1 "${PHENO_SOURCE}" | tr '\t' '\n')"
 SURV_COLS=()
@@ -142,7 +144,23 @@ if [[ ${#PHENO_PROBLEMS[@]} -gt 0 ]]; then
         exit 2
     fi
 fi
-RR_EXTRA_PARAMS="$(printf 'SURVIVAL_COLUMNS\t%s\tderived' "$(IFS=,; echo "${SURV_COLS[*]:-none}")")"
+# Step 0 ingests the bundle's structure (CP-07) unless STRUCTURE_SOURCE=compute: its files must be there
+case "${STRUCTURE_SOURCE}" in
+    bundle|compute) ;;
+    *) echo "REFUSED: STRUCTURE_SOURCE=${STRUCTURE_SOURCE}; use bundle or compute" >&2; exit 2 ;;
+esac
+if [[ "${STRUCTURE_SOURCE}" == bundle && "${SKIP_PCAIR}" != true ]]; then
+    MISSING_STRUCT=()
+    for f in genotypes/cohort.hardcall.maf01.fam ancestry/strata.tsv structure/cohort.pcair.pcs.tsv \
+             structure/cohort.pcrelate.grm.rds structure/cohort.pcrelate.kinship.rds; do
+        [[ -s "${HANDOFF_DIR}/${f}" ]] || MISSING_STRUCT+=("${HANDOFF_DIR}/${f}")
+    done
+    if [[ ${#MISSING_STRUCT[@]} -gt 0 ]]; then
+        if [[ $DRY_RUN == 1 ]]; then printf 'WARNING: missing %s (a launch would refuse)\n' "${MISSING_STRUCT[@]}"
+        else printf 'REFUSED: missing %s (STRUCTURE_SOURCE=bundle reads the shipped structure; it never recomputes it)\n' "${MISSING_STRUCT[@]}" >&2; exit 2; fi
+    fi
+fi
+RR_EXTRA_PARAMS="$(printf 'SURVIVAL_COLUMNS\t%s\tderived\nHANDOFF_DIR\t%s\tderived' "$(IFS=,; echo "${SURV_COLS[*]:-none}")" "${HANDOFF_DIR}")"
 
 DEFERRED=()
 for step in PRS COLOC VALIDATION GXG; do
@@ -222,15 +240,15 @@ submit() {
 # STEP 0: GENESIS PC-AiR + PC-Relate (ancestry PCs + GRM for EVERY model)
 # ============================================================================
 echo ""
-echo "STEP 0: Submitting PC-AiR / PC-Relate..."
+echo "STEP 0: Submitting structure (${STRUCTURE_SOURCE}: $([[ ${STRUCTURE_SOURCE} == bundle ]] && echo "ingest from ${HANDOFF_DIR}" || echo "PC-AiR / PC-Relate"))..."
 DEPEND_PCAIR=""
 if [[ "${SKIP_PCAIR:-false}" != "true" ]]; then
-    submit "PC-AiR / PC-Relate" \
+    submit "structure (${STRUCTURE_SOURCE})" \
         --output="${LOG_DIR}/pcair_%j.out" --error="${LOG_DIR}/pcair_%j.err" \
         "${SCRIPT_DIR}/submit_pcair.sh"
     DEPEND_PCAIR="--dependency=afterok:${JOB}"
 else
-    echo "  Skipped (SKIP_PCAIR=true): using data/kinship + PCs already in the phenotype file"
+    echo "  Skipped (SKIP_PCAIR=true): reusing the structure already in results/pcair"
 fi
 
 # ============================================================================

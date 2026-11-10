@@ -52,7 +52,9 @@ final data, and never redone.
 4. **Structure is computed once, upstream, on the whole cohort — and shipped.** PC-AiR and PC-Relate run
    in the harmonization pipeline at both scales (cohort and within stratum), because the stratified runs
    depend on quantities that need everyone together. The bundle carries the PCs at both scales and the
-   GRM; downstream ingests them and re-derives one stratum only to *verify*, never to replace. Strata are
+   GRM; downstream ingests them (`slurm/submit_pcair.sh` → `bin/ingest_structure.R`: each stratum's run uses its
+   within-stratum PCs, POOLED the cohort PCs, every model the shipped GRM unchanged) and re-derives one stratum
+   only to *verify*, never to replace. Strata are
    assigned upstream too. Downstream computes only what is per-run: the MAC gate and the Tractor extraction.
 5. **Quality filtering happened upstream, once per imputation, with MagicalRsq-X.** The bundle carries
    the score in `INFO/MRSQX` so the downstream can report it; it does not re-filter on raw `R2`/`DR2`.

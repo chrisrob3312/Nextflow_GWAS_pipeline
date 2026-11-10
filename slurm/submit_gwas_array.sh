@@ -27,11 +27,11 @@
 # A survival trait reads columns <trait>_time and <trait>_event (efs_time/efs_event, os_time/os_event,
 # as docs/HANDOFF_CONTRACT.md names them); TIME_COL_<trait> / EVENT_COL_<trait> override one trait.
 # The adapter checks every sample in the stratum's Tractor files against STRATA_FILE
-# (default data/ancestry/strata.tsv, the handoff's ancestry/strata.tsv) when it exists, and
+# (default $HANDOFF_DIR/ancestry/strata.tsv) when it exists, and
 # skips the stratum (exit 0, no results) below MIN_STRATUM_N analysable samples; the run
 # record reads its counts from results/gwas/<trait>/<stratum>/chr<N>.run_counts.tsv.
 # Numbered Tractor files (anc0, ...) are read only with ANC_INDEX_MAP (default
-# data/tractor/flare_index_map.tsv, a copy of the handoff's local_ancestry/flare_index_map.tsv).
+# $HANDOFF_DIR/local_ancestry/flare_index_map.tsv).
 # The ancestries come from data/tractor/<stratum>/ancestries.txt; a stratum without
 # that file is refused (docs/HANDOFF_CONTRACT.md).
 # Output: results/gwas/<trait>/<stratum>/chr<N>.tractor_genesis.tsv.gz
@@ -80,16 +80,33 @@ DATA_DIR="${SCRIPT_DIR}/data"
 RESULTS_DIR="${SCRIPT_DIR}/results/gwas/${TRAIT}/${STRATUM}"
 [[ "${DRY_RUN}" == 1 ]] || mkdir -p "${RESULTS_DIR}"
 
-# Prefer PC-AiR / PC-Relate outputs (step 0) so every model adjusts for the
-# same ancestry PCs and the same admixture-robust GRM; fall back to data/
+# Phenotype with PCs and the GRM come from step 0 (slurm/submit_pcair.sh): this stratum's
+# within-stratum PCs (results/pcair/<S>.phenotypes.with_pcs.tsv), the cohort PCs for POOLED, and
+# the shipped GRM, unchanged. No silent fallback: without step 0's output the task stops. PHENO /
+# KINSHIP set explicitly win. With STRUCTURE_SOURCE=compute only cohort PCs exist, and every
+# stratum uses them (logged).
 PCAIR_DIR="${SCRIPT_DIR}/results/pcair"
+HANDOFF_DIR="${HANDOFF_DIR:-${SCRIPT_DIR}/data/handoff}"
 if [[ -z "${PHENO:-}" ]]; then
-    [[ -f "${PCAIR_DIR}/cohort.phenotypes.with_pcs.tsv" ]] && PHENO="${PCAIR_DIR}/cohort.phenotypes.with_pcs.tsv" \
-        || PHENO="${DATA_DIR}/phenotypes/phenotypes.tsv"
+    if [[ "${STRATUM}" != POOLED && -f "${PCAIR_DIR}/${STRATUM}.phenotypes.with_pcs.tsv" ]]; then
+        PHENO="${PCAIR_DIR}/${STRATUM}.phenotypes.with_pcs.tsv"
+    elif [[ ( "${STRATUM}" == POOLED || "${STRUCTURE_SOURCE:-bundle}" == compute ) && -f "${PCAIR_DIR}/cohort.phenotypes.with_pcs.tsv" ]]; then
+        PHENO="${PCAIR_DIR}/cohort.phenotypes.with_pcs.tsv"
+        [[ "${STRATUM}" == POOLED ]] || echo "Note: STRUCTURE_SOURCE=compute, so ${STRATUM} uses cohort-scale PCs"
+    elif [[ "${DRY_RUN}" == 1 ]]; then
+        PHENO="${PCAIR_DIR}/$([[ "${STRATUM}" == POOLED ]] && echo cohort || echo "${STRATUM}").phenotypes.with_pcs.tsv"
+        echo "(dry run: ${PHENO} is written by step 0, which has not run)"
+    else
+        echo "ERROR: no phenotype with PCs for ${STRATUM} in ${PCAIR_DIR} (run step 0, slurm/submit_pcair.sh, first)" >&2
+        exit 1
+    fi
 fi
 if [[ -z "${KINSHIP:-}" ]]; then
-    [[ -f "${PCAIR_DIR}/cohort.pcrelate.grm.rds" ]] && KINSHIP="${PCAIR_DIR}/cohort.pcrelate.grm.rds" \
-        || KINSHIP="${DATA_DIR}/kinship/kinship_matrix.rds"
+    KINSHIP="${PCAIR_DIR}/cohort.pcrelate.grm.rds"
+    if [[ ! -e "${KINSHIP}" && "${DRY_RUN}" != 1 ]]; then
+        echo "ERROR: no GRM at ${KINSHIP} (run step 0, slurm/submit_pcair.sh, first)" >&2
+        exit 1
+    fi
 fi
 echo "Phenotype: ${PHENO}"; echo "GRM: ${KINSHIP}"
 TRACTOR_PREFIX="${DATA_DIR}/tractor/${STRATUM}/chr${CHR}"
@@ -114,13 +131,13 @@ CMD=(Rscript "${SCRIPT_DIR}/bin/tractor_genesis_adapter.R"
 if [[ "${MODEL}" == "survival" ]]; then
     CMD+=(--time_col "$(trait_time_col "${TRAIT}")" --event_col "$(trait_event_col "${TRAIT}")")
 fi
-STRATA_FILE="${STRATA_FILE:-${DATA_DIR}/ancestry/strata.tsv}"
+STRATA_FILE="${STRATA_FILE:-${HANDOFF_DIR}/ancestry/strata.tsv}"
 if [[ -f "${STRATA_FILE}" ]]; then
     CMD+=(--strata_file "${STRATA_FILE}")
 else
     echo "Stratum membership: ${STRATA_FILE} not found; the adapter checks a 'stratum' phenotype column if there is one, else records the check as not run"
 fi
-ANC_INDEX_MAP="${ANC_INDEX_MAP:-${DATA_DIR}/tractor/flare_index_map.tsv}"
+ANC_INDEX_MAP="${ANC_INDEX_MAP:-${HANDOFF_DIR}/local_ancestry/flare_index_map.tsv}"
 [[ -f "${ANC_INDEX_MAP}" ]] && CMD+=(--ancestry_index_map "${ANC_INDEX_MAP}")
 CMD+=(--ancestries "${STRATUM_ANCESTRIES}"
     --ref_ancestry "${REF_ANCESTRY}"

@@ -165,8 +165,10 @@ pipeline"); the run record is described in [docs/WORKFLOW.md](docs/WORKFLOW.md),
    slurm/submit_full_pipeline.sh --dry-run
    slurm/submit_full_pipeline.sh
    ```
-   PC-AiR / PC-Relate, the Tractor-GENESIS GWAS (traits × strata × 22 chromosomes) and the
-   combine + meta-analysis step always run. PRS, colocalization, PRS validation and GxG run only
+   Step 0 ingests the population structure the handoff bundle ships (`HANDOFF_DIR`: cohort and
+   within-stratum PCs, the GRM; `STRUCTURE_SOURCE=compute` recomputes it with PC-AiR / PC-Relate,
+   as a comparator, only when asked). Step 0, the Tractor-GENESIS GWAS (traits × strata × 22
+   chromosomes) and the combine + meta-analysis step always run. PRS, colocalization, PRS validation and GxG run only
    with `RUN_PRS=true`, `RUN_COLOC=true`, `RUN_VALIDATION=true` (needs `RUN_PRS`) and
    `RUN_GXG=true`; every launch prints the ones it deferred, e.g.
    `deferred: PRS COLOC VALIDATION GXG (RUN_*=false)`.

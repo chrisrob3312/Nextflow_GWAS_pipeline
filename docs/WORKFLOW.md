@@ -184,7 +184,7 @@ Each pair reports Wald and LRT p-values with Bonferroni over pairs and BH FDR.
 
 ```mermaid
 flowchart TD
-    S0["STEP 0  submit_pcair.sh<br/>PC-AiR PCs + PC-Relate GRM (once)"]
+    S0["STEP 0  submit_pcair.sh<br/>ingest the bundle's PCs (cohort + within-stratum) and GRM<br/>STRUCTURE_SOURCE=compute: PC-AiR / PC-Relate instead"]
     S1["STEP 1  submit_gwas_array.sh<br/>traits x strata, 22-chromosome arrays<br/>Tractor-GENESIS for every trait<br/>--ancestries from data/tractor/&lt;stratum&gt;/ancestries.txt"]
     S0 --> S1
     S2["STEP 2  combine per trait<br/>chr* -> <stratum>.sumstats.gz<br/>bin/meta_analyze_strata.R -> POOLED.sumstats.gz"]
@@ -219,7 +219,8 @@ Nextflow modules and the SLURM scripts call:
 
 | Step | Script | Nextflow process | SLURM |
 |---|---|---|---|
-| PC-AiR + PC-Relate | `genesis_pcair_pcrelate.R` | `GENESIS_PCAIR_PCRELATE` | `submit_pcair.sh` (step 0) |
+| Structure: ingest the bundle's PCs and GRM | `ingest_structure.R` | (none) | `submit_pcair.sh` (step 0, default) |
+| PC-AiR + PC-Relate (comparator) | `genesis_pcair_pcrelate.R` | `GENESIS_PCAIR_PCRELATE` | `submit_pcair.sh` with `STRUCTURE_SOURCE=compute` |
 | Tractor-GENESIS GWAS | `tractor_genesis_adapter.R` | `TRACTOR_GENESIS` | `submit_gwas_array.sh` |
 | Strata meta-analysis | `meta_analyze_strata.R` | (MR-MEGA in Nextflow) | step 2 |
 | PRS (6 methods, LA partial, stratified validation) | `calculate_prs_admixed.R` | `PRS_METHOD`, `PRS_LA_PARTIAL`, `PRS_VALIDATE_STRATIFIED` | `submit_prs_array.sh` |
