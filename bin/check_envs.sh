@@ -8,9 +8,10 @@
 # ============================================================================
 # check_envs.sh: activate each of the four conda envs and show it can do its job
 # ============================================================================
-#   gwas-r   library() on every R package the SLURM path loads (bin/check_r_libs.R)
+#   gwas-r   library() on every R package the SLURM path loads (bin/check_r_libs.R); bcftools;
+#            hyprcoloc reported (installed by hand, needed only with RUN_COLOC=true)
 #   gwas-py  import pandas, numpy, scipy
-#   lai      java -version (FLARE needs Java 11 or later); the imports Tractor's scripts use
+#   lai      java -version (FLARE needs Java 11 or later); the imports Tractor's scripts use; bcftools
 #   mrmega   MR-MEGA on PATH
 #   and envs.tsv still matches envs/*.yml (bin/envs_tsv.sh --check)
 #
@@ -31,10 +32,10 @@ for REPO in "${GWAS_REPO:-}" "${SLURM_SUBMIT_DIR:-}" "$(cd "$(dirname "${BASH_SO
 done
 [[ -f "${REPO}/bin/activate_env.sh" ]] || { echo "ERROR: cannot find the repo (run from the repo root, or export GWAS_REPO)" >&2; exit 1; }
 
-# The R packages the SLURM path loads: the 14 of the plan, plus R.utils, without which
-# data.table::fread cannot read a .gz at all.
+# The R packages the SLURM path loads: the 14 of the plan, R.utils (without which
+# data.table::fread cannot read a .gz at all), and coloc + susieR for colocalization.
 R_PACKAGES=(GENESIS SeqArray SeqVarTools SNPRelate GWASTools coxme survival metafor
-            data.table R.utils optparse argparse qqman ggplot2 Matrix)
+            data.table R.utils optparse argparse qqman ggplot2 Matrix coloc susieR)
 PY_GWAS=(pandas numpy scipy)
 PY_LAI=(numpy pandas argparse contextlib gzip logging re os)   # Tractor's extract_tracts_flare.py: stdlib only
 
@@ -52,6 +53,31 @@ sys.exit(bad)'
 
 FAILED=()
 
+# tool_check NAME [VERSION_FLAG]: NAME comes from this env (a copy elsewhere on PATH, e.g. a
+# system install, does not count) and answers VERSION_FLAG (default --version); prints its first line
+tool_check() {
+    local p v
+    p="$(command -v "$1")" || { echo "MISSING $1: not on PATH"; return 1; }
+    if [[ "$p" != "${CONDA_PREFIX:-/nonexistent}/"* ]]; then
+        echo "MISSING $1: the one on PATH is ${p}, not from this env (${CONDA_PREFIX:-none})"
+        return 1
+    fi
+    v="$("$1" "${2:---version}" 2>&1)" || { echo "MISSING $1: ${v%%$'\n'*}"; return 1; }
+    echo "ok      $(printf '%-12s' "$1") ${v%%$'\n'*}"
+}
+
+gwas_r_check() {
+    local rc=0
+    Rscript "${REPO}/bin/check_r_libs.R" "${R_PACKAGES[@]}" || rc=1
+    tool_check bcftools || rc=1
+    if Rscript "${REPO}/bin/check_r_libs.R" hyprcoloc >/dev/null 2>&1; then
+        echo "ok      hyprcoloc    installed (used with RUN_COLOC=true)"
+    else
+        echo "note    hyprcoloc    not installed: needed only with RUN_COLOC=true (install: envs/gwas-r.yml)"
+    fi
+    return "$rc"
+}
+
 # check_env ENV COMMAND...: activate ENV in a subshell ( ... ) so the activation does not carry
 # over to the next env, then run the check command there. Prints the output; returns its status.
 check_env() {
@@ -64,7 +90,7 @@ check_env() {
     )
 }
 
-out="$(check_env gwas-r Rscript "${REPO}/bin/check_r_libs.R" "${R_PACKAGES[@]}" 2>&1)"
+out="$(check_env gwas-r gwas_r_check 2>&1)"
 rc=$?
 echo "$out"
 if [[ $rc -ne 0 ]]; then
@@ -80,18 +106,15 @@ fi
 check_env gwas-py python3 -c "$PY_CHECK" "${PY_GWAS[@]}" || FAILED+=(gwas-py)
 
 lai_check() {
-    local v
-    v="$(java -version 2>&1 | head -1)" || { echo "MISSING java: $v"; return 1; }
-    echo "ok      java         ${v}"
-    python3 -c "$PY_CHECK" "${PY_LAI[@]}"
+    local rc=0
+    tool_check java -version || rc=1
+    tool_check bcftools || rc=1
+    python3 -c "$PY_CHECK" "${PY_LAI[@]}" || rc=1
+    return "$rc"
 }
 check_env lai lai_check || FAILED+=(lai)
 
-mrmega_check() {
-    local bin
-    bin="$(command -v MR-MEGA)" || { echo "MISSING MR-MEGA: not on PATH"; return 1; }
-    echo "ok      MR-MEGA      ${bin}"
-}
+mrmega_check() { tool_check MR-MEGA; }
 check_env mrmega mrmega_check || FAILED+=(mrmega)
 
 echo ""

@@ -55,7 +55,8 @@ exit "${FAKE_RSCRIPT_EXIT:-0}"
 EOF
 printf '#!/bin/sh\necho "openjdk version \\"21.0.10\\" (stub)" >&2\n' > "${W}/envs/lai/bin/java"
 printf '#!/bin/sh\necho "MR-MEGA (stub)"\n' > "${W}/envs/mrmega/bin/MR-MEGA"
-chmod +x "${W}/envs/gwas-r/bin/Rscript" "${W}/envs/lai/bin/java" "${W}/envs/mrmega/bin/MR-MEGA"
+for e in gwas-r lai; do printf '#!/bin/sh\necho "bcftools 1.25 (stub)"\necho "Using htslib 1.25"\n' > "${W}/envs/${e}/bin/bcftools"; done
+chmod +x "${W}/envs/gwas-r/bin/Rscript" "${W}/envs/lai/bin/java" "${W}/envs/mrmega/bin/MR-MEGA" "${W}"/envs/*/bin/bcftools
 STRATA_DEFAULT=(EUR AAC LAT1 LAT2 OTHER)
 for s in "${STRATA_DEFAULT[@]}"; do mkdir -p "${C}/data/tractor/${s}"; done
 printf 'EUR\n' > "${C}/data/tractor/EUR/ancestries.txt"
@@ -102,10 +103,12 @@ check "envs.tsv: four envs" test "$(tail -n +2 "$REPO/envs.tsv" | wc -l)" -eq 4
 check "envs.tsv: yml_sha256 matches envs/*.yml (bin/envs_tsv.sh --check)" bash "$REPO/bin/envs_tsv.sh" --check
 for e in gwas-r gwas-py lai mrmega; do check "envs/${e}.yml exists, prefix uses \${GWAS_ENVS_DIR}" grep -qP "^${e}\t\\\$\{GWAS_ENVS_DIR\}/${e}\t" "$REPO/envs.tsv"; done
 for p in r-base bioconductor-genesis bioconductor-seqarray bioconductor-seqvartools bioconductor-snprelate \
-         bioconductor-gwastools r-coxme r-survival r-metafor r-data.table r-optparse r-argparse r-qqman r-ggplot2 r-matrix r-r.utils; do
+         bioconductor-gwastools r-coxme r-survival r-metafor r-data.table r-optparse r-argparse r-qqman r-ggplot2 r-matrix r-r.utils \
+         r-coloc r-susier bcftools; do
     grep -q "^  - ${p}[=<>]" "$REPO/envs/gwas-r.yml" || bad "gwas-r.yml lacks ${p}"
 done
-ok "gwas-r.yml lists the 15 planned packages + r-r.utils"
+ok "gwas-r.yml lists the 15 planned packages + r-r.utils, r-coloc, r-susier, bcftools"
+check "lai.yml has bcftools (the extraction step's site restriction)" grep -q "^  - bcftools=" "$REPO/envs/lai.yml"
 
 # ============================================================================
 section "CP-01 / M-04: bin/activate_env.sh (fake conda)"
@@ -144,6 +147,14 @@ out="$(FAKE_R_MISSING="coxme metafor" bash "${C}/bin/check_envs.sh" 2>&1)"; rc=$
 has "$out" "HARD FAIL: coxme" && has "$out" "HARD FAIL: metafor" && ok "coxme and metafor named as hard failures" || bad "messages: $out"
 out="$(FAKE_R_MISSING="qqman" bash "${C}/bin/check_envs.sh" 2>&1)"; rc=$?
 [[ $rc -ne 0 ]] && has "$out" "check_envs: FAIL (gwas-r)" && ok "any other missing R package also fails" || bad "qqman: rc=$rc"
+out="$(FAKE_R_MISSING="hyprcoloc" bash "${C}/bin/check_envs.sh" 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && has "$out" "note    hyprcoloc    not installed" && ok "hyprcoloc missing: noted, not a failure (installed by hand, RUN_COLOC only)" || bad "hyprcoloc note: rc=$rc"
+out="$(FAKE_R_MISSING="coloc" bash "${C}/bin/check_envs.sh" 2>&1)"; rc=$?
+[[ $rc -ne 0 ]] && has "$out" "MISSING coloc" && ok "coloc missing: fails" || bad "coloc missing: rc=$rc"
+mv "${W}/envs/lai/bin/bcftools" "${W}/bcftools.away"
+out="$(bash "${C}/bin/check_envs.sh" 2>&1)"; rc=$?
+[[ $rc -ne 0 ]] && has "$out" "MISSING bcftools" && has "$out" "check_envs: FAIL (lai)" && ok "bcftools missing from lai: fails (a copy elsewhere on PATH does not count)" || bad "bcftools lai: rc=$rc $(tail -2 <<< "$out")"
+mv "${W}/bcftools.away" "${W}/envs/lai/bin/bcftools"
 mv "${W}/envs/mrmega/bin/MR-MEGA" "${W}/MR-MEGA.away"
 out="$(bash "${C}/bin/check_envs.sh" 2>&1)"; rc=$?
 [[ $rc -ne 0 ]] && has "$out" "MISSING MR-MEGA" && ok "MR-MEGA not on PATH in mrmega: fails" || bad "MR-MEGA: rc=$rc"

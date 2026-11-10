@@ -1,5 +1,5 @@
 # lai: local ancestry. Java for FLARE (flare.jar) and Python for Tractor's extraction script
-# (extract_tracts_flare.py). Build and record it as in docs/HPC_SITE.md, "Building the envs".
+# (extract_tracts_flare.py). Built as in the runbook that docs/HPC_SITE.md points to.
 #
 # Where the requirements come from:
 #   - FLARE: its README (github.com/browning-lab/flare, HEAD d6a6c8f, read 2026-11-09) says
@@ -17,14 +17,20 @@
 # closest listed patch releases with a Python 3.9 build are used: numpy 1.26.4 and pandas 2.1.4
 # (pandas 2.1.4 wants numpy >=1.22.4,<2). No conda solve was run where this file was written.
 #
-# Not conda packages, placed in this env by hand (docs/HPC_SITE.md, "Building the envs"):
-# flare.jar and Tractor's extract_tracts_flare.py.
+# bcftools 1.25 (bioconda, checked 2026-11-09): the extraction step restricts each dosage VCF to
+# the maf01 site list before Tractor's extraction (docs/HANDOFF_CONTRACT.md), which needs bcftools.
+#
+# Not conda packages, placed in this env by hand: flare.jar (from the FLARE README's link) into
+# <prefix>/share/flare/, and Tractor's scripts/extract_tracts_flare.py (commit 2860728) into
+# <prefix>/bin/.
 name: lai
 channels:
   - conda-forge
+  - bioconda
   - nodefaults
 dependencies:
   - openjdk=21
   - python=3.9.18
   - numpy=1.26.4
   - pandas=2.1.4
+  - bcftools=1.25
