@@ -92,6 +92,7 @@ read_pcs <- function(f, expected_ids, what) {
     if (names(p)[1] != "sample_id" || !all(grepl("^PC[0-9]+$", names(p)[-1])) || ncol(p) < 2) {
         refuse(f, "header must be sample_id PC1 ... PCn")
     }
+    tryCatch(check_covariates(p, names(p)[-1], f), error = function(e) refuse(conditionMessage(e)))   # CP-08: numeric PCs
     if (anyDuplicated(p$sample_id) || !setequal(p$sample_id, expected_ids)) {
         refuse(f, sprintf("samples differ from %s (%d rows, %d expected)", what, nrow(p), length(expected_ids)))
     }

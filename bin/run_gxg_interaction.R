@@ -84,7 +84,7 @@ option_list <- list(
     make_option("--time_col", type = "character", default = "time"),
     make_option("--event_col", type = "character", default = "event"),
     make_option("--covariates", type = "character", default = NULL,
-                help = "Comma-separated covariates (age,sex,PC1..PC5)"),
+                help = "Comma-separated covariates (e.g. sex,age_at_diagnosis,cd19_pos_pct,storage_days,PC1..PC5)"),
     make_option("--unrelated_ids", type = "character", default = NULL,
                 help = "Optional file of unrelated sample IDs (GLM/Cox assume independence)"),
 

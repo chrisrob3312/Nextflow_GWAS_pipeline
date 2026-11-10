@@ -61,9 +61,9 @@ for n in "${CHROMS[@]}"; do
 printf 'MajorGroup from GrafAnc AncGroupID hundreds digit; floor 50 per stratum with bundling; MIX retained (stub)\n' > ancestry/strata_rule.txt
 
 # structure: cohort PCs, per-stratum PCs, placeholder rds
-{ printf 'sample_id\tPC1\tPC2\tPC3\n'; for s in "${SAMPLES[@]}"; do printf '%s\t0.01\t0.02\t0.03\n' "$s"; done; } > structure/cohort.pcair.pcs.tsv
+{ printf 'sample_id\tPC1\tPC2\tPC3\tPC4\tPC5\tPC6\n'; for s in "${SAMPLES[@]}"; do printf '%s\t0.01\t0.02\t0.03\t0.04\t0.05\t0.06\n' "$s"; done; } > structure/cohort.pcair.pcs.tsv
 for S in $(awk -F'\t' 'NR>1{print $2}' ancestry/strata.tsv | sort -u); do
-  { printf 'sample_id\tPC1\tPC2\n'; awk -F'\t' -v s="$S" 'NR>1 && $2==s {printf "%s\t0.01\t0.02\n", $1}' ancestry/strata.tsv; } > "structure/strata/${S}.pcair.pcs.tsv"; done
+  { printf 'sample_id\tPC1\tPC2\tPC3\tPC4\tPC5\n'; awk -F'\t' -v s="$S" 'NR>1 && $2==s {printf "%s\t0.01\t0.02\t0.03\t0.04\t0.05\n", $1}' ancestry/strata.tsv; } > "structure/strata/${S}.pcair.pcs.tsv"; done
 if command -v Rscript >/dev/null; then
   IDS="${SAMPLES[*]}" Rscript --vanilla -e 'ids <- strsplit(Sys.getenv("IDS"), " ")[[1]]; m <- diag(length(ids)); dimnames(m) <- list(ids, ids); saveRDS(m, "structure/cohort.pcrelate.grm.rds"); saveRDS(m / 2, "structure/cohort.pcrelate.kinship.rds")'
 else

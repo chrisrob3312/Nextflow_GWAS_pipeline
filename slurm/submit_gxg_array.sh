@@ -85,7 +85,8 @@ if [[ "${STRATUM}" == "POOLED" && -d "${DATA_DIR}/tractor" ]]; then
 fi
 
 # ---- customisable (env vars) ----------------------------------------------
-COVARIATES="${COVARIATES:-age,sex,PC1,PC2,PC3,PC4,PC5}"   # any phenotype columns
+# numeric phenotype columns; default the study's list (HANDOFF_DIR/phenotypes/covariates.txt) + PC1..PC5
+COVARIATES="${COVARIATES:-$(default_covariates)}" || exit 1
 ANCESTRY_COL="${ANCESTRY_COL:-GRAF_ANC}"
 KNOWN_LOCI="${KNOWN_LOCI:-${SCRIPT_DIR}/assets/known_leukemia_risk_loci.tsv}"
 LOCI_ARGS="--known_loci ${KNOWN_LOCI}"

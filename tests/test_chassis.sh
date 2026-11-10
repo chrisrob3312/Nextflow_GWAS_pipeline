@@ -65,6 +65,13 @@ if [[ "${1:-}" == */tractor_genesis_adapter.R ]]; then
     if [[ "$st" == ok ]]; then nt=900; else nt=NA; fi
     printf 'key\tvalue\nstatus\t%s\nstratum\tEUR\nstratum_check\tpassed\nmin_stratum_n\t50\nn_null\t%s\nn_variants\t1000\nn_pass_mac\t950\nn_tested\t%s\nn_failed\t2\n' \
         "$st" "${FAKE_N_NULL:-120}" "$nt" > "${out}.run_counts.tsv"
+    # and, when it ran, a genomic-order table with its "## covariates=" line (FAKE_META_CHR<n> replaces
+    # that line for chromosome n)
+    if [[ "$st" == ok ]]; then
+        cov=""; chr=""; prev=""; for a in "$@"; do [[ "$prev" == --covariates ]] && cov="$a"; [[ "$prev" == --chromosome ]] && chr="$a"; prev="$a"; done
+        mv="FAKE_META_CHR${chr}"
+        printf '%s\nCHR\tPOS\tID\tP_JOINT\n%s\t100\t%s:100\t0.5\n' "${!mv:-## covariates=${cov}}" "$chr" "$chr" | gzip > "${out}.tractor_genesis.genomic_order.tsv.gz"
+    fi
     # and its QC verdicts (bin/qc_assert.R): PASS, INFO for the model when skipped, FAIL for the id
     # named in FAKE_ADAPTER_QC_FAIL
     mkdir -p "${GWAS_QC_DIR}/assertions.d"
@@ -468,7 +475,7 @@ if [[ -n "${REAL_RSCRIPT}" ]] && "${REAL_RSCRIPT}" -e 'quit(status = !requireNam
     grep -q "dimnames == .fam IID" "$lg" && ok "GRM and kinship dimnames checked against the .fam IIDs" || bad "dimnames check: $(grep -i dimnames "$lg")"
     for S in AFR AMR EUR MIX; do [[ -s "${C}/results/pcair/${S}.phenotypes.with_pcs.tsv" && -s "${C}/results/strata/${S}.samples.txt" ]] || bad "no ${S} outputs"; done
     eur_h="$(head -1 "${C}/results/pcair/EUR.phenotypes.with_pcs.tsv")"; coh_h="$(head -1 "${C}/results/pcair/cohort.phenotypes.with_pcs.tsv")"
-    [[ "$eur_h" == *$'\tPC1\tPC2' && "$coh_h" == *$'\tPC1\tPC2\tPC3' && "$(wc -l < "${C}/results/pcair/EUR.phenotypes.with_pcs.tsv")" -eq 4 ]] \
+    [[ "$eur_h" == *$'\tPC1\tPC2\tPC3\tPC4\tPC5' && "$coh_h" == *$'\tPC1\tPC2\tPC3\tPC4\tPC5\tPC6' && "$(wc -l < "${C}/results/pcair/EUR.phenotypes.with_pcs.tsv")" -eq 4 ]] \
         && ok "per stratum: its members (EUR: 3) with its own within-stratum PCs; cohort PCs for POOLED" || bad "with_pcs: $eur_h / $coh_h"
     [[ "$(cat "${C}/results/strata/EUR.samples.txt" | paste -sd, -)" == "S001,S002,S003" ]] && ok "results/strata/<S>.samples.txt from strata.tsv" || bad "samples.txt"
     [[ "$(readlink "${C}/results/pcair/cohort.pcrelate.grm.rds")" == "${C}/data/handoff/structure/cohort.pcrelate.grm.rds" ]] \
@@ -615,6 +622,84 @@ else
 fi
 out="$(cd /tmp && DRY_RUN=1 bash "$G" EUR os survival 2>&1)"
 has "$out" "[DRY-RUN] QC gate: bin/qc_gate.sh --require pcair_pc_merge" && ok "DRY_RUN=1 GWAS task shows its gate" || bad "dry gate: $out"
+
+section "CP-08: covariates exist and are numeric; the list used is written above every results table"
+A="${C}/bin/tractor_genesis_adapter.R"
+l_chk="$(grep -n 'check_covariates(pheno, covariates_requested' "$A" | cut -d: -f1)"; l_rd="$(grep -n '^tractor_data <- read_tractor_files' "$A" | cut -d: -f1)"
+l_fit="$(grep -n 'nullmod <- fitNullModel(' "$A" | cut -d: -f1)"; l_cox="$(grep -n 'cox_null <- coxph(' "$A" | cut -d: -f1)"
+[[ -n "$l_chk" && "$l_chk" -lt "$l_rd" && "$l_chk" -lt "$l_fit" && "$l_chk" -lt "$l_cox" ]] && grep -q 'if (length(covariates) > 0) check_covariates(pheno, covariates, opt\$phenotype)' "$A" \
+    && ok "adapter: covariates checked right after the phenotype is read, before Tractor files or any fit (again with global-ancestry columns)" || bad "adapter check order: $l_chk $l_rd $l_fit $l_cox"
+[[ "$(grep -c 'fwrite_sumstats(' "$A")" -eq 6 && "$(grep -c '^[^#]*[^_]fwrite(' "$A")" -eq 0 ]] && ok "adapter: all six results tables written through fwrite_sumstats (## covariates=)" || bad "adapter writers: $(grep -n 'fwrite' "$A")"
+if [[ -n "${REAL_RSCRIPT}" ]] && "${REAL_RSCRIPT}" -e 'quit(status = !all(sapply(c("data.table", "optparse"), requireNamespace, quietly = TRUE)))' >/dev/null 2>&1; then
+    out="$("${REAL_RSCRIPT}" -e '
+        suppressPackageStartupMessages(library(data.table)); source(file.path(commandArgs(TRUE)[1], "qc_assert.R"))
+        ph <- data.table(sample_id = c("A","B"), age = c(5, 6), sex = c(1L, 2L), PC1 = c(.1, .2), sexc = c("M","F"))
+        r <- function(e) tryCatch({ eval(e); "passed" }, error = function(err) conditionMessage(err))
+        cat(r(quote(check_covariates(ph, c("age","sex","PC1","PCX"), "pheno.tsv"))), "\n")
+        setnames(ph, c("sex", "sexc"), c("sexn", "sex"))
+        cat(r(quote(check_covariates(ph, c("age","sex"), "pheno.tsv"))), "\n")
+        cat(r(quote(check_covariates(ph, c("age","sexn","PC1"), "pheno.tsv"))), "\n")' "${C}/bin" 2>&1)"
+    has "$out" "covariate PCX not found in pheno.tsv" && has "$out" "covariate sex is not numeric (character in pheno.tsv, e.g. 'M')" && has "$out" "passed" \
+        && ok "check_covariates: 'covariate PCX not found', 'sex is not numeric', numeric columns pass" || bad "check_covariates: $out"
+    TD="${W}/cp08"; rm -rf "${TD:?}"; mkdir -p "$TD"
+    out="$("${REAL_RSCRIPT}" -e '
+        suppressPackageStartupMessages(library(data.table)); a <- commandArgs(TRUE); source(file.path(a[1], "sumstats_io.R"))
+        x <- data.table(CHR = c(1L, 1L), POS = c(100L, 200L), ID = c("1:100", "1:200"), REF = "A", ALT = "G", N = 10L, P_JOINT = c(.5, .01), BETA_EUR = c(.1, -.2), SE_EUR = c(.05, .05))
+        for (f in file.path(a[2], c("t.tsv.gz", "t.tsv"))) {
+            fwrite_sumstats(x, f, c(covariates = "sex,age_at_diagnosis,PC1"))
+            m <- sumstats_meta(f); y <- fread(f)
+            cat(basename(f), m, "|", sumstats_meta_value(m, "covariates"), "|", identical(names(y), names(x)), nrow(y), "\n") }' "${C}/bin" "$TD" 2>&1)"
+    has "$out" "t.tsv.gz ## covariates=sex,age_at_diagnosis,PC1 | sex,age_at_diagnosis,PC1 | TRUE 2" && has "$out" "t.tsv ## covariates=sex,age_at_diagnosis,PC1 | sex,age_at_diagnosis,PC1 | TRUE 2" \
+        && ok "fwrite_sumstats: '## covariates=' line, then the table (gz and plain); fread reads past it" || bad "fwrite_sumstats: $out"
+    # meta_analyze_strata.R carries the strata's covariates line: once when they agree, per stratum otherwise
+    cp "${TD}/t.tsv.gz" "${TD}/EUR.sumstats.gz"; cp "${TD}/t.tsv.gz" "${TD}/AFR.sumstats.gz"
+    "${REAL_RSCRIPT}" "${C}/bin/meta_analyze_strata.R" --input_dir "$TD" --strata EUR,AFR --output "${TD}/P1.gz" --threads 1 >/dev/null 2>&1
+    m1="$(zcat "${TD}/P1.gz" 2>/dev/null | head -1)"
+    (cd "$TD" && zcat t.tsv.gz | sed 's/^## covariates=.*/## covariates=sex,PC1/' | gzip > AFR.sumstats.gz)
+    "${REAL_RSCRIPT}" "${C}/bin/meta_analyze_strata.R" --input_dir "$TD" --strata EUR,AFR --output "${TD}/P2.gz" --threads 1 >/dev/null 2>&1
+    m2="$(zcat "${TD}/P2.gz" 2>/dev/null | head -2 | paste -sd'|' -)"
+    [[ "$m1" == "## covariates=sex,age_at_diagnosis,PC1" && "$m2" == "## covariates_EUR=sex,age_at_diagnosis,PC1|## covariates_AFR=sex,PC1" ]] \
+        && ok "meta_analyze_strata.R: POOLED carries '## covariates=' (one line if the strata agree, one per stratum if not)" || bad "meta header: '$m1' / '$m2'"
+else
+    echo "  (real R with data.table and optparse not available: CP-08 R-side checks skipped)"
+fi
+if python3 -c 'import pandas' >/dev/null 2>&1; then
+    TD="${W}/cp08py"; rm -rf "${TD:?}"; mkdir -p "$TD"
+    printf '## covariates=sex,PC1\nCHR\tPOS\tID\tP\tBETA\n1\t100\t1:100\t1e-9\t0.1\n1\t200\t1:200\t0.5\t0.2\n' | gzip > "${TD}/in.tsv.gz"
+    python3 -I "${C}/bin/filter_gwas_results.py" --input "${TD}/in.tsv.gz" --output "${TD}/out.tsv" --significant "${TD}/sig.tsv" >/dev/null 2>&1
+    [[ "$(head -1 "${TD}/sig.tsv" 2>/dev/null)" == $'CHR\tPOS\tID\tP\tBETA' && "$(wc -l < "${TD}/sig.tsv")" -eq 2 ]] \
+        && ok "filter_gwas_results.py reads past the '## covariates=' line" || bad "python reader: $(cat "${TD}/sig.tsv" 2>&1)"
+fi
+grep -q "/^##/ && !h {next} !h {h = 1; next}" "${C}/modules/local/enhanced_annotation/main.nf" && ok "ANNOVAR input (Nextflow) skips '##' lines and the header" || bad "annovar awk"
+# The launch: covariates from the bundle unless set; every name checked before queuing
+rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results" "${C:?}/logs"
+out="$(cd /tmp && env "${SITE[@]}" STRATA_LIST=EUR TRAITS_LIST=os FAKE_SBATCH_RUN=1 RR_SACCT_WAIT=0 "$L" 2>&1)"
+RD="$(ls -d "${C}"/results/run_record/*/ | head -1)"; RD="${RD%/}"
+COVS="sex,age_at_diagnosis,cd19_pos_pct,storage_days,PC1,PC2,PC3,PC4,PC5"
+grep -q $'^COVARIATES\t'"${COVS}"$'\tbundle$' "${RD}/params.tsv" && grep -q -- "--covariates ${COVS} " "${C}"/logs/gwas_os_EUR_*_1.out \
+    && ok "COVARIATES unset: the bundle's covariates.txt + PC1..PC5, recorded in params.tsv (set_by bundle) and passed to the adapter" || bad "default covariates: $(grep COVARIATES "${RD}/params.tsv")"
+S="${C}/results/gwas/os/EUR.sumstats.gz"
+[[ "$(zcat "$S" | head -1)" == "## covariates=${COVS}" && "$(zcat "$S" | grep -c '^## ')" -eq 1 && "$(zcat "$S" | grep -c '^CHR')" -eq 1 && "$(zcat "$S" | wc -l)" -eq 24 ]] \
+    && ok "combine: '## covariates=' kept once, then one header and the 22 chromosomes' rows" || bad "combined: $(zcat "$S" 2>&1 | head -4)"
+rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results" "${C:?}/logs"
+out="$(cd /tmp && env "${SITE[@]}" STRATA_LIST=EUR TRAITS_LIST=os FAKE_SBATCH_RUN=1 RR_SACCT_WAIT=0 'FAKE_META_CHR7=## covariates=sex' "$L" 2>&1)"
+RD="$(ls -d "${C}"/results/run_record/*/ | head -1)"; RD="${RD%/}"
+[[ "$(awk -F'\t' 'NR > 1 && $1 == "combine" {print $14}' "${RD}/trace.tsv")" == 1 ]] && grep -q "chr7.tractor_genesis.genomic_order.tsv.gz has other '##' lines than" "${C}"/logs/combine_os_*.out \
+    && ok "combine: a chromosome with another covariate list stops the job, naming the file" || bad "meta mismatch: $(tail -3 "${C}"/logs/combine_os_*.out)"
+out="$(cd /tmp && env "${SITE[@]}" COVARIATES=age,sex,PC1,PCX "$L" --dry-run 2>&1)"
+has "$out" "WARNING: covariate age is not a column of ${C}/data/handoff/phenotypes/phenotypes.tsv" && has "$out" "WARNING: covariate PCX is not a column of ${C}/data/handoff/phenotypes/phenotypes.tsv" \
+    && ok "COVARIATES=age,sex,PC1,PCX --dry-run: names age and PCX (not in the phenotype / PC files)" || bad "dry covariates: $(grep -i covariate <<< "$out")"
+out="$(cd /tmp && env "${SITE[@]}" COVARIATES=age,sex,PC1,PCX "$L" 2>&1)"; rc=$?
+[[ $rc -eq 2 ]] && has "$out" "REFUSED: covariate PCX is not a column of" && ok "... and a launch refuses before queuing (exit 2)" || bad "launch covariates: rc=$rc"
+out="$(cd /tmp && env "${SITE[@]}" COVARIATES=sex,PC6 "$L" --dry-run 2>&1)"
+has "$out" "covariate PC6 is not a column of ${C}/data/handoff/structure/strata/EUR.pcair.pcs.tsv" && ! has "$out" "PC6 is not a column of ${C}/data/handoff/structure/cohort.pcair.pcs.tsv" \
+    && ok "a PC the stratum files lack is named per file (the cohort file has PC6)" || bad "PC6: $(grep PC6 <<< "$out")"
+mv "${C}/data/handoff/phenotypes/covariates.txt" "${W}/cov.away"
+out="$(cd /tmp && env "${SITE[@]}" "$L" 2>&1)"; rc=$?
+[[ $rc -eq 2 ]] && has "$out" "REFUSED: no covariates: COVARIATES is not set and ${C}/data/handoff/phenotypes/covariates.txt is missing" \
+    && ok "no COVARIATES and no covariates.txt: refused" || bad "no covariates.txt: rc=$rc $(grep -i covariat <<< "$out")"
+mv "${W}/cov.away" "${C}/data/handoff/phenotypes/covariates.txt"
+rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results" "${C:?}/logs"
 
 section "GxG: missing sumstats are left out and named; none at all stops the task"
 rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results" "${C:?}/logs"; mkdir -p "${C}/results/gwas/os" "${C}/logs"

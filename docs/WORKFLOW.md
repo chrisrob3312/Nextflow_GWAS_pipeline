@@ -23,10 +23,10 @@ one module to the next. The same steps exist as SLURM array scripts under
 Example phenotype file:
 
 ```
-FID   IID   sample_id   mrd   efs_time  efs_event  os_time  os_event  protocol  age  sex  PC1 ... PC5
+FID   IID   sample_id   mrd   efs_time  efs_event  os_time  os_event  protocol  sex  age_at_diagnosis  cd19_pos_pct  storage_days  PC1 ... PC5
 ```
 with `phenotype_cols = 'mrd,efs,os'`, `survival_traits = 'efs,os'`, `binary_traits = 'mrd'`,
-`covariate_cols = 'age,sex,PC1,PC2,PC3,PC4,PC5'`.
+`covariate_cols = 'sex,age_at_diagnosis,cd19_pos_pct,storage_days,PC1,PC2,PC3,PC4,PC5'` (the bundle's `phenotypes/covariates.txt`, then five PCs).
 
 ## 1. End-to-end overview
 
@@ -130,6 +130,14 @@ flowchart LR
     E --> O
 ```
 
+Every covariate must be a numeric phenotype column: the adapter stops, naming the column
+(`covariate PCX not found in ...`, `covariate sex is not numeric ...`), before it reads a Tractor
+file or fits anything. Each results table starts with `## covariates=<the list used>` (global
+ancestry columns included), then its column header. `fread` skips such `## key=value` lines by
+itself; the combine step keeps them once (and stops if two chromosomes disagree);
+`meta_analyze_strata.R` writes one `## covariates=` line when the strata agree, one
+`## covariates_<stratum>=` line each when they do not (`bin/sumstats_io.R`).
+
 ## 4. GxG interaction (end of pipeline)
 
 ```mermaid
@@ -171,7 +179,7 @@ Each pair reports Wald and LRT p-values with Bonferroni over pairs and BH FDR.
 | Traits | `phenotype_cols` | `TRAITS_LIST` (default `mrd,efs,os`) | phenotype columns; the launcher refuses a trait whose column(s) the phenotype file lacks |
 | Binary traits | `binary_traits` | everything not in `SURVIVAL_TRAITS` | 0/1 |
 | Time-to-event traits | `survival_traits` (+ `survival_time_cols`, `survival_event_cols`) | `SURVIVAL_TRAITS` (default `efs,os`); `TIME_COL_<trait>`, `EVENT_COL_<trait>` override one trait | columns `<trait>_time`, `<trait>_event`, as the handoff contract names them; each trait has its own |
-| Covariates | `covariate_cols`, `gxg_covariates` | `COVARIATES` | any phenotype columns |
+| Covariates | `covariate_cols`, `gxg_covariates` | `COVARIATES` (default: the bundle's `phenotypes/covariates.txt`, then `PC1..PC5`) | numeric phenotype columns: the launcher refuses a name that is not a column, the adapter one that is not numeric; the list used is written as `## covariates=` above every results table |
 | Ancestry column | `gxg_ancestry_col` | `ANCESTRY_COL` | GRAF-ANC codes or labels |
 | Strata rules | `min_stratum_n`, `bin/ancestry_config.R` | `STRATA_LIST`, `MIN_STRATUM_N`, `bin/ancestry_config.R` | default 50 (decided 10 Nov 2026); a smaller stratum is skipped, or pools to OTHER where the script assigns strata |
 | Known loci | `gxg_known_loci`, `gxg_use_default_loci` | `KNOWN_LOCI`, `GXG_USE_DEFAULT_LOCI` | default table is a starting point; verify positions |

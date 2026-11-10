@@ -65,7 +65,8 @@ export LOG_DIR
 #   SURVIVAL_TRAITS="efs,os"                traits run as time-to-event, each with its own columns
 #                                           <trait>_time and <trait>_event (TIME_COL_<trait> /
 #                                           EVENT_COL_<trait> override one trait); the rest are binary
-#   COVARIATES="age,sex,PC1,...,PC5"        any phenotype columns; used by GWAS and GxG
+#   COVARIATES="sex,age_at_diagnosis,PC1"  numeric phenotype columns, used by GWAS and GxG; default:
+#                                           the bundle's phenotypes/covariates.txt, then PC1..PC5
 #   GXG_CUSTOM_VARIANTS=/path/list.txt      optional GRCh38 variant list for GxG
 #   GXG_USE_DEFAULT_LOCI=true|false         include the default known-leukemia-loci table
 #   LOG_DIR=/abs/path                       where every job log goes (default <repo>/logs)
@@ -159,6 +160,41 @@ if [[ "${STRUCTURE_SOURCE}" == bundle && "${SKIP_PCAIR}" != true ]]; then
         if [[ $DRY_RUN == 1 ]]; then printf 'WARNING: missing %s (a launch would refuse)\n' "${MISSING_STRUCT[@]}"
         else printf 'REFUSED: missing %s (STRUCTURE_SOURCE=bundle reads the shipped structure; it never recomputes it)\n' "${MISSING_STRUCT[@]}" >&2; exit 2; fi
     fi
+fi
+# Covariates (CP-08): unset means the study's list plus PC1..PC5, resolved once here so every job
+# uses the same list and params.tsv records it (set_by bundle). Every name must be a column the
+# models will see: a PC in the PC files step 0 lays out (or one of the N_PCS PCs it computes),
+# anything else in the phenotype file. Whether the values are numeric is checked in each task.
+if [[ "${RR_SET_BY[COVARIATES]}" == job ]]; then
+    if COVARIATES="$(default_covariates)"; then RR_SET_BY[COVARIATES]=bundle; else COVARIATES=""; fi
+    export COVARIATES
+fi
+COV_PROBLEMS=()
+[[ -n "${COVARIATES}" ]] || COV_PROBLEMS+=("no covariates: COVARIATES is not set and ${HANDOFF_DIR}/phenotypes/covariates.txt is missing")
+PC_FILES=()        # the files whose PC columns the tasks will use, where they exist already
+for S in cohort "${STRATA[@]}"; do
+    if [[ "${SKIP_PCAIR}" == true ]]; then f="${REPO}/results/pcair/${S}.phenotypes.with_pcs.tsv"
+    elif [[ "${STRUCTURE_SOURCE}" == bundle && "$S" == cohort ]]; then f="${HANDOFF_DIR}/structure/cohort.pcair.pcs.tsv"
+    elif [[ "${STRUCTURE_SOURCE}" == bundle ]]; then f="${HANDOFF_DIR}/structure/strata/${S}.pcair.pcs.tsv"
+    else continue; fi
+    [[ -s "$f" ]] && PC_FILES+=("$f")
+done
+IFS=',' read -ra COV_NAMES <<< "${COVARIATES}"
+for c in "${COV_NAMES[@]}"; do
+    if [[ "$c" =~ ^PC([0-9]+)$ ]]; then
+        if [[ "${STRUCTURE_SOURCE}" == compute && "${SKIP_PCAIR}" != true ]]; then
+            (( BASH_REMATCH[1] <= N_PCS )) || COV_PROBLEMS+=("covariate ${c}: STRUCTURE_SOURCE=compute writes N_PCS=${N_PCS} PCs")
+        fi
+        for f in ${PC_FILES[@]+"${PC_FILES[@]}"}; do
+            grep -qxF -- "$c" <<< "$(head -1 "$f" | tr '\t' '\n')" || COV_PROBLEMS+=("covariate ${c} is not a column of ${f}")
+        done
+    elif [[ -s "${PHENO_SOURCE}" ]]; then
+        grep -qxF -- "$c" <<< "${PHENO_HEADER}" || COV_PROBLEMS+=("covariate ${c} is not a column of ${PHENO_SOURCE}")
+    fi
+done
+if [[ ${#COV_PROBLEMS[@]} -gt 0 ]]; then
+    if [[ $DRY_RUN == 1 ]]; then printf 'WARNING: %s (a launch would refuse)\n' "${COV_PROBLEMS[@]}"
+    else printf 'REFUSED: %s\n' "${COV_PROBLEMS[@]}" >&2; exit 2; fi
 fi
 RR_EXTRA_PARAMS="$(printf 'SURVIVAL_COLUMNS\t%s\tderived\nHANDOFF_DIR\t%s\tderived' "$(IFS=,; echo "${SURV_COLS[*]:-none}")" "${HANDOFF_DIR}")"
 
@@ -320,12 +356,22 @@ source "${SCRIPT_DIR}/bin/activate_env.sh" gwas-r
 GWAS_DIR="${SCRIPT_DIR}/results/gwas/${GWAS_TRAIT}"
 IFS=',' read -ra STRATA <<< "${STRATA_LIST}"
 
-# Concatenate chromosomes per stratum (genomic order files -> one sumstats per stratum)
+# Concatenate chromosomes per stratum (genomic order files -> one sumstats per stratum). A file
+# may start with "## key=value" lines (e.g. "## covariates=..."): they are kept once, and every
+# chromosome must carry the same ones. awk prints the leading "##" lines (meta) or, after them,
+# the column header (hdr) or the data rows (rows).
+meta() { zcat "$1" | awk '/^##/ {print; next} {exit}'; }
+hdr()  { zcat "$1" | awk '!/^##/ {print; exit}'; }
+rows() { zcat "$1" | awk '/^##/ && !h {next} h {print} {h = 1}'; }
 for stratum in "${STRATA[@]}"; do
     files=("${GWAS_DIR}/${stratum}"/chr*.tractor_genesis.genomic_order.tsv.gz)
     [[ -e "${files[0]}" ]] || { echo "No results for ${stratum} (skipped: N below MIN_STRATUM_N?)"; continue; }
     echo "Combining ${GWAS_TRAIT} / ${stratum}..."
-    { zcat "${files[0]}" | head -1; for f in "${files[@]}"; do zcat "$f" | tail -n +2; done; } |
+    m0="$(meta "${files[0]}")"
+    for f in "${files[@]}"; do
+        [[ "$(meta "$f")" == "$m0" ]] || { echo "ERROR: $f has other '##' lines than ${files[0]}:" >&2; meta "$f" >&2; exit 1; }
+    done
+    { [[ -z "$m0" ]] || printf '%s\n' "$m0"; hdr "${files[0]}"; for f in "${files[@]}"; do rows "$f"; done; } |
         gzip > "${GWAS_DIR}/${stratum}.sumstats.gz"
 done
 

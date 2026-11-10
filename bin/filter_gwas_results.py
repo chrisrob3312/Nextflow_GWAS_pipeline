@@ -9,6 +9,18 @@ import pandas as pd
 from pathlib import Path
 
 
+def count_meta_lines(path: str) -> int:
+    """Leading "## key=value" lines of a sumstats table (e.g. "## covariates=..."), skipped on read."""
+    opener = gzip.open if path.endswith(".gz") else open
+    n = 0
+    with opener(path, "rt") as fh:
+        for line in fh:
+            if not line.startswith("##"):
+                break
+            n += 1
+    return n
+
+
 def detect_columns(df: pd.DataFrame) -> dict:
     """Detect column names for different GWAS tools."""
     column_mapping = {
@@ -74,10 +86,11 @@ def filter_gwas(
     """Filter GWAS results."""
 
     # Read input (handle gzipped files)
+    skip = count_meta_lines(input_path)
     if input_path.endswith(".gz"):
-        df = pd.read_csv(input_path, sep="\t", compression="gzip")
+        df = pd.read_csv(input_path, sep="\t", compression="gzip", skiprows=skip)
     else:
-        df = pd.read_csv(input_path, sep="\t")
+        df = pd.read_csv(input_path, sep="\t", skiprows=skip)
 
     # Detect columns
     cols = detect_columns(df)

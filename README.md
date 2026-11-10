@@ -111,7 +111,7 @@ nextflow run main.nf \
   --input samplesheet.csv \
   --phenotype_file phenotypes.txt \
   --phenotype_cols "WBC,Lymphocytes,Monocytes" \
-  --covariate_cols "age,sex,PC1,PC2,PC3,PC4,PC5" \
+  --covariate_cols "sex,age_at_diagnosis,cd19_pos_pct,storage_days,PC1,PC2,PC3,PC4,PC5" \
   --run_ancestry_inference false \
   --ancestry_calls_file ancestry_calls.tsv \
   --gwas_tool genesis \

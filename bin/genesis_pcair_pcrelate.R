@@ -188,6 +188,8 @@ if (!is.null(opt$phenotype) && file.exists(opt$phenotype)) {
                reason = sprintf("rows of %s with a sample in the genotype file (%d genotyped samples have no phenotype row)",
                                 basename(opt$phenotype), sum(!gds_ids %in% ph[[idc]])))
     ph <- merge_pcs_checked(ph, pcs, id_col = idc, stratum = "cohort", what = basename(out_ph))
+    # CP-08: the PC columns every model will use as covariates are there and numeric
+    check_covariates(ph, paste0("PC", 1:opt$n_pcs), out_ph)
     fwrite(ph, out_ph, sep = "\t")
     cat("  Phenotype with PC-AiR PCs:", out_ph, "(", sum(!is.na(ph$PC1)), "of", nrow(ph), "samples with PCs )\n")
 } else {

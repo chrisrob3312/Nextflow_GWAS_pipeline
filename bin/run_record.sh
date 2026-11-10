@@ -58,7 +58,7 @@ RR_SWITCHES=(
     "STRATA_LIST|EUR,AAC,LAT1,LAT2,OTHER|strata analysed"
     "TRAITS_LIST|mrd,efs,os|traits analysed (phenotype columns, as docs/HANDOFF_CONTRACT.md names them)"
     "SURVIVAL_TRAITS|efs,os|traits run as time-to-event, with columns <trait>_time and <trait>_event; the rest are binary"
-    "COVARIATES|age,sex,PC1,PC2,PC3,PC4,PC5|model covariates (GWAS, GxG)"
+    "COVARIATES|@job|model covariates (GWAS, GxG), numeric phenotype columns; default: the bundle's phenotypes/covariates.txt then PC1..PC5 (set_by bundle)"
     "MIN_STRATUM_N|50|smallest stratum analysed (--min_stratum_n); 50 decided by the user, 10 Nov 2026"
     "MAC_MIN|10|minor allele count needed to test an ancestry's dose term (--mac_min); open: the contract says 20"
     "RUN_PRS|false|step 3, PRS"
@@ -127,7 +127,7 @@ rr_resolve_switches() {
     done
 }
 
-# params.tsv to stdout: param, value, set_by (environment | default | job).
+# params.tsv to stdout: param, value, set_by (environment | default | job | bundle).
 rr_params_tsv() {
     local entry name value
     printf 'param\tvalue\tset_by\n'

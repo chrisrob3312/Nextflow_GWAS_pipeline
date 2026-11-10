@@ -143,6 +143,17 @@ should_run_stratum() {
 trait_time_col()  { local v="TIME_COL_$1";  printf '%s' "${!v:-$1_time}"; }
 trait_event_col() { local v="EVENT_COL_$1"; printf '%s' "${!v:-$1_event}"; }
 # Is a trait time-to-event? (SURVIVAL_TRAITS, comma-separated)
+# default_covariates: the model's covariates when COVARIATES is not set. The study's list,
+# HANDOFF_DIR/phenotypes/covariates.txt (one column name per line; docs/HANDOFF_CONTRACT.md), then
+# the first five PCs the structure step writes (within-stratum PCs for a stratum, cohort PCs for
+# POOLED). Fails, naming the file, if the list is missing.
+default_covariates() {
+    local f="${HANDOFF_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/data/handoff}/phenotypes/covariates.txt" names
+    [[ -s "$f" ]] || { echo "ERROR: COVARIATES is not set and ${f} (the study's covariate list) is missing" >&2; return 1; }
+    names="$(tr -d '\r' < "$f" | awk 'NF {print $1}' | paste -sd, -)"
+    printf '%s%sPC1,PC2,PC3,PC4,PC5' "$names" "${names:+,}"
+}
+
 trait_is_survival() { [[ ",${SURVIVAL_TRAITS:-efs,os}," == *",$1,"* ]]; }
 
 # Print a command so it can be read, and pasted back into a shell: plain words as they are,

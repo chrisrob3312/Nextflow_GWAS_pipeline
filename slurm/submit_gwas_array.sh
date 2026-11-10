@@ -122,6 +122,9 @@ if [[ ",${STRATUM_ANCESTRIES}," != *",${REF_ANCESTRY},"* ]]; then
     exit 1
 fi
 
+# Covariates: COVARIATES, else the study's list (HANDOFF_DIR/phenotypes/covariates.txt) + PC1..PC5
+COVARIATES="${COVARIATES:-$(HANDOFF_DIR="${HANDOFF_DIR}" default_covariates)}" || exit 1
+
 # The command as an array: one element per argument, so nothing is split or globbed by accident
 CMD=(Rscript "${SCRIPT_DIR}/bin/tractor_genesis_adapter.R"
     --tractor_prefix "${TRACTOR_PREFIX}"
@@ -142,7 +145,7 @@ ANC_INDEX_MAP="${ANC_INDEX_MAP:-${HANDOFF_DIR}/local_ancestry/flare_index_map.ts
 CMD+=(--ancestries "${STRATUM_ANCESTRIES}"
     --ref_ancestry "${REF_ANCESTRY}"
     --kinship "${KINSHIP}"
-    --covariates "${COVARIATES:-age,sex,PC1,PC2,PC3,PC4,PC5}"
+    --covariates "${COVARIATES}"
     --stratum "${STRATUM}"
     --min_stratum_n "${MIN_STRATUM_N:-50}"
     --ancestry_config "${SCRIPT_DIR}/bin/ancestry_config.R"

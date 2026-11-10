@@ -19,6 +19,10 @@
 # ============================================================================
 
 suppressPackageStartupMessages({ library(data.table); library(optparse) })
+local({   # sumstats_meta / fwrite_sumstats ("## key=value" lines), from next to this script
+    f <- sub("^--file=", "", grep("^--file=", commandArgs(trailingOnly = FALSE), value = TRUE))
+    source(file.path(if (length(f) > 0) dirname(normalizePath(f[1])) else "bin", "sumstats_io.R"))
+})
 
 opt <- parse_args(OptionParser(option_list = list(
     make_option("--input_dir", type = "character"),
@@ -39,10 +43,11 @@ cat("Meta-analysing strata:", paste(strata, collapse = ", "), "\n")
 cat("Method:", if (has_metafor) paste0(opt$method, "-effects (metafor)") else "IVW fixed-effect fallback", "\n\n")
 
 # Load strata
-dt_list <- list()
+dt_list <- list(); cov_by_stratum <- c()
 for (s in strata) {
     f <- file.path(opt$input_dir, gsub("\\{stratum\\}", s, opt$pattern))
     if (!file.exists(f)) { cat("  ", s, ": missing (", f, ")\n"); next }
+    cov_by_stratum[s] <- sumstats_meta_value(sumstats_meta(f), "covariates")
     d <- fread(f)
     d[, STRATUM := s]
     dt_list[[s]] <- d
@@ -102,7 +107,12 @@ pooled[, c("Q_HET", "DF_HET", "P_HET", "I2") := {
 }, by = ID]
 
 setorder(pooled, P_JOINT, na.last = TRUE)
-fwrite(pooled, opt$output, sep = "\t", compress = "gzip")
+# The strata's "## covariates=" lines (CP-08): one line when they agree, one per stratum otherwise
+cov_known <- cov_by_stratum[!is.na(cov_by_stratum)]
+meta <- if (length(cov_known) == 0) character() else if (length(unique(cov_known)) == 1 && length(cov_known) == length(cov_by_stratum)) {
+    c(covariates = unname(cov_known[1]))
+} else setNames(ifelse(is.na(cov_by_stratum), "unknown", cov_by_stratum), paste0("covariates_", names(cov_by_stratum)))
+fwrite_sumstats(pooled, opt$output, meta)
 cat("\nPooled results:", opt$output, "\n")
 cat("  Variants:", nrow(pooled), "\n")
 cat("  P_JOINT < 5e-8:", sum(pooled$P_JOINT < 5e-8, na.rm = TRUE), "| < 1e-5:", sum(pooled$P_JOINT < 1e-5, na.rm = TRUE), "\n")

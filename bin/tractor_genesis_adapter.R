@@ -82,7 +82,7 @@ option_list <- list(
 
     # Covariates
     make_option(c("-c", "--covariates"), type = "character", default = NULL,
-                help = "Comma-separated covariate column names"),
+                help = "Comma-separated covariate column names; each must be a numeric phenotype column (checked before anything is read or fitted). The list used is written as '## covariates=' above every results table"),
     make_option(c("--global_ancestry_prefix"), type = "character", default = NULL,
                 help = "Prefix for global ancestry columns (e.g., 'prop_' expects prop_EUR, prop_AFR, etc.)"),
 
@@ -188,7 +188,8 @@ if (!is.null(opt$ancestry_config) && file.exists(opt$ancestry_config)) {
     if (length(f) > 0) dirname(normalizePath(f[1])) else "."
 })
 source(file.path(.adapter_dir, "tractor_io.R"))
-source(file.path(.adapter_dir, "qc_assert.R"))    # qc_assert / qc_account (CP-11)
+source(file.path(.adapter_dir, "qc_assert.R"))    # qc_assert / qc_account (CP-11), check_covariates (CP-08)
+source(file.path(.adapter_dir, "sumstats_io.R"))  # fwrite_sumstats: "## covariates=" above every table (CP-08)
 
 # Parse ancestries
 ancestries <- strsplit(opt$ancestries, ",")[[1]]
@@ -269,6 +270,12 @@ if (!"sample_id" %in% names(pheno)) {
 n_samples <- nrow(pheno)
 cat("  Loaded", n_samples, "samples\n")
 
+# Every covariate must be a numeric column of the phenotype file (CP-08): checked here, before
+# anything else is read or fitted, so a misspelt or text column stops the task with its name
+# instead of failing inside a model (or, as before, being coerced to NA without a word)
+covariates_requested <- if (!is.null(opt$covariates)) trimws(strsplit(opt$covariates, ",")[[1]]) else character()
+check_covariates(pheno, covariates_requested, opt$phenotype)
+
 # Trait info
 if (opt$model == "binary") {
     n_cases <- sum(pheno[[opt$trait]] == 1, na.rm = TRUE)
@@ -347,7 +354,7 @@ if (!is.null(kinship)) {
     qc_assert("adapter_grm_cover", verdict = "INFO", n = length(joined), message = paste0(qc_where, ": no --kinship; fitted without relatedness"))
 }
 outcome_cols <- if (opt$model == "survival") c(opt$time_col, opt$event_col) else opt$trait
-gate_covariates <- if (!is.null(opt$covariates)) strsplit(opt$covariates, ",")[[1]] else NULL
+gate_covariates <- if (length(covariates_requested) > 0) covariates_requested else NULL
 n_null <- n_analysable(pheno, joined, outcome_cols, gate_covariates)
 acct("complete_cases", length(joined), n_null, paste("joined samples with", paste(c(outcome_cols, gate_covariates), collapse = ", ")))
 acct("min_stratum_n", n_null, if (n_null < opt$min_stratum_n) 0 else n_null, paste("--min_stratum_n", opt$min_stratum_n))
@@ -451,10 +458,7 @@ n_variants <- nrow(tractor_data$variant_info)
 cat("\nFitting null model...\n")
 
 # Parse covariates
-covariates <- NULL
-if (!is.null(opt$covariates)) {
-    covariates <- strsplit(opt$covariates, ",")[[1]]
-}
+covariates <- if (length(covariates_requested) > 0) covariates_requested else NULL
 
 # Add global ancestry proportions as covariates if specified
 if (!is.null(opt$global_ancestry_prefix)) {
@@ -490,6 +494,10 @@ if (!is.null(kinship)) {
 # ----------------------------------------------------------------------------
 `%||%` <- function(a, b) if (is.null(a)) b else a
 
+# Checked again with the global-ancestry columns added (CP-08); the realised list is written as
+# "## covariates=" above every results table
+if (length(covariates) > 0) check_covariates(pheno, covariates, opt$phenotype)
+sumstats_header <- c(covariates = if (length(covariates) > 0) paste(covariates, collapse = ",") else "none")
 cov_mat <- if (length(covariates) > 0) {
     m <- as.matrix(pheno[, covariates, with = FALSE]); storage.mode(m) <- "double"; m
 } else NULL
@@ -878,18 +886,18 @@ setorder(results_pval, P_JOINT, na.last = TRUE)
 
 # Main results file (SORTED BY P_JOINT - most significant first)
 out_file <- paste0(opt$output_prefix, ".tractor_genesis.tsv.gz")
-fwrite(results_pval, out_file, sep = "\t", compress = "gzip")
+fwrite_sumstats(results_pval, out_file, sumstats_header)
 cat("  Main results (sorted by P_JOINT):", out_file, "\n")
 
 # Genomic order file (for downstream analysis)
 genomic_file <- paste0(opt$output_prefix, ".tractor_genesis.genomic_order.tsv.gz")
-fwrite(results_genomic, genomic_file, sep = "\t", compress = "gzip")
+fwrite_sumstats(results_genomic, genomic_file, sumstats_header)
 cat("  Genomic order (for LD/fine-mapping):", genomic_file, "\n")
 
 # Top hits file (top 1000 by P_JOINT)
 n_top <- min(1000, nrow(results_pval))
 top_file <- paste0(opt$output_prefix, ".tractor_genesis.top_hits.tsv")
-fwrite(results_pval[1:n_top], top_file, sep = "\t")
+fwrite_sumstats(results_pval[1:n_top], top_file, sumstats_header)
 cat("  Top", n_top, "hits:", top_file, "\n")
 
 # Significant hits (P_JOINT < 1e-5 OR any P_{anc} < 1e-5) - sorted by P_JOINT
@@ -899,7 +907,7 @@ if (sum(is_sig) > 0) {
     sig_results <- results_pval[is_sig]
     setorder(sig_results, P_JOINT, na.last = TRUE)
     sig_file <- paste0(opt$output_prefix, ".tractor_genesis.significant.tsv")
-    fwrite(sig_results, sig_file, sep = "\t")
+    fwrite_sumstats(sig_results, sig_file, sumstats_header)
     cat("  Significant hits (P < 1e-5, sorted):", sig_file, "(", sum(is_sig), "variants)\n")
 }
 
@@ -910,7 +918,7 @@ if (sum(is_het) > 0) {
     het_results <- results_pval[is_het]
     setorder(het_results, P_HET, na.last = TRUE)
     het_file <- paste0(opt$output_prefix, ".tractor_genesis.heterogeneous.tsv")
-    fwrite(het_results, het_file, sep = "\t")
+    fwrite_sumstats(het_results, het_file, sumstats_header)
     cat("  Heterogeneous effects (sorted by P_HET):", het_file, "(", sum(is_het), "variants)\n")
 }
 
@@ -931,7 +939,7 @@ for (anc in ancestries) {
         anc_results <- results_pval[is_anc_specific]
         setorder(anc_results, get(p_col), na.last = TRUE)
         anc_file <- paste0(opt$output_prefix, ".tractor_genesis.", anc, "_specific.tsv")
-        fwrite(anc_results, anc_file, sep = "\t")
+        fwrite_sumstats(anc_results, anc_file, sumstats_header)
         cat("    ", anc, "-specific effects:", sum(is_anc_specific), "variants →", anc_file, "\n")
     }
 }

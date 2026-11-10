@@ -95,6 +95,26 @@ merge_pcs_checked <- function(ph, pcs, id_col = "sample_id", stratum = NA, what 
     out
 }
 
+# check_covariates(d, covs, source): stop unless every covariate is a column of d with numeric (or
+# logical) values (CP-08), naming every offending column at once. Called before any model is fitted.
+check_covariates <- function(d, covs, source = "the phenotype file") {
+    covs <- trimws(covs)
+    if (any(!nzchar(covs))) stop("an empty covariate name in the covariate list (", paste(covs, collapse = ","), ")", call. = FALSE)
+    problems <- character()
+    for (cv in covs) {
+        if (!cv %in% names(d)) { problems <- c(problems, paste0("covariate ", cv, " not found in ", source)); next }
+        x <- d[[cv]]
+        if (!(is.numeric(x) || is.logical(x))) {
+            problems <- c(problems, paste0("covariate ", cv, " is not numeric (", class(x)[1], " in ", source, ", e.g. '",
+                                           x[!is.na(x)][1], "'); recode it as numbers"))
+        } else if (all(is.na(x))) {
+            problems <- c(problems, paste0("covariate ", cv, " has no values in ", source))
+        }
+    }
+    if (length(problems)) stop(paste(problems, collapse = "; "), call. = FALSE)
+    invisible(covs)
+}
+
 # --- command line --------------------------------------------------------------------------
 if (any(grepl("^--file=.*qc_assert\\.R$", commandArgs(FALSE)))) {
     a <- commandArgs(trailingOnly = TRUE)
