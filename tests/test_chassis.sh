@@ -84,6 +84,7 @@ fi
 if [[ "${1:-}" == */ingest_structure.R || "${1:-}" == */genesis_pcair_pcrelate.R ]]; then
     mkdir -p "${GWAS_QC_DIR}/assertions.d"
     printf 'pcair_pc_merge\t%s\t8\tstub structure step\n' "${FAKE_PC_MERGE:-PASS}" > "${GWAS_QC_DIR}/assertions.d/pcair_pc_merge.stub.$$.tsv"
+    printf 'duplicates_removed\tPASS\t0\tstub structure step\n' > "${GWAS_QC_DIR}/assertions.d/duplicates_removed.stub.$$.tsv"
 fi
 exit "${FAKE_RSCRIPT_EXIT:-0}"
 EOF
@@ -577,12 +578,12 @@ if [[ -n "${REAL_RSCRIPT}" ]] && "${REAL_RSCRIPT}" -e 'quit(status = !requireNam
     out="$(cd /tmp && env "${SITE[@]}" STRATA_LIST=EUR TRAITS_LIST=os FAKE_SBATCH_RUN=1 RR_SACCT_WAIT=0 "$L" 2>&1)"
     RD="$(ls -d "${C}"/results/run_record/*/ | head -1)"; RD="${RD%/}"
     ex="$(awk -F'\t' 'NR > 1 {print $1, $14}' "${RD}/trace.tsv" | sort | uniq -c | tr -s ' ' | paste -sd'|' -)"
-    [[ "$ex" == " 1 combine 0| 22 gwas 0| 1 pcair 0" ]] && grep -q "QC GATE: passed (pcair_pc_merge)" "${C}"/logs/gwas_os_EUR_*_1.out \
+    [[ "$ex" == " 1 combine 0| 22 gwas 0| 1 pcair 0" ]] && grep -q "QC GATE: passed (pcair_pc_merge,duplicates_removed)" "${C}"/logs/gwas_os_EUR_*_1.out \
         && grep -q "QC GATE: passed (adapter_stratum_check,adapter_sample_join,adapter_grm_cover,adapter_model_n)" "${C}"/logs/combine_os_*.out \
-        && ok "launch: GWAS tasks gate on pcair_pc_merge, combine on the adapter's four ids; all pass" || bad "e2e gates: $ex"
+        && ok "launch: GWAS tasks gate on pcair_pc_merge and duplicates_removed, combine on the adapter's four ids; all pass" || bad "e2e gates: $ex"
     QA="${RD}/qc/qc_assertions.tsv"; SA="${RD}/qc/sample_accounting.tsv"
-    [[ "$(awk -F'\t' '$1 == "pcair_pc_merge" && $2 == "PASS"' "$QA" | wc -l)" -eq 5 ]] && grep -q $'^structure_ingest\tPASS\t8\t' "$QA" \
-        && ok "run record qc/qc_assertions.tsv: pcair_pc_merge PASS for cohort + 4 strata, structure_ingest PASS" || bad "assertions: $(cut -f1,2 "$QA" | sort | uniq -c)"
+    [[ "$(awk -F'\t' '$1 == "pcair_pc_merge" && $2 == "PASS"' "$QA" | wc -l)" -eq 5 ]] && grep -q $'^structure_ingest\tPASS\t8\t' "$QA" && grep -q $'^duplicates_removed\tPASS\t0\t' "$QA" \
+        && ok "run record qc/qc_assertions.tsv: pcair_pc_merge PASS for cohort + 4 strata, duplicates_removed and structure_ingest PASS" || bad "assertions: $(cut -f1,2 "$QA" | sort | uniq -c)"
     grep -q $'^phenotype_to_fam\tcohort\tNA\tNA\t8\t8\t0\t' "$SA" && grep -q $'^stratum\tEUR\tNA\tNA\t8\t3\t5\t' "$SA" && grep -q $'^pc_merge\tEUR\tNA\tNA\t3\t3\t0\t' "$SA" \
         && ok "qc/sample_accounting.tsv: phenotype -> .fam 8 -> 8, EUR stratum 8 -> 3, PC merge 3 -> 3" || bad "accounting: $(cat "$SA")"
     grep -q '^## QC assertions' "${RD}/summary.md" && grep -q '| pcair_pc_merge | 5 | 5 | 0 | 0 | 0 |' "${RD}/summary.md" \
@@ -700,6 +701,62 @@ out="$(cd /tmp && env "${SITE[@]}" "$L" 2>&1)"; rc=$?
     && ok "no COVARIATES and no covariates.txt: refused" || bad "no covariates.txt: rc=$rc $(grep -i covariat <<< "$out")"
 mv "${W}/cov.away" "${C}/data/handoff/phenotypes/covariates.txt"
 rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results" "${C:?}/logs"
+
+section "CP-13: one of each duplicate / MZ pair (kinship > 0.3536) leaves the GWAS phenotype"
+check "comparator: duplicates selected from the PC-Relate kinship, call rate from the pruned SNPs, removed before the PC merge" \
+    grep -q 'dups <- select_duplicates(kin_mat, call_rate)' "${C}/bin/genesis_pcair_pcrelate.R"
+check "comparator: writes <prefix>.removed_duplicates.tsv and files duplicates_removed" \
+    grep -q 'qc_assert("duplicates_removed", TRUE' "${C}/bin/genesis_pcair_pcrelate.R"
+check "the GWAS gate requires duplicates_removed" grep -q '^QC_REQUIRE_STRUCTURE="pcair_pc_merge,duplicates_removed"$' "${C}/bin/slurm_utils.sh"
+if [[ -n "${REAL_RSCRIPT}" ]] && "${REAL_RSCRIPT}" -e 'quit(status = !requireNamespace("data.table", quietly = TRUE))' >/dev/null 2>&1 \
+   && ! grep -q "placeholder rds" "${C}/data/handoff/structure/cohort.pcrelate.grm.rds"; then
+    out="$("${REAL_RSCRIPT}" -e '
+        source(file.path(commandArgs(TRUE)[1], "duplicates.R")); f <- file.path(commandArgs(TRUE)[2], "cr")
+        n <- 6; m <- 8; G <- matrix(0L, m, n); G[1:2, 2] <- 1L; G[1:4, 5] <- 1L; pad <- cbind(G, matrix(0L, m, 2))   # 01 = missing
+        bytes <- as.vector(sapply(1:m, function(i) c(sum(pad[i, 1:4] * 4^(0:3)), sum(pad[i, 5:8] * 4^(0:3)))))
+        con <- file(paste0(f, ".bed"), "wb"); writeBin(as.raw(c(0x6c, 0x1b, 0x01, bytes)), con); close(con)
+        ids <- paste0("S", 1:6); write.table(data.frame(ids, ids, 0, 0, 0, -9), paste0(f, ".fam"), quote = FALSE, row.names = FALSE, col.names = FALSE)
+        cr <- bed_call_rate(f, ids); cat("CR", cr, "\n")
+        k <- diag(0.5, 6); dimnames(k) <- list(ids, ids); cat("CLEAN", nrow(select_duplicates(k)), "\n")
+        k["S1", "S2"] <- k["S2", "S1"] <- 0.49; k["S2", "S3"] <- k["S3", "S2"] <- 0.48; k["S5", "S6"] <- k["S6", "S5"] <- 0.5; k["S4", "S6"] <- k["S6", "S4"] <- 0.3
+        d <- select_duplicates(k, cr); cat("DUP", paste(d$kept_iid, d$removed_iid, sep = ">"), "\n"); cat("WHY", d$reason[d$removed_iid == "S3"], "\n")' \
+        "${C}/bin" "$W" 2>&1)"
+    has "$out" "CR 1 0.75 1 1 0.5 1" && has "$out" "CLEAN 0" && has "$out" "DUP S1>S3 S1>S2 S6>S5" && has "$out" "grouped with S1 through S2" \
+        && ok "select_duplicates / bed_call_rate: groups joined by pairs > 0.3536 keep the highest call rate (ties: first ID); 0.3 is not a duplicate" || bad "duplicates unit: $out"
+    rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results" "${C:?}/logs"; mkdir -p "${C}/logs"
+    jid="$(pcair)"
+    D="${C}/results/pcair/cohort.removed_duplicates.tsv"
+    [[ "$(cat "$D")" == $'kept_iid\tremoved_iid\tkinship\treason' ]] && grep -q $'^duplicates_removed\tPASS\t0\tshipped kinship checked for pairs > 0.3536: 0 sample(s) removed .*upstream: duplicates_removed=no, 0 listed' "${C}/results/pcair/qc_assertions.tsv" \
+        && ok "clean bundle: header-only cohort.removed_duplicates.tsv, duplicates_removed PASS naming the upstream record" || bad "clean: $(cat "$D" "${C}/results/pcair/qc_assertions.tsv" 2>&1)"
+    KIN="${C}/data/handoff/structure/cohort.pcrelate.kinship.rds"; cp "$KIN" "${W}/kin.keep"
+    "${REAL_RSCRIPT}" -e 'f <- commandArgs(TRUE)[1]; m <- readRDS(f); m["S001", "S002"] <- m["S002", "S001"] <- 0.49; saveRDS(m, f)' "$KIN"
+    jid="$(pcair)"
+    [[ "$(tail -n +2 "$D" | cut -f1,2)" == $'S001\tS002' ]] && ! grep -q '^S002\b' <(cut -f3 "${C}/results/pcair/EUR.phenotypes.with_pcs.tsv") \
+        && ! cut -f3 "${C}/results/pcair/cohort.phenotypes.with_pcs.tsv" | grep -qx S002 && cut -f3 "${C}/results/pcair/EUR.phenotypes.with_pcs.tsv" | grep -qx S001 \
+        && grep -q $'^duplicates_removed\tPASS\t1\t' "${C}/results/pcair/qc_assertions.tsv" && grep -q $'^duplicates\tcohort\tNA\tNA\t8\t7\t1\t' "${C}"/results/qc/accounting.d/duplicates.*.tsv \
+        && ok "S001-S002 at 0.49: S002 removed (equal call rate, first ID kept), absent from every with_pcs phenotype; PASS; accounting 8 -> 7" || bad "dup: $(cat "$D"; cut -f3 "${C}/results/pcair/EUR.phenotypes.with_pcs.tsv" | paste -sd' ')"
+    # call rate decides: S001 missing every call in the stub .bed -> S002 stays
+    BED="${C}/data/handoff/genotypes/cohort.hardcall.maf01.bed"; cp "$BED" "${W}/bed.keep"
+    { printf '\x6c\x1b\x01'; for v in 1 2 3 4; do printf '\x01\x00'; done; } > "$BED"     # S001 = code 01 (missing) at all 4 sites
+    jid="$(pcair)"
+    [[ "$(tail -n +2 "$D" | cut -f1,2)" == $'S002\tS001' ]] && grep -q "kept the higher call rate (1.0000 vs 0.0000)" "$D" \
+        && ok "the higher call rate stays (S001 has no calls in the .bed: S002 kept)" || bad "call rate tiebreak: $(cat "$D")"
+    cp "${W}/bed.keep" "$BED"
+    # the bundle's own record contradicted: FAIL (the GWAS gate then stops)
+    MAN="${C}/data/handoff/manifest.tsv"; cp "$MAN" "${W}/man.keep"; sed -i 's/^# duplicates_removed\tno$/# duplicates_removed\tyes/' "$MAN"
+    jid="$(pcair)"
+    grep -q $'^duplicates_removed\tFAIL\t1\t.*the manifest says duplicates_removed=yes, yet 1 pair(s) > 0.3536 remain in the shipped kinship' "${C}/results/pcair/qc_assertions.tsv" \
+        && ok "manifest says duplicates_removed=yes but a pair remains: duplicates_removed FAIL" || bad "manifest yes: $(grep duplicates_removed "${C}/results/pcair/qc_assertions.tsv")"
+    cp "${W}/man.keep" "$MAN"; cp "${W}/kin.keep" "$KIN"
+    UP="${C}/data/handoff/qc/removed_duplicates.tsv"; cp "$UP" "${W}/up.keep"; printf 'S004\tS003\t0.5\tduplicate\n' >> "$UP"
+    jid="$(pcair)"
+    grep -q $'^duplicates_removed\tFAIL\t0\t.*qc/removed_duplicates.tsv lists 1 removed sample(s) still in the .fam (e.g. S003)' "${C}/results/pcair/qc_assertions.tsv" \
+        && ok "upstream lists a removed sample that is still in the .fam: FAIL" || bad "upstream list: $(grep duplicates_removed "${C}/results/pcair/qc_assertions.tsv")"
+    cp "${W}/up.keep" "$UP"
+    rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results" "${C:?}/logs"
+else
+    echo "  (real R with data.table, or real .rds files in the stub bundle, not available: CP-13 R-side checks skipped)"
+fi
 
 section "GxG: missing sumstats are left out and named; none at all stops the task"
 rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results" "${C:?}/logs"; mkdir -p "${C}/results/gwas/os" "${C}/logs"

@@ -20,6 +20,8 @@
 #   <prefix>.unrelated.txt           PC-AiR unrelated set (for GLM/Cox-only steps)
 #   <prefix>.phenotypes.with_pcs.tsv phenotype file with PC1..PCn replaced by PC-AiR PCs
 #   <prefix>.pcair.variance.tsv      variance explained per PC
+#   <prefix>.removed_duplicates.tsv  kept_iid removed_iid kinship reason: one of each pair with
+#                                    kinship > 0.3536 (duplicate / MZ), left out of the phenotype
 #   <dir of prefix>/qc_assertions.tsv  this run's QC verdicts (pcair_pc_merge), also filed to GWAS_QC_DIR
 # ============================================================================
 
@@ -51,7 +53,8 @@ if (is.null(opt$geno) && is.null(opt$gds)) stop("Required: --geno or --gds")
 `%||%` <- function(a, b) if (is.null(a)) b else a
 local({   # QC verdicts and sample accounting (CP-11), from next to this script
     f <- sub("^--file=", "", grep("^--file=", commandArgs(trailingOnly = FALSE), value = TRUE))
-    source(file.path(if (length(f) > 0) dirname(normalizePath(f[1])) else "bin", "qc_assert.R"))
+    d <- if (length(f) > 0) dirname(normalizePath(f[1])) else "bin"
+    source(file.path(d, "qc_assert.R")); source(file.path(d, "duplicates.R"))   # CP-13: duplicate / MZ removal
 })
 qc_copy_to(file.path(dirname(opt$output_prefix), "qc_assertions.tsv"))
 slurm_cpus <- suppressWarnings(as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", "")))
@@ -98,6 +101,9 @@ cat("\nKING-robust kinship...\n")
 king <- snpgdsIBDKING(gds, sample.id = sample_ids, snp.id = pruned, num.thread = opt$threads, verbose = FALSE)
 KINGmat <- king$kinship; dimnames(KINGmat) <- list(king$sample.id, king$sample.id)
 cat("  Pairs with kinship > 3rd degree:", sum(KINGmat[upper.tri(KINGmat)] > opt$kin_thresh), "\n")
+# Call rate on the pruned SNPs: the tie-break when one of a duplicate / MZ pair is removed (CP-13).
+# SNPRelate returns the samples in the GDS order, which sample_ids keeps (intersect keeps order).
+call_rate <- setNames(1 - snpgdsSampMissRate(gds, sample.id = sample_ids, snp.id = pruned, with.id = FALSE), sample_ids)
 snpgdsClose(gds)
 
 # ---------------------------------------------------------------------------
@@ -128,6 +134,18 @@ close(genoData)
 
 kin_mat <- as.matrix(kinobj)
 grm     <- kin_mat * 2
+
+# ---------------------------------------------------------------------------
+# 5b. Duplicates / MZ twins (CP-13): one member of each pair with kinship > 0.3536 leaves the
+#     phenotype step 1 reads (bin/duplicates.R; the bundle path applies the same rule)
+# ---------------------------------------------------------------------------
+dups <- select_duplicates(kin_mat, call_rate)
+dup_file <- paste0(opt$output_prefix, ".removed_duplicates.tsv")
+fwrite(dups, dup_file, sep = "\t")             # header-only when nothing is removed
+cat("\nDuplicates / MZ twins (kinship > ", sprintf("%.4f", DUP_KINSHIP), "): ", nrow(dups), " removed -> ", dup_file, "\n", sep = "")
+qc_assert("duplicates_removed", TRUE, n = nrow(dups),
+          message = sprintf("PC-Relate kinship checked for pairs > %.4f: %d sample(s) removed from the GWAS phenotype (%s)",
+                            DUP_KINSHIP, nrow(dups), basename(dup_file)))
 
 # ---------------------------------------------------------------------------
 # 6. Write outputs
@@ -187,6 +205,9 @@ if (!is.null(opt$phenotype) && file.exists(opt$phenotype)) {
     qc_account("phenotype_to_genotype", n_ph, nrow(ph), stratum = "cohort",
                reason = sprintf("rows of %s with a sample in the genotype file (%d genotyped samples have no phenotype row)",
                                 basename(opt$phenotype), sum(!gds_ids %in% ph[[idc]])))
+    n_ph <- nrow(ph)
+    ph <- ph[!ph[[idc]] %in% dups$removed_iid]
+    qc_account("duplicates", n_ph, nrow(ph), stratum = "cohort", reason = paste("one of each duplicate / MZ pair removed; see", basename(dup_file)))
     ph <- merge_pcs_checked(ph, pcs, id_col = idc, stratum = "cohort", what = basename(out_ph))
     # CP-08: the PC columns every model will use as covariates are there and numeric
     check_covariates(ph, paste0("PC", 1:opt$n_pcs), out_ph)

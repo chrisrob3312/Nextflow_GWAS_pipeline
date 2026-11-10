@@ -21,18 +21,23 @@
 #   <S>.phenotypes.with_pcs.tsv        phenotype of S's members + S's within-stratum PCs
 #   cohort.pcrelate.grm.rds, cohort.pcrelate.kinship.rds   symbolic links to the shipped files
 #   structure_source.tsv               where each file came from
+#   cohort.removed_duplicates.tsv      kept_iid removed_iid kinship reason: one of each pair with
+#                                      kinship > 0.3536 in the shipped kinship (CP-13), left out of
+#                                      every *.phenotypes.with_pcs.tsv; header-only when none
 #   <strata_dir>/<S>.samples.txt       S's members, one IID per line
 #   qc_assertions.tsv                  this step's QC verdicts (also filed to GWAS_QC_DIR)
 # Existing PC columns (PC1, PC2, ...) of the phenotype file are replaced, never mixed.
 # QC (CP-11, bin/qc_assert.R): files pcair_pc_merge once per output phenotype file (every row has
-# its PCs) and structure_ingest (PASS at the end, FAIL with the reason on any refusal), and one
-# sample_accounting row per join: phenotype -> .fam IIDs -> stratum -> PC merge.
+# its PCs), duplicates_removed (CP-13; FAIL only where the bundle's own record is contradicted)
+# and structure_ingest (PASS at the end, FAIL with the reason on any refusal), and one
+# sample_accounting row per join: phenotype -> .fam IIDs -> duplicates -> stratum -> PC merge.
 # ============================================================================
 suppressPackageStartupMessages({ library(data.table); library(optparse) })
 `%||%` <- function(a, b) if (is.null(a)) b else a
 local({
     f <- sub("^--file=", "", grep("^--file=", commandArgs(trailingOnly = FALSE), value = TRUE))
-    source(file.path(if (length(f) > 0) dirname(normalizePath(f[1])) else "bin", "qc_assert.R"))
+    d <- if (length(f) > 0) dirname(normalizePath(f[1])) else "bin"
+    source(file.path(d, "qc_assert.R")); source(file.path(d, "duplicates.R"))   # CP-13: duplicate / MZ removal
 })
 
 opt <- parse_args(OptionParser(option_list = list(
@@ -69,6 +74,7 @@ if (anyDuplicated(fam_ids)) refuse(fam_file, "has a duplicated IID")
 # --- GRM and kinship: dimnames are the .fam IIDs -----------------------------------
 for (f in c(grm_file, kin_file)) {
     m <- readRDS(f)
+    if (f == kin_file) kin <- m
     rn <- rownames(m); cn <- colnames(m)
     if (is.null(rn) || is.null(cn)) refuse(f, "has no dimnames (the contract keys it by .fam IID)")
     if (!identical(rn, cn)) refuse(f, "row and column names differ")
@@ -116,6 +122,41 @@ geno_rows <- base[sample_id %in% fam_ids]
 qc_account("phenotype_to_fam", nrow(base), nrow(geno_rows), stratum = "cohort",
            reason = sprintf("phenotype rows with a .fam IID (%d .fam IIDs have no phenotype row)",
                             sum(!fam_ids %in% base$sample_id)))
+
+# --- duplicates / MZ twins (CP-13) ----------------------------------------------------
+# The contract records whether upstream removed them (manifest "# duplicates_removed" yes|no, and
+# qc/removed_duplicates.tsv). Whatever it says, the shipped kinship is checked here with the
+# comparator's rule (bin/duplicates.R): one of each pair > 0.3536 leaves the GWAS phenotype, the
+# higher call rate (from the .bed) staying. Contradicting the bundle's own record is a FAIL.
+dups <- select_duplicates(kin)
+if (nrow(dups) > 0) {
+    cr <- tryCatch(bed_call_rate(sub("\\.fam$", "", fam_file), unique(c(dups$kept_iid, dups$removed_iid))),
+                   error = function(e) { cat("  call rate not available:", conditionMessage(e), "\n"); NULL })
+    dups <- select_duplicates(kin, cr)
+}
+dup_file <- file.path(opt$out_dir, "cohort.removed_duplicates.tsv")
+fwrite(dups, dup_file, sep = "\t")             # header-only when nothing is removed
+man_file <- file.path(H, "manifest.tsv")
+up_flag <- if (file.exists(man_file)) {
+    l <- grep("^# duplicates_removed\t", readLines(man_file), value = TRUE)
+    if (length(l)) sub("^[^\t]*\t", "", l[1]) else "not stated"
+} else "not stated (no manifest.tsv)"
+up_file <- file.path(H, "qc", "removed_duplicates.tsv")
+up_removed <- if (file.exists(up_file)) fread(up_file, colClasses = "character")[["removed_iid"]] else character()
+still_in <- intersect(up_removed, fam_ids)
+dup_problem <- c(
+    if (length(still_in)) sprintf("qc/removed_duplicates.tsv lists %d removed sample(s) still in the .fam (e.g. %s)",
+                                  length(still_in), paste(head(still_in, 3), collapse = ", ")),
+    if (up_flag == "yes" && nrow(dups) > 0) sprintf("the manifest says duplicates_removed=yes, yet %d pair(s) > %.4f remain in the shipped kinship",
+                                                    nrow(dups), DUP_KINSHIP))
+qc_assert("duplicates_removed", length(dup_problem) == 0, n = nrow(dups),
+          message = paste0(sprintf("shipped kinship checked for pairs > %.4f: %d sample(s) removed from the GWAS phenotype (%s); upstream: duplicates_removed=%s, %d listed in qc/removed_duplicates.tsv",
+                                   DUP_KINSHIP, nrow(dups), basename(dup_file), up_flag, length(up_removed)),
+                           if (length(dup_problem)) paste0(". ", paste(dup_problem, collapse = "; ")) else ""))
+n_g <- nrow(geno_rows)
+geno_rows <- geno_rows[!sample_id %in% dups$removed_iid]
+qc_account("duplicates", n_g, nrow(geno_rows), stratum = "cohort",
+           reason = paste("one of each duplicate / MZ pair removed; see", basename(dup_file)))
 write_with_pcs <- function(ph, p, out, S) {
     ph <- merge_pcs_checked(ph, p, stratum = S, what = basename(out))
     fwrite(ph, out, sep = "\t")

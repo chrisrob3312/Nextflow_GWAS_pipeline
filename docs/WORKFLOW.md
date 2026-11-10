@@ -319,18 +319,31 @@ is there and did not fail. "The check did not run" and "the check passed" are ke
 
 | gate | runs in | requires | filed by |
 |---|---|---|---|
-| step 0 -> 1 | every GWAS task, before the adapter | `pcair_pc_merge`: every row of each `*.phenotypes.with_pcs.tsv` has its PCs | `bin/ingest_structure.R` (once per file: cohort and each stratum), or the comparator `bin/genesis_pcair_pcrelate.R` |
+| step 0 -> 1 | every GWAS task, before the adapter | `pcair_pc_merge`: every row of each `*.phenotypes.with_pcs.tsv` has its PCs; `duplicates_removed`: the duplicate / MZ check ran (below) | `bin/ingest_structure.R` (`pcair_pc_merge` once per file: cohort and each stratum), or the comparator `bin/genesis_pcair_pcrelate.R` |
 | step 1 -> 2 | the combine job, before combining | `adapter_stratum_check` (samples belong to the stratum; `INFO` when no strata file), `adapter_sample_join` (phenotype and Tractor samples overlap), `adapter_grm_cover` (every joined sample is in the GRM; `INFO` without `--kinship`), `adapter_model_n` (the null model was fitted on exactly the complete cases; `INFO` for a stratum skipped below `MIN_STRATUM_N`) | `bin/tractor_genesis_adapter.R`, every task |
 
 `structure_ingest` (`PASS`, or `FAIL` with the reason the ingest refused) is filed too, for the
 record; the ingest's refusal already stops the launch through the job dependency.
 
 Sample-accounting rows, in order: structure step `phenotype_to_fam` (bundle) or
-`phenotype_to_genotype` and `sample_include` (comparator), `stratum`, `pc_merge`; adapter
+`phenotype_to_genotype` and `sample_include` (comparator), `duplicates`, `stratum`, `pc_merge`; adapter
 `phenotype_input`, `stratum`, `tractor_join`, `grm_intersection`, `complete_cases`,
 `min_stratum_n`, `model_n`. A phenotype row of a sample that was never genotyped is dropped
 before the PC merge, and counted; a genotyped sample left without PCs is a `FAIL`, not a silent
 `NA` carried into the GWAS.
+
+**Duplicates and MZ twins** (CP-13, `bin/duplicates.R`). Both structure paths apply one rule: a
+pair with kinship > 2^(-3/2) = 0.3536 (the duplicate / MZ boundary) is a duplicate; in each group
+of samples joined by such pairs the highest call rate stays (ties: the first ID), and the others
+are left out of every `*.phenotypes.with_pcs.tsv`, so step 1 never sees them (the GRM and PC files
+are unchanged). The list is `results/pcair/cohort.removed_duplicates.tsv` (`kept_iid removed_iid
+kinship reason`, the bundle's header; header-only when none). The ingest checks the shipped
+kinship and takes call rates from the `.bed` (10 blocks, at most 50,000 variants); the comparator
+uses PC-Relate's kinship and the pruned SNPs. `duplicates_removed` is `PASS` once the check has
+run, and `FAIL` only where the bundle's own record is contradicted: the manifest says
+`duplicates_removed=yes` yet a pair remains, or `qc/removed_duplicates.tsv` lists a sample that is
+still in the `.fam`. Whether upstream removes them is recorded per bundle (manifest
+`# duplicates_removed`); the first real bundle answers it (X-02).
 
 `SKIP_PCAIR=true` reuses `results/pcair/`; its verdicts (`results/pcair/qc_assertions.tsv`, written
 by the structure step) are copied into the run's `qc/`, each message marked
