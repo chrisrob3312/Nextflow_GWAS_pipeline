@@ -21,14 +21,18 @@ process TRACTOR_GENESIS {
     path kinship_matrix
     val covariate_cols
 
+    // A stratum below --min_stratum_n analysable samples is skipped by the adapter (exit 0, no
+    // results; status skipped_below_min_stratum_n in <prefix>.run_counts.tsv), as on the SLURM path:
+    // every results output is therefore optional, and the counts file is the one that always exists.
     output:
-    tuple val(meta), path("${prefix}.tractor_genesis.tsv.gz"),               emit: sumstats
-    tuple val(meta), path("${prefix}.tractor_genesis.genomic_order.tsv.gz"), emit: genomic_order
-    tuple val(meta), path("${prefix}.tractor_genesis.top_hits.tsv"),         emit: top_hits
+    tuple val(meta), path("${prefix}.run_counts.tsv"),                       emit: run_counts
+    tuple val(meta), path("${prefix}.tractor_genesis.tsv.gz"),               emit: sumstats, optional: true
+    tuple val(meta), path("${prefix}.tractor_genesis.genomic_order.tsv.gz"), emit: genomic_order, optional: true
+    tuple val(meta), path("${prefix}.tractor_genesis.top_hits.tsv"),         emit: top_hits, optional: true
     tuple val(meta), path("${prefix}.tractor_genesis.significant.tsv"),      emit: significant, optional: true
     tuple val(meta), path("${prefix}.tractor_genesis.heterogeneous.tsv"),    emit: heterogeneous, optional: true
     tuple val(meta), path("${prefix}.tractor_genesis.*_specific.tsv"),       emit: ancestry_specific, optional: true
-    tuple val(meta), path("${prefix}.null_model.rds"),                       emit: null_model
+    tuple val(meta), path("${prefix}.null_model.rds"),                       emit: null_model, optional: true
     path "versions.yml", emit: versions
 
     when:

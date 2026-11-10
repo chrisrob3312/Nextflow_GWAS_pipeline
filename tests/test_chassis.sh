@@ -1155,6 +1155,12 @@ has "$out" "STEPS 0b-0d: Submitting the Tractor extraction and the per-stratum l
     && ok "RUN_TRACTOR_PREP=true: extraction, then ancestries (after it and step 0), then the 88-task layout; every GWAS array waits on the layout and step 0" || bad "prep wiring: $(grep 'Tractor\|GWAS mrd (binary) / AFR' <<< "$out")"
 rm -rf "${C:?}/data/tractor/cohort" "${C:?}/data/tractor/ADM" "${C:?}/data/tractor/EUO" "${C:?}/results" "${C:?}/logs" "${FAKE_SLURM_DIR:?}"/*
 
+section "Nextflow: the adapter module skips a stratum below MIN_STRATUM_N as the SLURM path does"
+NFM="${C}/modules/local/tractor_genesis_adapter/main.nf"
+[[ "$(grep -c 'emit: \(sumstats\|genomic_order\|top_hits\|null_model\), optional: true' "$NFM")" -eq 4 ]] && grep -q 'path("${prefix}.run_counts.tsv"),  *emit: run_counts$' "$NFM" \
+    && ! grep -q 'emit: \(sumstats\|genomic_order\|top_hits\|null_model\)$' "$NFM" \
+    && ok "TRACTOR_GENESIS: every results output optional (a skipped stratum writes none), run_counts.tsv always emitted" || bad "module outputs: $(grep emit "$NFM")"
+
 section "GxG: missing sumstats are left out and named; none at all stops the task"
 rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results" "${C:?}/logs"; mkdir -p "${C}/results/gwas/os" "${C}/logs"
 echo x | gzip > "${C}/results/gwas/os/POOLED.ivw_descriptive.sumstats.gz"; echo x | gzip > "${C}/results/gwas/os/EUR.sumstats.gz"
