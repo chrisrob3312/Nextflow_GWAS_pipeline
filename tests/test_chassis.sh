@@ -758,6 +758,37 @@ else
     echo "  (real R with data.table, or real .rds files in the stub bundle, not available: CP-13 R-side checks skipped)"
 fi
 
+section "CP-14: --p-col with P_JOINT first in the plot and filter scripts; the QQ lambda is the plotted column's"
+QQ="${C}/bin/create_qq_plot.R"; MH="${C}/bin/create_manhattan_plot.R"
+! grep -q 'lambda_gc <- as.numeric(readLines(args$lambda_gc)' "$QQ" "$MH" && grep -q 'writeLines(format(lambda_gc, digits = 6), paste0(args$output_prefix, ".lambda.txt"))' "$QQ" \
+    && ok "QQ: the computed lambda is never overwritten by --lambda-gc; it is written to <prefix>.lambda.txt (Manhattan: same lambda in the title)" || bad "lambda overwrite still there"
+[[ "$(grep -c 'fread(cmd = paste("zcat", shQuote(args$sumstats)))' "$QQ" "$MH" | awk -F: '{s += $2} END {print s}')" -eq 2 ]] && ok "plot scripts read .gz through zcat (path quoted)" || bad "zcat"
+if [[ -n "${REAL_RSCRIPT}" ]]; then
+    out="$("${REAL_RSCRIPT}" -e '
+        for (f in commandArgs(TRUE)) {
+            for (x in parse(f)) if (is.call(x) && identical(x[[1]], as.name("<-")) && identical(x[[2]], as.name("resolve_p_col"))) eval(x)
+            nm <- c("CHROM", "POS", "ID", "P_EUR", "P_JOINT")
+            r <- function(...) tryCatch(resolve_p_col(...), error = function(e) paste("ERR", conditionMessage(e)))
+            cat(basename(f), r(nm), r(nm, "P_EUR"), r(nm, "p_eur"), r(c("CHR", "P"), NULL), "|", r(nm, "P_AFR"), "|", r(c("CHR", "BETA")), "\n") }' "$QQ" "$MH" 2>&1)"
+    want=" P_JOINT P_EUR P_EUR P | ERR --p-col P_AFR is not a column (P columns: P_EUR, P_JOINT) | ERR Could not detect the P-value column"
+    has "$out" "create_qq_plot.R${want}" && has "$out" "create_manhattan_plot.R${want}" \
+        && ok "resolve_p_col (both plot scripts): P_JOINT by default, --p-col P_EUR, unknown --p-col named with the P columns there are" || bad "resolver: $out"
+fi
+if python3 -c 'import pandas' >/dev/null 2>&1 && [[ -n "${REAL_RSCRIPT}" ]]; then
+    TD="${W}/cp14"; rm -rf "${TD:?}"; mkdir -p "$TD"
+    "${REAL_RSCRIPT}" -e 'set.seed(1); n <- 100; d <- data.frame(CHROM = rep(1:2, each = 50), POS = rep(100000L + 10000L * (0:49), 2), ID = paste0("v", 1:n), P_JOINT = runif(n), P_EUR = runif(n))
+        d$P_JOINT[3] <- 1e-9; d$P_EUR[7] <- 2e-9; d$P_EUR[8] <- 3e-6
+        con <- gzfile(commandArgs(TRUE)[1], "w"); writeLines("## covariates=sex,PC1", con); write.table(d, con, sep = "\t", quote = FALSE, row.names = FALSE); close(con)' "${TD}/s.tsv.gz"
+    F="${C}/bin/filter_gwas_results.py"
+    a="$(python3 -I "$F" --input "${TD}/s.tsv.gz" --output "${TD}/a.tsv.gz" --significant "${TD}/a.sig.tsv" 2>&1)"
+    b="$(python3 -I "$F" --input "${TD}/s.tsv.gz" --output "${TD}/b.tsv.gz" --significant "${TD}/b.sig.tsv" --p-col P_EUR 2>&1)"
+    c="$(python3 -I "$F" --input "${TD}/s.tsv.gz" --output "${TD}/c.tsv.gz" --significant "${TD}/c.sig.tsv" --p-col P_AFR 2>&1)"; rc=$?
+    has "$a" "P column: P_JOINT" && [[ "$(cut -f3 "${TD}/a.sig.tsv" | paste -sd, -)" == "ID,v3" ]] \
+        && has "$b" "P column: P_EUR" && [[ "$(cut -f3 "${TD}/b.sig.tsv" | paste -sd, -)" == "ID,v7" && "$(zcat "${TD}/b.tsv.gz" | cut -f3 | paste -sd, -)" == "ID,v7,v8" ]] \
+        && [[ $rc -ne 0 ]] && has "$c" "--p-col P_AFR is not a column (P columns: P_JOINT, P_EUR)" \
+        && ok "filter_gwas_results.py on 100 rows (CHROM POS ID P_JOINT P_EUR): P_JOINT by default, --p-col P_EUR, an unknown --p-col refused" || bad "filter: $a / $b / $c"
+fi
+
 section "GxG: missing sumstats are left out and named; none at all stops the task"
 rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results" "${C:?}/logs"; mkdir -p "${C}/results/gwas/os" "${C}/logs"
 echo x | gzip > "${C}/results/gwas/os/POOLED.sumstats.gz"; echo x | gzip > "${C}/results/gwas/os/EUR.sumstats.gz"

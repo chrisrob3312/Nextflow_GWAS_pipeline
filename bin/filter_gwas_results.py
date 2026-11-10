@@ -21,8 +21,12 @@ def count_meta_lines(path: str) -> int:
     return n
 
 
-def detect_columns(df: pd.DataFrame) -> dict:
-    """Detect column names for different GWAS tools."""
+def detect_columns(df: pd.DataFrame, p_col: str = None) -> dict:
+    """Detect column names for different GWAS tools.
+
+    The P column: --p-col when given (exactly, else ignoring case; an error when absent); without
+    it P_JOINT (the Tractor joint test) comes first, then the usual single-P names (CP-14).
+    """
     column_mapping = {
         "chr": None,
         "pos": None,
@@ -37,7 +41,7 @@ def detect_columns(df: pd.DataFrame) -> dict:
     chr_patterns = ["CHR", "CHROM", "#CHROM", "chromosome", "chr"]
     pos_patterns = ["POS", "BP", "GENPOS", "position", "pos"]
     snp_patterns = ["SNP", "ID", "RSID", "variant_id", "MarkerName"]
-    p_patterns = ["P", "PVALUE", "P_VALUE", "LOG10P", "p.value", "P-value"]
+    p_patterns = ["P_JOINT", "P", "PVALUE", "P_VALUE", "LOG10P", "p.value", "P-value"]
     beta_patterns = ["BETA", "EFFECT", "B", "beta", "Effect"]
     se_patterns = ["SE", "STDERR", "se", "StdErr"]
     af_patterns = ["A1FREQ", "AF", "MAF", "EAF", "Freq", "freq"]
@@ -73,6 +77,21 @@ def detect_columns(df: pd.DataFrame) -> dict:
         ):
             column_mapping["af"] = col
 
+    # P column by priority, not by position in the file
+    upper = {}
+    for col in df.columns:
+        upper.setdefault(col.upper(), col)
+    if p_col:
+        if p_col in df.columns:
+            column_mapping["p"] = p_col
+        elif p_col.upper() in upper:
+            column_mapping["p"] = upper[p_col.upper()]
+        else:
+            p_like = [c for c in df.columns if c.upper().startswith("P_") or c.upper() in ("P", "PVALUE")]
+            raise ValueError(f"--p-col {p_col} is not a column (P columns: {', '.join(p_like)})")
+    else:
+        column_mapping["p"] = next((upper[x.upper()] for x in p_patterns if x.upper() in upper), None)
+
     return column_mapping
 
 
@@ -82,6 +101,7 @@ def filter_gwas(
     significant_path: str,
     p_threshold: float = 5e-8,
     suggestive_threshold: float = 1e-5,
+    p_col_requested: str = None,
 ) -> None:
     """Filter GWAS results."""
 
@@ -93,10 +113,11 @@ def filter_gwas(
         df = pd.read_csv(input_path, sep="\t", skiprows=skip)
 
     # Detect columns
-    cols = detect_columns(df)
+    cols = detect_columns(df, p_col_requested)
 
     if cols["p"] is None:
-        raise ValueError("Could not detect P-value column")
+        raise ValueError("Could not detect P-value column (looked for P_JOINT, P, PVALUE, ...; or pass --p-col)")
+    print(f"P column: {cols['p']}")
 
     # Convert P-values if needed (handle LOG10P)
     p_col = cols["p"]
@@ -139,6 +160,11 @@ def main():
         default=1e-5,
         help="Suggestive P-value threshold",
     )
+    parser.add_argument(
+        "--p-col",
+        default=None,
+        help="P column to filter on [default: P_JOINT, else P / PVALUE / P_VALUE / LOG10P]",
+    )
     args = parser.parse_args()
 
     filter_gwas(
@@ -147,6 +173,7 @@ def main():
         args.significant,
         args.p_threshold,
         args.suggestive_threshold,
+        args.p_col,
     )
 
 

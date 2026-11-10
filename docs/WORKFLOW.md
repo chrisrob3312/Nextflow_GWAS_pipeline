@@ -138,6 +138,11 @@ itself; the combine step keeps them once (and stops if two chromosomes disagree)
 `meta_analyze_strata.R` writes one `## covariates=` line when the strata agree, one
 `## covariates_<stratum>=` line each when they do not (`bin/sumstats_io.R`).
 
+The QQ and Manhattan plots and the hit filter (`bin/create_qq_plot.R`, `bin/create_manhattan_plot.R`,
+`bin/filter_gwas_results.py`) take `--p-col` (e.g. `--p-col P_EUR`); without it they use `P_JOINT`,
+then `P` / `PVALUE` / `P_VALUE`. The lambda GC shown is always that of the plotted column, written to
+`<prefix>.lambda.txt` by the QQ script; a `--lambda-gc` file is printed for comparison, never used.
+
 ## 4. GxG interaction (end of pipeline)
 
 ```mermaid
