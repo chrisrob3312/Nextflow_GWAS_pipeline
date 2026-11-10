@@ -239,7 +239,7 @@ nsb="$(wc -l <<< "$sb")"
 [[ "$(grep -c -- '--partition=testpart --account=testacct' <<< "$sb")" -eq "$nsb" ]] && ok "partition and account from the environment on all ${nsb} sbatch lines" || bad "site args missing on some line"
 logs="$(grep -o -- '--\(output\|error\)=[^ ]*' <<< "$sb")"
 [[ -n "$logs" ]] && ! grep -qv -- "=${C}/logs/" <<< "$logs" && ok "every --output/--error is absolute, under ${C}/logs" || bad "log paths: $(grep -v -- "=${C}/logs/" <<< "$logs" | head -3)"
-has "$out" "deferred: PRS COLOC VALIDATION GXG (RUN_*=false)" && ok "prints 'deferred: PRS COLOC VALIDATION GXG (RUN_*=false)'" || bad "deferred line missing"
+has "$out" "deferred: PRS COLOC VALIDATION GXG MRMEGA (RUN_*=false)" && ok "prints 'deferred: PRS COLOC VALIDATION GXG MRMEGA (RUN_*=false)'" || bad "deferred line missing"
 grep -q 'submit_prs_array\|colocalization\|PRS validation\|submit_gxg_array' <<< "$sb" && bad "a deferred step was submitted" || ok "no sbatch for PRS, coloc, validation or GxG"
 has "$sb" "run record finalise: sbatch" && grep -q -- '--dependency=afterany:dry1:dry2:' <<< "$(grep 'finalise' <<< "$sb")" && ok "finalise job waits on every job (afterany)" || bad "finalise line"
 [[ ! -e "${C}/results" ]] && ok "a dry run creates no run record" || bad "dry run wrote ${C}/results"
@@ -247,13 +247,13 @@ has "$sb" "run record finalise: sbatch" && grep -q -- '--dependency=afterany:dry
 section "CP-03: RUN_* gates"
 out="$(cd /tmp && env "${SITE[@]}" RUN_PRS=true "$L" --dry-run 2>&1)"
 grep -q 'submit_prs_array.sh os' <<< "$(grep '\[DRY-RUN\]' <<< "$out")" && ok "RUN_PRS=true prints the PRS sbatch" || bad "RUN_PRS=true: no PRS sbatch"
-has "$out" "deferred: COLOC VALIDATION GXG (RUN_*=false)" && ok "RUN_PRS=true: deferred list shrinks" || bad "deferred with RUN_PRS"
+has "$out" "deferred: COLOC VALIDATION GXG MRMEGA (RUN_*=false)" && ok "RUN_PRS=true: deferred list shrinks" || bad "deferred with RUN_PRS"
 out="$(cd /tmp && env "${SITE[@]}" RUN_GXG=true "$L" --dry-run 2>&1)"
 gx="$(grep '\[DRY-RUN\] GxG' <<< "$out")"
 [[ "$(grep -c -- '--dependency=afterok:dry14:dry15:dry16 ' <<< "$gx")" -eq 3 ]] && grep -q -- '--array=0-4 ' <<< "$gx" \
     && ok "RUN_GXG without PRS: GxG waits on the three combine jobs; one task for POOLED + each of the 4 bundle strata" || bad "GxG dependency: $gx"
 grep -q -- 'afterok: \|afterok::\|afterok:$\|--dependency= ' <<< "$out" && bad "an empty job id in a dependency" || ok "no empty job id in any dependency"
-out="$(cd /tmp && env "${SITE[@]}" RUN_PRS=true RUN_COLOC=true RUN_VALIDATION=true RUN_GXG=true "$L" --dry-run 2>&1)"
+out="$(cd /tmp && env "${SITE[@]}" RUN_PRS=true RUN_COLOC=true RUN_VALIDATION=true RUN_GXG=true RUN_MRMEGA=true "$L" --dry-run 2>&1)"
 has "$out" "deferred: none" && [[ "$(grep -c '\[DRY-RUN\] \(PRS\|colocalization\|PRS validation\|GxG\)' <<< "$out")" -eq 10 ]] && ok "all RUN_*=true: every step submitted (coloc once per trait)" || bad "all on"
 out="$(cd /tmp && env "${SITE[@]}" RUN_VALIDATION=true "$L" --dry-run 2>&1)"; rc=$?
 [[ $rc -ne 0 ]] && has "$out" "RUN_VALIDATION=true needs RUN_PRS=true" && ok "RUN_VALIDATION without RUN_PRS: refused" || bad "validation alone: rc=$rc"
@@ -853,6 +853,31 @@ if [[ -n "${REAL_RSCRIPT}" ]] && "${REAL_RSCRIPT}" -e 'quit(status = !all(sapply
 else
     echo "  (real R with data.table and optparse, or real .rds files in the stub bundle, not available: CP-22 end-to-end checks skipped)"
 fi
+
+section "CP-20: MR-MEGA axes = min(K-2, MRMEGA_PCS) from the strata with sumstats"
+M="${C}/slurm/submit_mrmega.sh"; GD="${C}/results/gwas/os"
+rm -rf "${C:?}/results"; mkdir -p "$GD"
+for s in EUR AFR AMR; do echo x | gzip > "${GD}/${s}.sumstats.gz"; done
+out="$(cd /tmp && DRY_RUN=1 bash "$M" os 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && has "$out" "MR-MEGA os: K=3 pc_axes=1 (min(K-2, MRMEGA_PCS=3))" && has "$out" "strata with sumstats: AFR,AMR,EUR; without: MIX" \
+    && ok "three stratum files: the dry run logs K=3 pc_axes=1" || bad "K=3: $out"
+echo x | gzip > "${GD}/MIX.sumstats.gz"; out4="$(cd /tmp && DRY_RUN=1 bash "$M" os 2>&1)"; out4b="$(cd /tmp && DRY_RUN=1 MRMEGA_PCS=1 bash "$M" os 2>&1)"
+has "$out4" "K=4 pc_axes=2" && has "$out4b" "K=4 pc_axes=1 (min(K-2, MRMEGA_PCS=1))" && ok "K=4: pc_axes 2, capped at MRMEGA_PCS=1 when set" || bad "K=4: $out4 / $out4b"
+rm -f "${GD}/AMR.sumstats.gz" "${GD}/MIX.sumstats.gz"
+out="$(cd /tmp && DRY_RUN=1 bash "$M" os 2>&1)"
+has "$out" "MR-MEGA os: K=2 pc_axes=0: fixed-effect meta-analysis, not MR-MEGA" && ok "two stratum files: pc_axes=0 and the fixed-effect caveat" || bad "K=2: $out"
+rm -f "${GD}/AFR.sumstats.gz"
+out="$(cd /tmp && DRY_RUN=1 bash "$M" os 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && has "$out" "MR-MEGA os: excluded: K=1 < pc_axes + 2 = 2" && ok "one stratum file: the trait is logged as excluded" || bad "K=1: rc=$rc $out"
+out="$(cd /tmp && DRY_RUN=1 STRATA_LIST=EUR,AFR bash "$M" os 2>&1)"
+has "$out" "strata with sumstats: EUR; without: AFR" && ok "STRATA_LIST limits the strata counted" || bad "strata list: $out"
+rm -rf "${C:?}/results"
+out="$(cd /tmp && env "${SITE[@]}" RUN_MRMEGA=true "$L" --dry-run 2>&1)"
+mm="$(grep '\[DRY-RUN\] MR-MEGA' <<< "$out")"
+[[ "$(wc -l <<< "$mm")" -eq 3 ]] && grep -q 'MR-MEGA mrd: sbatch .*--dependency=afterok:dry14 .*submit_mrmega.sh mrd' <<< "$mm" \
+    && ok "RUN_MRMEGA=true: one MR-MEGA job per trait, each after its own combine job" || bad "mrmega dry: $mm"
+out="$(cd /tmp && env "${SITE[@]}" MRMEGA_PCS=0 "$L" --dry-run 2>&1)"; rc=$?
+[[ $rc -eq 2 ]] && has "$out" "REFUSED: MRMEGA_PCS=0; use a whole number >= 1" && ok "MRMEGA_PCS outside 1, 2, ...: refused" || bad "MRMEGA_PCS=0: rc=$rc"
 
 section "GxG: missing sumstats are left out and named; none at all stops the task"
 rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results" "${C:?}/logs"; mkdir -p "${C}/results/gwas/os" "${C}/logs"

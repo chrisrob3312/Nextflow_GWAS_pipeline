@@ -52,7 +52,7 @@ _RR_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # when the job starts), so nothing is exported and params.tsv records it only if you set it.
 # tests/test_chassis.sh checks that each default here equals the ${NAME:-default} in the scripts.
 # Asked for in the plan but read by no script, so not listed: STRATUM_MIN_N (the scripts use
-# MIN_STRATUM_N), PC_SCALE, MRMEGA_PCS, BUNDLE_RULES; rr_refuse_unknown_switches stops a launch
+# MIN_STRATUM_N), PC_SCALE, BUNDLE_RULES; rr_refuse_unknown_switches stops a launch
 # that sets one of them, rather than let it be silently ignored.
 RR_SWITCHES=(
     "STRATA_LIST|@job|strata analysed; default: every stratum in HANDOFF_DIR/ancestry/strata.tsv (set_by bundle)"
@@ -65,6 +65,8 @@ RR_SWITCHES=(
     "RUN_COLOC|false|step 4, colocalization"
     "RUN_VALIDATION|false|step 5, PRS validation"
     "RUN_GXG|false|step 6, GxG"
+    "RUN_MRMEGA|false|step 2b, MR-MEGA across strata per trait (slurm/submit_mrmega.sh)"
+    "MRMEGA_PCS|3|most MR-MEGA axes of genetic variation; each trait uses min(K-2, MRMEGA_PCS) for its K strata with sumstats"
     "STRUCTURE_SOURCE|bundle|step 0: ingest the bundle's PCs and GRM (bundle), or compute them (compute, the comparator)"
     "SKIP_PCAIR|false|skip step 0 and reuse the structure already in results/pcair"
     "QC_GATE_OVERRIDE||assertion ids a QC gate lets through although failed or missing (bin/qc_gate.sh); each use is recorded in qc/qc_assertions.tsv"
@@ -95,7 +97,7 @@ declare -A RR_SET_BY=()
 # Refuse a launch that sets a switch name no script reads.
 rr_refuse_unknown_switches() {
     local name
-    for name in STRATUM_MIN_N PC_SCALE MRMEGA_PCS BUNDLE_RULES TIME_COL EVENT_COL; do
+    for name in STRATUM_MIN_N PC_SCALE BUNDLE_RULES TIME_COL EVENT_COL; do
         if [[ -n "${!name+x}" ]]; then
             if [[ "$name" == STRATUM_MIN_N ]]; then
                 echo "REFUSED: STRATUM_MIN_N is set, but the scripts read MIN_STRATUM_N; set that instead" >&2

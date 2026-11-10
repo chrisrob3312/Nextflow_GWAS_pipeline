@@ -96,14 +96,15 @@ for stratum in "${STRATA[@]}"; do
 done
 IFS=',' read -ra TRAITS <<< "${TRAITS_LIST}"
 
-# Steps 3-6 run only when asked for. Anything but true/false is refused rather than guessed.
-for step in PRS COLOC VALIDATION GXG; do
+# Steps 2b and 3-6 run only when asked for. Anything but true/false is refused rather than guessed.
+for step in PRS COLOC VALIDATION GXG MRMEGA; do
     v="RUN_${step}"
     case "${!v}" in
         true|false) ;;
         *) echo "REFUSED: ${v}=${!v}; use true or false" >&2; exit 2 ;;
     esac
 done
+[[ "${MRMEGA_PCS}" =~ ^[1-9][0-9]*$ ]] || { echo "REFUSED: MRMEGA_PCS=${MRMEGA_PCS}; use a whole number >= 1" >&2; exit 2; }
 if [[ "${RUN_VALIDATION}" == true && "${RUN_PRS}" != true ]]; then
     echo "REFUSED: RUN_VALIDATION=true needs RUN_PRS=true (validation summarises the PRS jobs of this launch)" >&2
     exit 2
@@ -213,7 +214,7 @@ fi
 RR_EXTRA_PARAMS="$(printf 'SURVIVAL_COLUMNS\t%s\tderived\nHANDOFF_DIR\t%s\tderived' "$(IFS=,; echo "${SURV_COLS[*]:-none}")" "${HANDOFF_DIR}")"
 
 DEFERRED=()
-for step in PRS COLOC VALIDATION GXG; do
+for step in PRS COLOC VALIDATION GXG MRMEGA; do
     v="RUN_${step}"
     [[ "${!v}" == true ]] || DEFERRED+=("${step}")
 done
@@ -450,6 +451,23 @@ fi
 EOF
     COMBINE_JOBS[$trait]="$JOB"
 done
+
+# ============================================================================
+# STEP 2b: MR-MEGA across strata, per trait (after its combine job)    RUN_MRMEGA
+# ============================================================================
+# slurm/submit_mrmega.sh counts K, the strata with sumstats, and uses min(K-2, MRMEGA_PCS) axes; K=2
+# is a fixed-effect meta-analysis (and says so), K<2 excludes the trait (CP-20).
+echo ""
+if [[ "${RUN_MRMEGA}" == true ]]; then
+    echo "STEP 2b: Submitting MR-MEGA jobs (one per trait; K and pc_axes decided in the job)..."
+    for trait in "${TRAITS[@]}"; do
+        submit "MR-MEGA ${trait}" ${COMBINE_JOBS[$trait]:+--dependency=afterok:"${COMBINE_JOBS[$trait]}"} \
+            --output="${LOG_DIR}/mrmega_${trait}_%j.out" --error="${LOG_DIR}/mrmega_${trait}_%j.err" \
+            "${SCRIPT_DIR}/submit_mrmega.sh" "${trait}"
+    done
+else
+    echo "STEP 2b: MR-MEGA deferred (RUN_MRMEGA=false)"
+fi
 
 # Single dependency handle for downstream steps (all traits combined). Steps 3, 4 and 6 all
 # wait on the combine jobs, so this is set here, outside every RUN_* gate.
