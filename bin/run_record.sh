@@ -42,6 +42,7 @@
 # RR_SET_BY, the record of which switches you set.
 if [[ -n "${_RR_LOADED:-}" ]]; then return 0; fi
 _RR_LOADED=1
+_RR_BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"     # this file's directory (bin/)
 
 _RR_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -66,6 +67,7 @@ RR_SWITCHES=(
     "RUN_GXG|false|step 6, GxG"
     "STRUCTURE_SOURCE|bundle|step 0: ingest the bundle's PCs and GRM (bundle), or compute them (compute, the comparator)"
     "SKIP_PCAIR|false|skip step 0 and reuse the structure already in results/pcair"
+    "QC_GATE_OVERRIDE||assertion ids a QC gate lets through although failed or missing (bin/qc_gate.sh); each use is recorded in qc/qc_assertions.tsv"
     "N_PCS|10|PC-AiR PCs written and used as covariates"
     "N_PCS_PCRELATE|5|PCs used inside PC-Relate"
     "KIN_THRESH|0.0442|kinship threshold for the PC-AiR unrelated set"
@@ -370,6 +372,9 @@ rr_finalize() {
         }' "${files[@]}" > "${dir}/trace.tsv.tmp"
     mv -f "${dir}/trace.tsv.tmp" "${dir}/trace.tsv"
     rm -f "${dir}/.rows.tsv"
+    # QC verdicts and sample accounting (CP-11): merge the per-row files into qc/qc_assertions.tsv
+    # and qc/sample_accounting.tsv
+    [[ -d "${dir}/qc" ]] && "${_RR_BIN}/qc_gate.sh" --collect --dir "${dir}/qc"
     _rr_summary "$dir" > "${dir}/summary.md.tmp" && mv -f "${dir}/summary.md.tmp" "${dir}/summary.md"
     echo "rr_finalize: ${dir}/trace.tsv ($(( $(wc -l < "${dir}/trace.tsv") - 1 )) rows), ${dir}/summary.md"
 }
@@ -420,6 +425,22 @@ _rr_summary() {
     echo "error) and task_status come from the adapter's <output_prefix>.run_counts.tsv; NA elsewhere."
     awk -F'\t' 'NR > 1 && $1 == "gwas" { n++; if ($23 == "skipped_below_min_stratum_n") k++; if ($15 ~ /^[0-9]+$/) nn += $15; if ($16 ~ /^[0-9]+$/) nt += $16; if ($18 ~ /^[0-9]+$/) nf += $18 }
                  END { if (n) printf "\ngwas: %d tasks, %d skipped below MIN_STRATUM_N; %d variants tested, %d failed tests.\n", n, k, nt, nf }' "${dir}/trace.tsv"
+    echo ""
+    echo "## QC assertions"
+    echo ""
+    if [[ -f "${dir}/qc/qc_assertions.tsv" ]]; then
+        echo "From qc/qc_assertions.tsv (one row per check per task; sample counts per join in qc/sample_accounting.tsv)."
+        echo ""
+        awk -F'\t' 'NR > 1 { if (!($1 in n)) order[++k] = $1; n[$1]++; v[$1, $2]++ }
+            END { if (!k) { print "No assertion rows."; exit }
+                  print "| assertion | rows | PASS | FAIL | INFO | OVERRIDE |"; print "|---|---|---|---|---|---|"
+                  for (i = 1; i <= k; i++) { a = order[i]
+                      printf "| %s | %d | %d | %d | %d | %d |\n", a, n[a], v[a, "PASS"], v[a, "FAIL"], v[a, "INFO"], v[a, "OVERRIDE"] } }' "${dir}/qc/qc_assertions.tsv"
+        awk -F'\t' 'NR > 1 && ($2 == "FAIL" || $2 == "OVERRIDE") { if (!h) { print ""; print "Failed and overridden:"; print ""; h = 1 }
+                    printf "- %s %s: %s\n", $2, $1, $4 }' "${dir}/qc/qc_assertions.tsv"
+    else
+        echo "No qc/ directory: no step filed a QC verdict in this run."
+    fi
     echo ""
     echo "A job submitted later by a running job (the GxG heterogeneity job) is not waited for; run"
     echo "\`bin/run_record_finalize.sh ${dir}\` again once it has ended to add its row."

@@ -22,10 +22,18 @@
 #   cohort.pcrelate.grm.rds, cohort.pcrelate.kinship.rds   symbolic links to the shipped files
 #   structure_source.tsv               where each file came from
 #   <strata_dir>/<S>.samples.txt       S's members, one IID per line
+#   qc_assertions.tsv                  this step's QC verdicts (also filed to GWAS_QC_DIR)
 # Existing PC columns (PC1, PC2, ...) of the phenotype file are replaced, never mixed.
+# QC (CP-11, bin/qc_assert.R): files pcair_pc_merge once per output phenotype file (every row has
+# its PCs) and structure_ingest (PASS at the end, FAIL with the reason on any refusal), and one
+# sample_accounting row per join: phenotype -> .fam IIDs -> stratum -> PC merge.
 # ============================================================================
 suppressPackageStartupMessages({ library(data.table); library(optparse) })
 `%||%` <- function(a, b) if (is.null(a)) b else a
+local({
+    f <- sub("^--file=", "", grep("^--file=", commandArgs(trailingOnly = FALSE), value = TRUE))
+    source(file.path(if (length(f) > 0) dirname(normalizePath(f[1])) else "bin", "qc_assert.R"))
+})
 
 opt <- parse_args(OptionParser(option_list = list(
     make_option("--handoff_dir", type = "character", help = "the handoff bundle directory"),
@@ -38,7 +46,10 @@ if (is.null(opt$handoff_dir)) stop("--handoff_dir is required")
 H <- normalizePath(opt$handoff_dir, mustWork = TRUE)
 pheno_file <- opt$phenotype %||% file.path(H, "phenotypes", "phenotypes.tsv")
 
-refuse <- function(...) { cat("REFUSED:", ..., "\n", file = stderr()); quit(save = "no", status = 2) }
+refuse <- function(...) {
+    qc_assert("structure_ingest", FALSE, message = paste(...))
+    cat("REFUSED:", ..., "\n", file = stderr()); quit(save = "no", status = 2)
+}
 need <- function(rel) {
     f <- if (startsWith(rel, "/")) rel else file.path(H, rel)
     if (!file.exists(f) || file.size(f) == 0) refuse("structure ingest: missing or empty", f)
@@ -95,19 +106,27 @@ for (S in stratum_names) {
 # --- outputs -------------------------------------------------------------------------
 dir.create(opt$out_dir, recursive = TRUE, showWarnings = FALSE)
 dir.create(opt$strata_dir, recursive = TRUE, showWarnings = FALSE)
+qc_copy_to(file.path(opt$out_dir, "qc_assertions.tsv"))
 pheno <- fread(pheno_file)
 if (!"sample_id" %in% names(pheno)) refuse(pheno_file, "has no sample_id column")
 pheno[, sample_id := as.character(sample_id)]
 base <- pheno[, setdiff(names(pheno), grep("^PC[0-9]+$", names(pheno), value = TRUE)), with = FALSE]
-write_with_pcs <- function(ids, p, out) {
-    ph <- merge(base[sample_id %in% ids], p, by = "sample_id", all.x = TRUE, sort = FALSE)
+geno_rows <- base[sample_id %in% fam_ids]
+qc_account("phenotype_to_fam", nrow(base), nrow(geno_rows), stratum = "cohort",
+           reason = sprintf("phenotype rows with a .fam IID (%d .fam IIDs have no phenotype row)",
+                            sum(!fam_ids %in% base$sample_id)))
+write_with_pcs <- function(ph, p, out, S) {
+    ph <- merge_pcs_checked(ph, p, stratum = S, what = basename(out))
     fwrite(ph, out, sep = "\t")
     cat("ok  ", basename(out), ":", nrow(ph), "samples,", ncol(p) - 1, "PCs\n")
 }
-write_with_pcs(fam_ids, pcs$cohort, file.path(opt$out_dir, "cohort.phenotypes.with_pcs.tsv"))
+write_with_pcs(geno_rows, pcs$cohort, file.path(opt$out_dir, "cohort.phenotypes.with_pcs.tsv"), "cohort")
 for (S in stratum_names) {
     ids <- strata$sample_id[strata$stratum == S]
-    write_with_pcs(ids, pcs[[S]], file.path(opt$out_dir, paste0(S, ".phenotypes.with_pcs.tsv")))
+    in_s <- geno_rows[sample_id %in% ids]
+    qc_account("stratum", nrow(geno_rows), nrow(in_s), stratum = S,
+               reason = sprintf("phenotype rows in stratum %s (%d members in strata.tsv)", S, length(ids)))
+    write_with_pcs(in_s, pcs[[S]], file.path(opt$out_dir, paste0(S, ".phenotypes.with_pcs.tsv")), S)
     writeLines(ids, file.path(opt$strata_dir, paste0(S, ".samples.txt")))
 }
 link <- function(from, to) { unlink(to); if (!file.symlink(from, to)) refuse("could not link", to, "to", from) }
@@ -118,4 +137,6 @@ fwrite(data.table(file = c("cohort.pcair.pcs.tsv", paste0("strata/", stratum_nam
                   source = c(cohort_pcs, file.path(H, "structure", "strata", paste0(stratum_names, ".pcair.pcs.tsv")),
                              grm_file, kin_file)),
        file.path(opt$out_dir, "structure_source.tsv"), sep = "\t")
+qc_assert("structure_ingest", TRUE, n = length(fam_ids),
+          message = sprintf("bundle structure checked and laid out: %d samples, %d strata", length(fam_ids), length(stratum_names)))
 cat("structure ingested from bundle:", H, "(", length(stratum_names), "strata:", paste(stratum_names, collapse = ", "), ")\n")

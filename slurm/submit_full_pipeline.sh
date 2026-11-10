@@ -179,6 +179,8 @@ else
 fi
 GWAS_RUN_DIR="${RR_ROOT}/${GWAS_RUN_ID}"
 export GWAS_RUN_ID GWAS_RUN_DIR
+# Every job of this launch files its QC verdicts and sample counts here (CP-11; bin/qc_assert.R)
+export GWAS_QC_DIR="${GWAS_RUN_DIR}/qc"
 [[ $DRY_RUN == 1 ]] || rr_write_launch_record "${GWAS_RUN_DIR}" "$0" "$@"
 
 trait_model() { if trait_is_survival "$1"; then echo survival; else echo binary; fi; }
@@ -249,6 +251,19 @@ if [[ "${SKIP_PCAIR:-false}" != "true" ]]; then
     DEPEND_PCAIR="--dependency=afterok:${JOB}"
 else
     echo "  Skipped (SKIP_PCAIR=true): reusing the structure already in results/pcair"
+    # Carry that structure run's QC verdicts into this run, marked as carried, so the GWAS gate
+    # sees them. Without them the gate stops on "missing assertion": nothing checked this structure.
+    STRUCT_QC="${REPO}/results/pcair/qc_assertions.tsv"
+    if [[ ! -f "${STRUCT_QC}" ]]; then
+        echo "  WARNING: ${STRUCT_QC} not found; the GWAS jobs' QC gate will stop on a missing ${QC_REQUIRE_STRUCTURE}"
+    elif [[ $DRY_RUN == 1 ]]; then
+        echo "  [DRY-RUN] would carry $(( $(wc -l < "${STRUCT_QC}") - 1 )) QC verdict(s) from ${STRUCT_QC}"
+    else
+        mkdir -p "${GWAS_QC_DIR}/assertions.d"
+        awk -F'\t' -v OFS='\t' -v src="${STRUCT_QC}" 'NR > 1 { $4 = $4 " [carried from " src ", SKIP_PCAIR=true]"; print }' \
+            "${STRUCT_QC}" > "${GWAS_QC_DIR}/assertions.d/structure.carried.tsv"
+        echo "  QC verdicts carried from ${STRUCT_QC}"
+    fi
 fi
 
 # ============================================================================
@@ -299,6 +314,8 @@ set -eu    # no pipefail: 'zcat | head -1' below stops zcat early (SIGPIPE) by d
 SCRIPT_DIR="${GWAS_REPO}"
 source "${SCRIPT_DIR}/bin/slurm_utils.sh"
 rr_begin combine "${GWAS_TRAIT} ${STRATA_LIST}"
+# QC gate (CP-11): every GWAS task's join checks must be there and must not have failed
+qc_gate_or_exit "${QC_REQUIRE_GWAS}" "combine ${GWAS_TRAIT}"
 source "${SCRIPT_DIR}/bin/activate_env.sh" gwas-r
 GWAS_DIR="${SCRIPT_DIR}/results/gwas/${GWAS_TRAIT}"
 IFS=',' read -ra STRATA <<< "${STRATA_LIST}"

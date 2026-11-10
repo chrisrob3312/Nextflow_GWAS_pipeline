@@ -153,9 +153,12 @@ CMD+=(--ancestries "${STRATUM_ANCESTRIES}"
     --verbose)
 
 if [[ "${DRY_RUN}" == 1 ]]; then
+    echo "[DRY-RUN] QC gate: bin/qc_gate.sh --require ${QC_REQUIRE_STRUCTURE} --dir ${GWAS_QC_DIR}"
     echo "[DRY-RUN] $(print_cmd "${CMD[@]}")"
     exit 0
 fi
+# QC gate (CP-11): the structure step's verdicts must be there and must not have failed
+qc_gate_or_exit "${QC_REQUIRE_STRUCTURE}" "GWAS ${TRAIT} / ${STRATUM} chr${CHR}"
 # Run record: the command line and inputs (phenotype, GRM, ancestry list, strata, index map, this
 # chromosome's Tractor files), and the adapter's counts file (read when the task ends)
 INPUTS=("${PHENO}" "${KINSHIP}" "${ANC_FILE}" "${STRATA_FILE}" "${TRACTOR_PREFIX}".*)

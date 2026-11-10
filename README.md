@@ -189,6 +189,11 @@ pipeline"); the run record is described in [docs/WORKFLOW.md](docs/WORKFLOW.md),
    number-changing switch) at launch, a row per task as it runs, and `trace.tsv` (with MaxRSS and
    Elapsed from `sacct`, and the adapter's sample and variant counts) and `summary.md` once the final
    job, which waits on all the others, has run.
+6. **QC gates.** Steps file QC verdicts and per-join sample counts into the run record's `qc/`;
+   each GWAS task requires the structure step's `pcair_pc_merge`, the combine job the adapter's
+   join checks. A failed **or missing** verdict stops the job (exit 3);
+   `QC_GATE_OVERRIDE=<id>` proceeds on purpose and is recorded
+   ([docs/WORKFLOW.md](docs/WORKFLOW.md) section 10).
 
 Logs go to `<repo>/logs/` (absolute paths; `LOG_DIR` to change). The wrappers under `shell/` are
 debug-only, not the execution path. `tests/test_chassis.sh` checks all of this locally with fake

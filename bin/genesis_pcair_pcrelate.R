@@ -20,6 +20,7 @@
 #   <prefix>.unrelated.txt           PC-AiR unrelated set (for GLM/Cox-only steps)
 #   <prefix>.phenotypes.with_pcs.tsv phenotype file with PC1..PCn replaced by PC-AiR PCs
 #   <prefix>.pcair.variance.tsv      variance explained per PC
+#   <dir of prefix>/qc_assertions.tsv  this run's QC verdicts (pcair_pc_merge), also filed to GWAS_QC_DIR
 # ============================================================================
 
 suppressPackageStartupMessages({
@@ -47,6 +48,12 @@ opt <- parse_args(OptionParser(option_list = list(
 )))
 
 if (is.null(opt$geno) && is.null(opt$gds)) stop("Required: --geno or --gds")
+`%||%` <- function(a, b) if (is.null(a)) b else a
+local({   # QC verdicts and sample accounting (CP-11), from next to this script
+    f <- sub("^--file=", "", grep("^--file=", commandArgs(trailingOnly = FALSE), value = TRUE))
+    source(file.path(if (length(f) > 0) dirname(normalizePath(f[1])) else "bin", "qc_assert.R"))
+})
+qc_copy_to(file.path(dirname(opt$output_prefix), "qc_assertions.tsv"))
 slurm_cpus <- suppressWarnings(as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", "")))
 if (!is.na(slurm_cpus) && slurm_cpus > 0) opt$threads <- slurm_cpus
 set.seed(opt$seed)
@@ -66,9 +73,11 @@ if (is.null(gds_file)) {
                   gds_file, cvt.chr = "int", verbose = FALSE)
 }
 gds <- snpgdsOpen(gds_file)
-sample_ids <- read.gdsn(index.gdsn(gds, "sample.id"))
+sample_ids <- gds_ids <- as.character(read.gdsn(index.gdsn(gds, "sample.id")))
 if (!is.null(opt$sample_include)) {
     keep <- readLines(opt$sample_include); sample_ids <- intersect(sample_ids, keep)
+    qc_account("sample_include", length(gds_ids), length(sample_ids), stratum = "cohort",
+               reason = paste("genotyped samples listed in", basename(opt$sample_include)))
 }
 cat("Samples:", length(sample_ids), "\n")
 
@@ -166,12 +175,24 @@ if (!is.null(opt$phenotype) && file.exists(opt$phenotype)) {
     ph[[idc]] <- as.character(ph[[idc]])
     old_pcs <- grep("^PC[0-9]+$", names(ph), value = TRUE)
     if (length(old_pcs) > 0) { cat("  Replacing existing", length(old_pcs), "PC columns with PC-AiR PCs\n"); ph[, (old_pcs) := NULL] }
-    orig_order <- names(ph)                                   # keep FID / IID first (REGENIE, SAIGE, SPA-Cox need that)
-    ph <- merge(ph, pcs, by.x = idc, by.y = "sample_id", all.x = TRUE, sort = FALSE)
-    setcolorder(ph, c(orig_order, paste0("PC", 1:opt$n_pcs)))
     out_ph <- paste0(opt$output_prefix, ".phenotypes.with_pcs.tsv")
+    # CP-11: every phenotype row must get its PCs. merge_pcs_checked keeps FID / IID first, writes the
+    # pc_merge sample-accounting row and files pcair_pc_merge (FAIL, with examples, if a row has
+    # none); the GWAS step's gate stops on a FAIL. The rows are still written, so an override
+    # (QC_GATE_OVERRIDE=pcair_pc_merge) has something to proceed with.
+    # Phenotype rows of samples that were never genotyped cannot enter any model: counted and
+    # dropped here. A genotyped sample left without PCs (e.g. outside --sample_include) is a FAIL.
+    n_ph <- nrow(ph)
+    ph <- ph[ph[[idc]] %in% gds_ids]
+    qc_account("phenotype_to_genotype", n_ph, nrow(ph), stratum = "cohort",
+               reason = sprintf("rows of %s with a sample in the genotype file (%d genotyped samples have no phenotype row)",
+                                basename(opt$phenotype), sum(!gds_ids %in% ph[[idc]])))
+    ph <- merge_pcs_checked(ph, pcs, id_col = idc, stratum = "cohort", what = basename(out_ph))
     fwrite(ph, out_ph, sep = "\t")
     cat("  Phenotype with PC-AiR PCs:", out_ph, "(", sum(!is.na(ph$PC1)), "of", nrow(ph), "samples with PCs )\n")
+} else {
+    qc_assert("pcair_pc_merge", FALSE, message = paste("phenotype file not given or not found (--phenotype",
+                                                        opt$phenotype %||% "unset", "): no phenotype with PCs was written"))
 }
 
 cat("\nDone. Use", paste0(opt$output_prefix, ".pcrelate.grm.rds"), "as --kinship and PC1..PC",

@@ -46,7 +46,7 @@ mkdir -p "${W}/envs/"{gwas-r,gwas-py,lai,mrmega}/bin "${W}/scratch"
 cat > "${W}/envs/gwas-r/bin/Rscript" <<EOF
 #!/usr/bin/env bash
 # Scripts that need only base R + data.table run in the real R (when there is one)
-case "\${1:-}" in */ingest_structure.R) [[ -n "${REAL_RSCRIPT}" ]] && exec "${REAL_RSCRIPT}" "\$@" ;; esac
+case "\${1:-}" in */ingest_structure.R|*/qc_assert.R) [[ -n "${REAL_RSCRIPT}" ]] && exec "${REAL_RSCRIPT}" "\$@" ;; esac
 EOF
 cat >> "${W}/envs/gwas-r/bin/Rscript" <<'EOF'
 if [[ "${1:-}" == */check_r_libs.R ]]; then
@@ -65,6 +65,18 @@ if [[ "${1:-}" == */tractor_genesis_adapter.R ]]; then
     if [[ "$st" == ok ]]; then nt=900; else nt=NA; fi
     printf 'key\tvalue\nstatus\t%s\nstratum\tEUR\nstratum_check\tpassed\nmin_stratum_n\t50\nn_null\t%s\nn_variants\t1000\nn_pass_mac\t950\nn_tested\t%s\nn_failed\t2\n' \
         "$st" "${FAKE_N_NULL:-120}" "$nt" > "${out}.run_counts.tsv"
+    # and its QC verdicts (bin/qc_assert.R): PASS, INFO for the model when skipped, FAIL for the id
+    # named in FAKE_ADAPTER_QC_FAIL
+    mkdir -p "${GWAS_QC_DIR}/assertions.d"
+    for id in adapter_stratum_check adapter_sample_join adapter_grm_cover adapter_model_n; do
+        v=PASS; [[ "$id" == adapter_model_n && "$st" != ok ]] && v=INFO; [[ "$id" == "${FAKE_ADAPTER_QC_FAIL:-}" ]] && v=FAIL
+        printf '%s\t%s\t%s\tstub adapter %s\n' "$id" "$v" "${FAKE_N_NULL:-120}" "$out" > "${GWAS_QC_DIR}/assertions.d/${id}.stub.$$.tsv"
+    done
+fi
+# As the structure step without a real R: file its verdict
+if [[ "${1:-}" == */ingest_structure.R || "${1:-}" == */genesis_pcair_pcrelate.R ]]; then
+    mkdir -p "${GWAS_QC_DIR}/assertions.d"
+    printf 'pcair_pc_merge\t%s\t8\tstub structure step\n' "${FAKE_PC_MERGE:-PASS}" > "${GWAS_QC_DIR}/assertions.d/pcair_pc_merge.stub.$$.tsv"
 fi
 exit "${FAKE_RSCRIPT_EXIT:-0}"
 EOF
@@ -503,6 +515,106 @@ out="$(cd /tmp && env "${SITE[@]}" STRATA_LIST=EUR TRAITS_LIST=os FAKE_SBATCH_RU
 RD="$(ls -d "${C}"/results/run_record/*/ | head -1)"
 grep -q '| gwas | 22 | 22 | 0 | 0 | 22 |' "${RD%/}/summary.md" && ok "summary.md: 22 gwas tasks exit 0, all 22 skipped below MIN_STRATUM_N" || bad "summary: $(grep '| gwas' "${RD%/}/summary.md")"
 grep -q 'skipped: N below MIN_STRATUM_N' "${C}"/logs/combine_os_*.out && ok "combine names the likely reason for a stratum without results" || bad "combine message"
+
+section "CP-11: qc_assert / qc_gate, sample accounting at every join, gates between steps"
+QG="${C}/bin/qc_gate.sh"; QD="${W}/qc_unit"; rm -rf "${QD:?}"; mkdir -p "${QD}/assertions.d"
+out="$("$QG" --require pcair_pc_merge --dir "$QD" 2>&1)"; rc=$?
+[[ $rc -ne 0 ]] && has "$out" "missing assertion pcair_pc_merge" && ok "gate: no pcair_pc_merge row -> non-zero, 'missing assertion'" || bad "missing: rc=$rc $out"
+printf 'pcair_pc_merge\tPASS\t8\tevery row has PCs\n' > "${QD}/assertions.d/a.tsv"
+out="$("$QG" --require pcair_pc_merge --dir "$QD" 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && ok "gate: the row says PASS -> exit 0" || bad "pass: rc=$rc $out"
+printf 'pcair_pc_merge\tFAIL\t8\t2 of 8 rows have no PCs\n' > "${QD}/assertions.d/b.tsv"
+out="$("$QG" --require pcair_pc_merge --dir "$QD" 2>&1)"; rc=$?
+[[ $rc -ne 0 ]] && has "$out" "assertion pcair_pc_merge failed: 2 of 8 rows have no PCs" && ok "gate: a FAIL row -> non-zero, naming the id and the reason" || bad "fail: rc=$rc $out"
+out="$(QC_GATE_OVERRIDE=other,pcair_pc_merge "$QG" --require pcair_pc_merge --dir "$QD" 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && has "$out" "overridden: pcair_pc_merge" && grep -q $'^pcair_pc_merge\tOVERRIDE\tNA\tQC_GATE_OVERRIDE by ' "${QD}"/assertions.d/*.override.*.tsv \
+    && ok "QC_GATE_OVERRIDE=<id> proceeds and records an OVERRIDE row" || bad "override: rc=$rc $out"
+out="$("$QG" --dir "$QD" 2>&1)"; rc=$?
+[[ $rc -eq 2 ]] && has "$out" "--require is empty" && ok "a gate that requires nothing is refused (no skip-all)" || bad "empty require: rc=$rc"
+"$QG" --collect --dir "$QD" >/dev/null && [[ "$(head -1 "${QD}/qc_assertions.tsv")" == $'id\tverdict\tn\tmessage' && "$(wc -l < "${QD}/qc_assertions.tsv")" -eq 4 ]] \
+    && [[ "$(head -1 "${QD}/sample_accounting.tsv")" == $'step\tstratum\ttrait\tchromosome\tn_in\tn_out\tn_removed\treason' ]] \
+    && ok "--collect: qc_assertions.tsv (id verdict n message) and sample_accounting.tsv headers and rows" || bad "collect: $(cat "${QD}/qc_assertions.tsv")"
+# Every id the adapter files is on the combine gate's list, and the other way round
+filed="$(grep -o 'qc_assert("adapter_[a-z_]*"' "${C}/bin/tractor_genesis_adapter.R" | sed 's/qc_assert("//; s/"//' | sort -u | paste -sd, -)"
+req="$(bash -c "source '${C}/bin/slurm_utils.sh'; echo \"\${QC_REQUIRE_GWAS}\"" | tr ',' '\n' | sort -u | paste -sd, -)"
+[[ -n "$filed" && "$filed" == "$req" ]] && ok "the adapter files exactly the ids the combine gate requires ($req)" || bad "adapter ids '$filed' vs gate '$req'"
+grep -q 'stop(length(off_grm), " samples with phenotype and Tractor data are not in the GRM' "${C}/bin/tractor_genesis_adapter.R" \
+    && ! grep -q 'Warning: Kinship matrix missing' "${C}/bin/tractor_genesis_adapter.R" && ok "adapter: a joined sample missing from the GRM is a FAIL and a stop, not a warning" || bad "adapter GRM stop"
+! grep -q 'all.x = TRUE' "${C}/bin/genesis_pcair_pcrelate.R" && grep -q 'merge_pcs_checked(ph, pcs' "${C}/bin/genesis_pcair_pcrelate.R" \
+    && ok "comparator: the all.x merge with a stdout-only count is gone; merge_pcs_checked files pcair_pc_merge" || bad "comparator merge"
+if [[ -n "${REAL_RSCRIPT}" ]] && "${REAL_RSCRIPT}" -e 'quit(status = !requireNamespace("data.table", quietly = TRUE))' >/dev/null 2>&1; then
+    rm -rf "${QD:?}"
+    out="$(GWAS_QC_DIR="$QD" "${REAL_RSCRIPT}" -e '
+        suppressPackageStartupMessages(library(data.table)); source(commandArgs(TRUE)[1])
+        ph  <- data.table(FID = c("A","B","C"), IID = c("A","B","C"), sample_id = c("A","B","C"), os_time = 1:3)
+        pcs <- data.table(sample_id = c("A","B","D"), PC1 = c(.1,.2,.3), PC2 = c(.4,.5,.6))
+        m <- merge_pcs_checked(ph, pcs, stratum = "EUR", what = "toy")
+        cat("COLS", names(m), "\n")' "${C}/bin/qc_assert.R" 2>&1)"
+    "$QG" --collect --dir "$QD" >/dev/null
+    has "$out" "COLS FID IID sample_id os_time PC1 PC2" && grep -q $'^pcair_pc_merge\tFAIL\t3\ttoy (EUR): 1 of 3 rows have no PCs (not in the genotype set?), e.g. C$' "${QD}/qc_assertions.tsv" \
+        && grep -q $'^pc_merge\tEUR\tNA\tNA\t3\t2\t1\t' "${QD}/sample_accounting.tsv" \
+        && ok "merge_pcs_checked: a phenotype row without PCs is a FAIL naming it, with a pc_merge accounting row 3 -> 2" || bad "merge_pcs_checked: $out $(cat "${QD}"/*.tsv)"
+    # The toy PLINK set the cluster checks use: a valid SNP-major .bed, T_DUP equal to T001
+    "${REAL_RSCRIPT}" "${C}/tests/toy/make_toy_plink.R" "${W}/toy" 10 40 duplicate >/dev/null 2>&1
+    out="$("${REAL_RSCRIPT}" -e '
+        f <- commandArgs(TRUE)[1]; n <- 11; m <- 40; nb <- ceiling(n / 4)
+        b <- as.integer(readBin(paste0(f, ".bed"), "raw", 1e5)); stopifnot(identical(b[1:3], c(108L, 27L, 1L))); b <- b[-(1:3)]
+        g <- function(s) { x <- b[(s - 1) * nb + 1:nb]; c(2, NA, 1, 0)[unlist(lapply(x, function(y) (y %/% 4^(0:3)) %% 4))[1:n] + 1] }
+        G <- sapply(1:m, g); ph <- read.delim(paste0(f, ".phenotypes.tsv"))
+        cat(length(b) == m * nb, !anyNA(G), identical(G[1, ], G[11, ]), nrow(ph), "\n")' "${W}/toy" 2>&1)"
+    [[ "$out" == "TRUE TRUE TRUE 14 " ]] && [[ "$(wc -l < "${W}/toy.bim")" -eq 40 && "$(tail -1 "${W}/toy.fam" | cut -d' ' -f2)" == T_DUP ]] \
+        && ok "tests/toy/make_toy_plink.R: a valid SNP-major .bed, T_DUP copies T001, 3 phenotype rows not genotyped" || bad "toy plink: $out"
+    # End to end through the fake Slurm: step 0 (real ingest) files pcair_pc_merge, the GWAS tasks
+    # pass their gate, the stub adapter files its four ids, combine passes its gate
+    rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results" "${C:?}/logs"
+    out="$(cd /tmp && env "${SITE[@]}" STRATA_LIST=EUR TRAITS_LIST=os FAKE_SBATCH_RUN=1 RR_SACCT_WAIT=0 "$L" 2>&1)"
+    RD="$(ls -d "${C}"/results/run_record/*/ | head -1)"; RD="${RD%/}"
+    ex="$(awk -F'\t' 'NR > 1 {print $1, $14}' "${RD}/trace.tsv" | sort | uniq -c | tr -s ' ' | paste -sd'|' -)"
+    [[ "$ex" == " 1 combine 0| 22 gwas 0| 1 pcair 0" ]] && grep -q "QC GATE: passed (pcair_pc_merge)" "${C}"/logs/gwas_os_EUR_*_1.out \
+        && grep -q "QC GATE: passed (adapter_stratum_check,adapter_sample_join,adapter_grm_cover,adapter_model_n)" "${C}"/logs/combine_os_*.out \
+        && ok "launch: GWAS tasks gate on pcair_pc_merge, combine on the adapter's four ids; all pass" || bad "e2e gates: $ex"
+    QA="${RD}/qc/qc_assertions.tsv"; SA="${RD}/qc/sample_accounting.tsv"
+    [[ "$(awk -F'\t' '$1 == "pcair_pc_merge" && $2 == "PASS"' "$QA" | wc -l)" -eq 5 ]] && grep -q $'^structure_ingest\tPASS\t8\t' "$QA" \
+        && ok "run record qc/qc_assertions.tsv: pcair_pc_merge PASS for cohort + 4 strata, structure_ingest PASS" || bad "assertions: $(cut -f1,2 "$QA" | sort | uniq -c)"
+    grep -q $'^phenotype_to_fam\tcohort\tNA\tNA\t8\t8\t0\t' "$SA" && grep -q $'^stratum\tEUR\tNA\tNA\t8\t3\t5\t' "$SA" && grep -q $'^pc_merge\tEUR\tNA\tNA\t3\t3\t0\t' "$SA" \
+        && ok "qc/sample_accounting.tsv: phenotype -> .fam 8 -> 8, EUR stratum 8 -> 3, PC merge 3 -> 3" || bad "accounting: $(cat "$SA")"
+    grep -q '^## QC assertions' "${RD}/summary.md" && grep -q '| pcair_pc_merge | 5 | 5 | 0 | 0 | 0 |' "${RD}/summary.md" \
+        && ok "summary.md: a QC assertions table" || bad "summary qc: $(sed -n '/## QC/,$p' "${RD}/summary.md")"
+    cp "${C}/results/pcair/qc_assertions.tsv" "${W}/struct_qc.keep"
+    # An adapter join that fails stops combine; QC_GATE_OVERRIDE=<id> lets it through, recorded
+    rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results/run_record" "${C:?}/logs"
+    out="$(cd /tmp && env "${SITE[@]}" STRATA_LIST=EUR TRAITS_LIST=os FAKE_SBATCH_RUN=1 RR_SACCT_WAIT=0 FAKE_ADAPTER_QC_FAIL=adapter_grm_cover "$L" 2>&1)"
+    RD="$(ls -d "${C}"/results/run_record/*/ | head -1)"; RD="${RD%/}"
+    [[ "$(awk -F'\t' 'NR > 1 && $1 == "combine" {print $14}' "${RD}/trace.tsv")" == 3 ]] && grep -q "QC GATE: assertion adapter_grm_cover failed: stub adapter" "${C}"/logs/combine_os_*.out \
+        && grep -q -- '- FAIL adapter_grm_cover: stub adapter' "${RD}/summary.md" \
+        && ok "a FAIL from the adapter: combine stops (exit 3) naming the id; summary.md lists it" || bad "combine gate: $(tail -3 "${C}"/logs/combine_os_*.out)"
+    rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results/run_record" "${C:?}/logs"
+    out="$(cd /tmp && env "${SITE[@]}" STRATA_LIST=EUR TRAITS_LIST=os FAKE_SBATCH_RUN=1 RR_SACCT_WAIT=0 FAKE_ADAPTER_QC_FAIL=adapter_grm_cover QC_GATE_OVERRIDE=adapter_grm_cover "$L" 2>&1)"
+    RD="$(ls -d "${C}"/results/run_record/*/ | head -1)"; RD="${RD%/}"
+    [[ "$(awk -F'\t' 'NR > 1 && $1 == "combine" {print $14}' "${RD}/trace.tsv")" == 0 ]] && grep -q $'^adapter_grm_cover\tOVERRIDE\t' "${RD}/qc/qc_assertions.tsv" \
+        && grep -q $'^QC_GATE_OVERRIDE\tadapter_grm_cover\tenvironment$' "${RD}/params.tsv" \
+        && ok "QC_GATE_OVERRIDE=adapter_grm_cover: combine runs; OVERRIDE row in qc_assertions.tsv, the switch in params.tsv" || bad "override e2e"
+    # SKIP_PCAIR=true: the reused structure's verdicts are carried in, marked; without them the GWAS gate stops
+    rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results/run_record" "${C:?}/logs"
+    out="$(cd /tmp && env "${SITE[@]}" STRATA_LIST=EUR TRAITS_LIST=os FAKE_SBATCH_RUN=1 RR_SACCT_WAIT=0 SKIP_PCAIR=true "$L" 2>&1)"
+    RD="$(ls -d "${C}"/results/run_record/*/ | head -1)"; RD="${RD%/}"
+    grep -q $'^pcair_pc_merge\tPASS\t.*\[carried from .*results/pcair/qc_assertions.tsv, SKIP_PCAIR=true\]$' "${RD}/qc/qc_assertions.tsv" \
+        && [[ "$(awk -F'\t' 'NR > 1 && $1 == "gwas" && $14 == 0' "${RD}/trace.tsv" | wc -l)" -eq 22 ]] \
+        && ok "SKIP_PCAIR=true: the structure verdicts are carried into the run, marked as carried; GWAS runs" || bad "carry: $(head -3 "${RD}/qc/qc_assertions.tsv")"
+    rm -f "${C}/results/pcair/qc_assertions.tsv"; rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results/run_record" "${C:?}/logs"
+    out="$(cd /tmp && env "${SITE[@]}" STRATA_LIST=EUR TRAITS_LIST=os FAKE_SBATCH_RUN=1 RR_SACCT_WAIT=0 SKIP_PCAIR=true "$L" 2>&1)"
+    RD="$(ls -d "${C}"/results/run_record/*/ | head -1)"; RD="${RD%/}"
+    has "$out" "qc_assertions.tsv not found; the GWAS jobs' QC gate will stop on a missing pcair_pc_merge" \
+        && [[ "$(awk -F'\t' 'NR > 1 && $1 == "gwas" && $14 == 3' "${RD}/trace.tsv" | wc -l)" -eq 22 ]] \
+        && grep -q "QC GATE: missing assertion pcair_pc_merge" "${C}"/logs/gwas_os_EUR_*_1.err \
+        && ok "SKIP_PCAIR=true with no verdicts to carry: warned at launch; every GWAS task stops at its gate (exit 3)" || bad "no carry: $(awk -F'\t' 'NR > 1 {print $1, $14}' "${RD}/trace.tsv" | sort | uniq -c)"
+    cp "${W}/struct_qc.keep" "${C}/results/pcair/qc_assertions.tsv"
+    rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results" "${C:?}/logs"
+else
+    echo "  (real R with data.table not available: CP-11 R-side checks skipped)"
+fi
+out="$(cd /tmp && DRY_RUN=1 bash "$G" EUR os survival 2>&1)"
+has "$out" "[DRY-RUN] QC gate: bin/qc_gate.sh --require pcair_pc_merge" && ok "DRY_RUN=1 GWAS task shows its gate" || bad "dry gate: $out"
 
 section "GxG: missing sumstats are left out and named; none at all stops the task"
 rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results" "${C:?}/logs"; mkdir -p "${C}/results/gwas/os" "${C}/logs"

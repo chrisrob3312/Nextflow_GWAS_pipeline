@@ -226,6 +226,7 @@ Nextflow modules and the SLURM scripts call:
 | PRS (6 methods, LA partial, stratified validation) | `calculate_prs_admixed.R` | `PRS_METHOD`, `PRS_LA_PARTIAL`, `PRS_VALIDATE_STRATIFIED` | `submit_prs_array.sh` |
 | Colocalization (coloc.susie, HyPrColoc, OPERA) | `run_colocalization.R` | `COLOC_RUN`, `COLOC_COMBINE` | step 4 |
 | GxG interaction | `run_gxg_interaction.R` | `GXG_*` | `submit_gxg_array.sh` |
+| QC verdicts and sample accounting (sourced) | `qc_assert.R` | inside the scripts above (no gates) | inside the scripts above; gates via `qc_gate.sh` (section 10) |
 
 The wrappers under `shell/` call the same `bin/` scripts but are debug-only, not the execution
 path: they do not pass `--stratum`, `--mac_min` or `--chromosome`, activate no env and write no
@@ -258,7 +259,10 @@ Every launch of `slurm/submit_full_pipeline.sh` writes `results/run_record/<run_
 | `jobs.tsv` | the launcher | every job it submitted: label, job id |
 | `trace.d/*.tsv` | each task, for itself | one row per task (below) |
 | `trace.tsv` | the finalise job | all rows, plus `state`, `max_rss`, `elapsed` from `sacct`, `exit_from`, `task_status` |
-| `summary.md` | the finalise job | tasks per step: exit codes, strata skipped below `MIN_STRATUM_N`, largest MaxRSS, longest Elapsed; the tasks that did not exit 0; the adapter's totals |
+| `summary.md` | the finalise job | tasks per step: exit codes, strata skipped below `MIN_STRATUM_N`, largest MaxRSS, longest Elapsed; the tasks that did not exit 0; the adapter's totals; the QC assertions per id, with every FAIL and OVERRIDE |
+| `qc/assertions.d/`, `qc/accounting.d/` | each step, for itself | one small file per QC verdict and per sample-accounting row (section 10) |
+| `qc/qc_assertions.tsv` | the finalise job | every verdict: `id`, `verdict` (`PASS`, `FAIL`, `INFO`, `OVERRIDE`), `n`, `message` |
+| `qc/sample_accounting.tsv` | the finalise job | samples at every join: `step`, `stratum`, `trait`, `chromosome`, `n_in`, `n_out`, `n_removed`, `reason` (the bundle's `qc/sample_accounting.tsv` columns, plus where) |
 
 `run_id` is `<yyyymmdd-HHMM>_<git commit>_<n>`, computed once at launch and passed to every job; `n`
 keeps two launches in the same minute on the same commit apart. A trace row holds: step, Slurm ids,
@@ -286,3 +290,45 @@ The switch names are the ones the scripts read; their defaults are in `RR_SWITCH
 `bin/run_record.sh`. `STRATUM_MIN_N` (the scripts read `MIN_STRATUM_N`), `PC_SCALE`, `MRMEGA_PCS`
 and `BUNDLE_RULES` are read by no script; the launcher refuses to start if any of them is set,
 rather than ignore it.
+
+## 10. QC verdicts and gates (SLURM)
+
+A check that matters is filed as a verdict, and the next step refuses to start unless the verdict
+is there and did not fail. "The check did not run" and "the check passed" are kept apart: a
+**missing** verdict stops a gate exactly as a failed one does.
+
+- **Filing** (`bin/qc_assert.R`, sourced by the R steps): `qc_assert(id, pass, n, message)` writes
+  one verdict, `qc_account(step, n_in, n_out, reason, stratum, trait, chromosome)` one
+  sample-accounting row, each to its own file under `GWAS_QC_DIR` (the launcher sets
+  `results/run_record/<run_id>/qc`; a script submitted by hand uses `results/qc`). From a shell:
+  `Rscript bin/qc_assert.R --id <id> --verdict PASS|FAIL|INFO [--n N] [--message text]`.
+- **Gating** (`bin/qc_gate.sh --require id1,id2`): exit 0 only if every required id has at least
+  one row and none of its rows is `FAIL`; otherwise it prints `missing assertion <id>` or
+  `assertion <id> failed: <message>` and the job stops with exit 3.
+  `QC_GATE_OVERRIDE=<id>[,<id>]` lets the named ids through and records an `OVERRIDE` row (who,
+  when, what it overrode); the switch is in `params.tsv`. There is no switch that skips every gate,
+  and the required lists (`QC_REQUIRE_*` in `bin/slurm_utils.sh`) are not read from the environment.
+
+| gate | runs in | requires | filed by |
+|---|---|---|---|
+| step 0 -> 1 | every GWAS task, before the adapter | `pcair_pc_merge`: every row of each `*.phenotypes.with_pcs.tsv` has its PCs | `bin/ingest_structure.R` (once per file: cohort and each stratum), or the comparator `bin/genesis_pcair_pcrelate.R` |
+| step 1 -> 2 | the combine job, before combining | `adapter_stratum_check` (samples belong to the stratum; `INFO` when no strata file), `adapter_sample_join` (phenotype and Tractor samples overlap), `adapter_grm_cover` (every joined sample is in the GRM; `INFO` without `--kinship`), `adapter_model_n` (the null model was fitted on exactly the complete cases; `INFO` for a stratum skipped below `MIN_STRATUM_N`) | `bin/tractor_genesis_adapter.R`, every task |
+
+`structure_ingest` (`PASS`, or `FAIL` with the reason the ingest refused) is filed too, for the
+record; the ingest's refusal already stops the launch through the job dependency.
+
+Sample-accounting rows, in order: structure step `phenotype_to_fam` (bundle) or
+`phenotype_to_genotype` and `sample_include` (comparator), `stratum`, `pc_merge`; adapter
+`phenotype_input`, `stratum`, `tractor_join`, `grm_intersection`, `complete_cases`,
+`min_stratum_n`, `model_n`. A phenotype row of a sample that was never genotyped is dropped
+before the PC merge, and counted; a genotyped sample left without PCs is a `FAIL`, not a silent
+`NA` carried into the GWAS.
+
+`SKIP_PCAIR=true` reuses `results/pcair/`; its verdicts (`results/pcair/qc_assertions.tsv`, written
+by the structure step) are copied into the run's `qc/`, each message marked
+`[carried from ..., SKIP_PCAIR=true]`. Without that file the GWAS gate stops on the missing
+`pcair_pc_merge`. The Nextflow path files the same verdicts (into each task's `results/qc`) but
+has no gates.
+
+In R: `qc <- read.delim("results/run_record/<run_id>/qc/qc_assertions.tsv")`,
+`acc <- read.delim("results/run_record/<run_id>/qc/sample_accounting.tsv", na.strings = "NA")`.

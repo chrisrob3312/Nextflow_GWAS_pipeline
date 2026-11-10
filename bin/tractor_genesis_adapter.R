@@ -188,6 +188,7 @@ if (!is.null(opt$ancestry_config) && file.exists(opt$ancestry_config)) {
     if (length(f) > 0) dirname(normalizePath(f[1])) else "."
 })
 source(file.path(.adapter_dir, "tractor_io.R"))
+source(file.path(.adapter_dir, "qc_assert.R"))    # qc_assert / qc_account (CP-11)
 
 # Parse ancestries
 ancestries <- strsplit(opt$ancestries, ",")[[1]]
@@ -308,19 +309,56 @@ for (a in ancestries) {
         " (", tractor_files[[a]]$dosage$how, ")\n", sep = "")
 }
 
-# --stratum and --min_stratum_n, from the file headers, before the matrices are read
+# --stratum and --min_stratum_n, from the file headers, before the matrices are read.
+# Every join below writes one sample_accounting row and the checks file verdicts (CP-11); the
+# combine step's gate requires adapter_stratum_check, adapter_sample_join, adapter_grm_cover and
+# adapter_model_n from every task, so a skipped or failed join cannot pass unseen.
 tractor_ids <- tractor_sample_ids(tractor_files[[1]]$hapcount$path)
-stratum_check <- check_stratum_membership(opt$stratum, tractor_ids, opt$strata_file, pheno)
+qc_where <- sprintf("%s / %s / chr%s", opt$trait, opt$stratum %||% "unnamed", opt$chromosome %||% "all")
+acct <- function(step, n_in, n_out, reason) {
+    qc_account(step, n_in, n_out, reason, stratum = opt$stratum %||% NA, trait = opt$trait, chromosome = opt$chromosome %||% NA)
+}
+acct("phenotype_input", nrow(pheno), nrow(pheno), paste("rows in", basename(opt$phenotype)))
+stratum_check <- tryCatch(check_stratum_membership(opt$stratum, tractor_ids, opt$strata_file, pheno), error = function(e) {
+    qc_assert("adapter_stratum_check", FALSE, n = length(tractor_ids), message = paste(qc_where, conditionMessage(e)))
+    stop(e)
+})
+qc_assert("adapter_stratum_check", verdict = if (stratum_check$status == "passed") "PASS" else "INFO", n = length(tractor_ids),
+          message = paste0(qc_where, ": ", stratum_check$status, " (", stratum_check$source, ")"))
+acct("stratum", length(tractor_ids), length(tractor_ids), paste("Tractor samples; stratum check", stratum_check$status))
 cat("  Stratum check:", stratum_check$status, "(", stratum_check$source, ")\n")
+joined <- intersect(pheno$sample_id, tractor_ids)
+acct("tractor_join", nrow(pheno), length(joined),
+     sprintf("phenotype rows also in the Tractor files (%d Tractor samples have no phenotype row)", sum(!tractor_ids %in% pheno$sample_id)))
+qc_assert("adapter_sample_join", length(joined) > 0, n = length(joined),
+          message = sprintf("%s: %d of %d phenotype rows and %d Tractor samples joined", qc_where, length(joined), nrow(pheno), length(tractor_ids)))
+if (!is.null(kinship)) {
+    # The GRM is keyed by the .fam IID (docs/HANDOFF_CONTRACT.md rule 1): a joined sample missing
+    # from it is a broken input, not something to drop quietly.
+    off_grm <- setdiff(joined, rownames(kinship))
+    acct("grm_intersection", length(joined), length(joined) - length(off_grm), paste("joined samples in", basename(opt$kinship)))
+    qc_assert("adapter_grm_cover", length(off_grm) == 0, n = length(joined),
+              message = if (length(off_grm) == 0) paste0(qc_where, ": every joined sample is in the GRM") else
+                  sprintf("%s: %d joined samples are not in %s, e.g. %s", qc_where, length(off_grm), basename(opt$kinship),
+                          paste(head(off_grm, 3), collapse = ", ")))
+    if (length(off_grm) > 0) stop(length(off_grm), " samples with phenotype and Tractor data are not in the GRM ",
+                                  opt$kinship, " (e.g. ", paste(head(off_grm, 3), collapse = ", "), ")")
+} else {
+    qc_assert("adapter_grm_cover", verdict = "INFO", n = length(joined), message = paste0(qc_where, ": no --kinship; fitted without relatedness"))
+}
 outcome_cols <- if (opt$model == "survival") c(opt$time_col, opt$event_col) else opt$trait
 gate_covariates <- if (!is.null(opt$covariates)) strsplit(opt$covariates, ",")[[1]] else NULL
-n_null <- n_analysable(pheno, intersect(pheno$sample_id, tractor_ids), outcome_cols, gate_covariates)
+n_null <- n_analysable(pheno, joined, outcome_cols, gate_covariates)
+acct("complete_cases", length(joined), n_null, paste("joined samples with", paste(c(outcome_cols, gate_covariates), collapse = ", ")))
+acct("min_stratum_n", n_null, if (n_null < opt$min_stratum_n) 0 else n_null, paste("--min_stratum_n", opt$min_stratum_n))
 run_counts <- list(status = "ok", stratum = opt$stratum %||% NA, stratum_check = stratum_check$status,
                    min_stratum_n = opt$min_stratum_n, n_null = n_null, n_variants = NA,
                    n_pass_mac = NA, n_tested = NA, n_failed = NA)
 if (n_null < opt$min_stratum_n) {
     run_counts$status <- "skipped_below_min_stratum_n"
     write_run_counts(opt$output_prefix, run_counts)
+    qc_assert("adapter_model_n", verdict = "INFO", n = n_null,
+              message = sprintf("%s: skipped, %d analysable samples < --min_stratum_n %d", qc_where, n_null, opt$min_stratum_n))
     cat("\nSKIPPED: stratum ", opt$stratum %||% "(unnamed)", " has ", n_null,
         " analysable samples, fewer than --min_stratum_n ", opt$min_stratum_n,
         ". No association results are written; see ", opt$output_prefix, ".run_counts.tsv\n", sep = "")
@@ -432,12 +470,8 @@ if (!is.null(covariates)) {
     cat("  Covariates:", paste(covariates, collapse = ", "), "\n")
 }
 
-# Subset kinship to common samples
+# Subset kinship to common samples (every one of them is in it: adapter_grm_cover above)
 if (!is.null(kinship)) {
-    kin_samples <- intersect(rownames(kinship), common_samples)
-    if (length(kin_samples) < length(common_samples)) {
-        cat("  Warning: Kinship matrix missing", length(common_samples) - length(kin_samples), "samples\n")
-    }
     kinship <- kinship[common_samples, common_samples]
 }
 
@@ -596,6 +630,13 @@ if (opt$model == "survival") {
         "mixed model (GENESIS", if (is.null(kinship)) "- no kinship)" else "with kinship)", "\n")
     null_ops <- genesis_ops(nullmod, n_samples)
 }
+
+# Samples the null model was fitted on: must be the complete cases counted above, or the score
+# test would pair residuals with the wrong genotype rows
+model_n <- length(null_ops$PY)
+acct("model_n", n_samples, model_n, paste(opt$model, "null model"))
+qc_assert("adapter_model_n", model_n == n_null, n = model_n,
+          message = sprintf("%s: null model on %d samples; %d complete cases", qc_where, model_n, n_null))
 
 # Save null model
 saveRDS(nullmod, paste0(opt$output_prefix, ".null_model.rds"))

@@ -9,6 +9,24 @@
 # The run record (rr_begin, ...; bin/run_record.sh), so every job that sources this file has it
 source "$(dirname "${BASH_SOURCE[0]}")/run_record.sh"
 
+# ---------------------------------------------------------------------------
+# QC verdicts and gates (CP-11; bin/qc_assert.R, bin/qc_gate.sh)
+# ---------------------------------------------------------------------------
+# Where every step files its verdicts and sample counts. The launcher sets <run dir>/qc; a job
+# submitted by hand uses <repo>/results/qc.
+export GWAS_QC_DIR="${GWAS_QC_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/results/qc}"
+# What each step requires from the step before it. Deliberately not read from the environment:
+# QC_GATE_OVERRIDE=<id> is the only way past a gate, one named id at a time, and it is recorded.
+# A new check is added to its list in the same commit that files it.
+QC_REQUIRE_STRUCTURE="pcair_pc_merge"
+QC_REQUIRE_GWAS="adapter_stratum_check,adapter_sample_join,adapter_grm_cover,adapter_model_n"
+# qc_gate_or_exit REQUIRED_IDS LABEL: stop this job (exit 3) unless every id is there and passed
+qc_gate_or_exit() {
+    "$(dirname "${BASH_SOURCE[0]}")/qc_gate.sh" --require "$1" --dir "${GWAS_QC_DIR}" && return 0
+    echo "ERROR: the QC gate before $2 stopped this job (QC GATE lines above; ${GWAS_QC_DIR}). QC_GATE_OVERRIDE=<id> proceeds on purpose and is recorded." >&2
+    exit 3
+}
+
 # Check if running under SLURM
 is_slurm_job() {
     [[ -n "${SLURM_JOB_ID:-}" ]]
