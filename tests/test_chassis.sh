@@ -703,6 +703,8 @@ grep -q $'^COVARIATES\t'"${COVS}"$'\tbundle$' "${RD}/params.tsv" && grep -q -- "
 S="${C}/results/gwas/os/EUR.sumstats.gz"
 [[ "$(zcat "$S" | head -1)" == "## covariates=${COVS}" && "$(zcat "$S" | grep -c '^## ')" -eq 1 && "$(zcat "$S" | grep -c '^CHR')" -eq 1 && "$(zcat "$S" | wc -l)" -eq 24 ]] \
     && ok "combine: '## covariates=' kept once, then one header and the 22 chromosomes' rows" || bad "combined: $(zcat "$S" 2>&1 | head -4)"
+[[ "$(zcat "$S" | awk -F'\t' '!/^##/ && NR > 2 {print $1}' | paste -sd, -)" == "$(seq 1 22 | paste -sd, -)" ]] \
+    && ok "combine: chromosomes in genomic order 1..22, not text order (1, 10, 11, ..., 2)" || bad "chromosome order: $(zcat "$S" | awk -F'\t' '!/^##/ && NR > 2 {print $1}' | paste -sd, -)"
 rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results" "${C:?}/logs"
 out="$(cd /tmp && env "${SITE[@]}" STRATA_LIST=EUR TRAITS_LIST=os FAKE_SBATCH_RUN=1 RR_SACCT_WAIT=0 'FAKE_META_CHR7=## covariates=sex' "$L" 2>&1)"
 RD="$(ls -d "${C}"/results/run_record/*/ | head -1)"; RD="${RD%/}"

@@ -466,7 +466,8 @@ meta() { zcat "$1" | awk '/^##/ {print; next} {exit}'; }
 hdr()  { zcat "$1" | awk '!/^##/ {print; exit}'; }
 rows() { zcat "$1" | awk '/^##/ && !h {next} h {print} {h = 1}'; }
 for stratum in ${ANALYSED[@]+"${ANALYSED[@]}"}; do
-    files=("${GWAS_DIR}/${stratum}"/chr*.tractor_genesis.genomic_order.tsv.gz)
+    # chromosomes in genomic order, 1..22 (a chr* glob sorts as text: chr1, chr10, chr11, ..., chr2)
+    files=(); for c in $(seq 1 22); do files+=("${GWAS_DIR}/${stratum}/chr${c}.tractor_genesis.genomic_order.tsv.gz"); done
     echo "Combining ${GWAS_TRAIT} / ${stratum}..."
     m0="$(meta "${files[0]}")"
     for f in "${files[@]}"; do
