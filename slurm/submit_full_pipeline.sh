@@ -9,7 +9,7 @@
 #   1. GWAS: Run Tractor-GENESIS for each ancestry stratum (22 chr × 5 strata)
 #   2. Combine: Merge chromosomes, run meta-analysis for OTHER
 #   3. PRS: Run 6 methods × 3 traits                         only with RUN_PRS=true
-#   4. Colocalization: Run parallel methods on all QTL types  only with RUN_COLOC=true
+#   4. Colocalization per trait, all QTL types                 only with RUN_COLOC=true
 #   5. Validation: Compare methods overall and by ancestry    only with RUN_VALIDATION=true (needs RUN_PRS)
 #   6. GxG interaction on the GWAS hits                       only with RUN_GXG=true
 # Steps 3-6 are off by default; every launch prints which were deferred.
@@ -98,6 +98,10 @@ MISSING_ANC=()
 for stratum in "${STRATA[@]}"; do
     [[ -s "${REPO}/data/tractor/${stratum}/ancestries.txt" ]] || MISSING_ANC+=("${REPO}/data/tractor/${stratum}/ancestries.txt")
 done
+# PRS, and GxG's pooled task when there are Tractor files, read the cohort-wide list instead
+if [[ "${RUN_PRS}" == true || ( "${RUN_GXG}" == true && -d "${REPO}/data/tractor" ) ]]; then
+    [[ -s "${REPO}/data/tractor/ancestries.txt" ]] || MISSING_ANC+=("${REPO}/data/tractor/ancestries.txt")
+fi
 if [[ ${#MISSING_ANC[@]} -gt 0 ]]; then
     if [[ $DRY_RUN == 1 ]]; then
         printf 'WARNING: missing %s (a launch would refuse)\n' "${MISSING_ANC[@]}"
@@ -300,12 +304,16 @@ fi
 # ============================================================================
 echo ""
 if [[ "${RUN_COLOC}" == true ]]; then
-echo "STEP 4: Submitting colocalization jobs..."
+echo "STEP 4: Submitting colocalization jobs (one 6-task array per trait)..."
 
-# Colocalization can start after GWAS combine. Quoted heredoc, as in step 2.
-submit "colocalization (6 QTL types)" ${DEPEND_COMBINE:+"$DEPEND_COMBINE"} \
-    --job-name=colocalization --array=1-6 --time=24:00:00 --mem=64G --cpus-per-task=16 \
-    --output="${LOG_DIR}/coloc_%A_%a.out" <<'EOF'
+# Per trait: each array colocalizes that trait's POOLED meta-analysis (written by its combine job,
+# results/gwas/<trait>/POOLED.sumstats.gz) and waits on that combine job only. Quoted heredoc, as
+# in step 2; GWAS_TRAIT is set on the submit line.
+for trait in "${TRAITS[@]}"; do
+GWAS_TRAIT="$trait" submit "colocalization ${trait} (6 QTL types)" \
+    ${COMBINE_JOBS[$trait]:+--dependency=afterok:"${COMBINE_JOBS[$trait]}"} \
+    --job-name="coloc_${trait}" --array=1-6 --time=24:00:00 --mem=64G --cpus-per-task=16 \
+    --output="${LOG_DIR}/coloc_${trait}_%A_%a.out" <<'EOF'
 #!/bin/bash
 set -euo pipefail
 SCRIPT_DIR="${GWAS_REPO}"
@@ -313,24 +321,38 @@ source "${SCRIPT_DIR}/bin/slurm_utils.sh"
 rr_begin coloc
 source "${SCRIPT_DIR}/bin/activate_env.sh" gwas-r
 
+# run_colocalization.R quietly skips a method whose R package is missing; refuse instead.
+# coloc and susieR come with envs/gwas-r.yml; hyprcoloc is installed by hand (command there).
+if ! Rscript "${SCRIPT_DIR}/bin/check_r_libs.R" coloc susieR hyprcoloc; then
+    echo "REFUSED: colocalization needs the R packages coloc, susieR and hyprcoloc in the gwas-r env;" \
+         "the MISSING line above names what is absent. coloc and susieR come with envs/gwas-r.yml;" \
+         "hyprcoloc is installed by hand with the command in envs/gwas-r.yml." >&2
+    exit 3
+fi
+
 # Map array ID to QTL type
 QTL_TYPES=("eqtl" "sqtl" "pqtl" "mqtl" "caqtl" "hqtl")
 QTL_TYPE="${QTL_TYPES[$((SLURM_ARRAY_TASK_ID - 1))]}"
-rr_args "${QTL_TYPE}" "${SCRIPT_DIR}/results/gwas/POOLED.sumstats.gz"
+GWAS_FILE="${SCRIPT_DIR}/results/gwas/${GWAS_TRAIT}/POOLED.sumstats.gz"
+OUT_DIR="${SCRIPT_DIR}/results/coloc/${GWAS_TRAIT}"
+mkdir -p "${OUT_DIR}"
+rr_args "${GWAS_TRAIT} ${QTL_TYPE}" "${GWAS_FILE}"
 
-echo "Running colocalization for ${QTL_TYPE}..."
+echo "Running colocalization for ${GWAS_TRAIT} / ${QTL_TYPE}..."
 
-# Run all methods in parallel (coloc.susie, HyPrColoc, OPERA)
+# Run all methods in parallel (coloc.susie, HyPrColoc, OPERA; OPERA falls back to an R
+# multi-QTL SMR when the opera binary is not on PATH)
 Rscript "${SCRIPT_DIR}/bin/run_colocalization.R" \
-    --gwas "${SCRIPT_DIR}/results/gwas/POOLED.sumstats.gz" \
+    --gwas "${GWAS_FILE}" \
     --qtl_dir "${SCRIPT_DIR}/data/qtl" \
     --qtl_types "${QTL_TYPE}" \
     --methods coloc_susie,hyprcoloc,opera \
-    --run_opera true \
-    --output_prefix "${SCRIPT_DIR}/results/coloc/${QTL_TYPE}" \
+    --run_opera \
+    --output_prefix "${OUT_DIR}/${QTL_TYPE}" \
     --threads "${SLURM_CPUS_PER_TASK}" \
     --verbose
 EOF
+done
 else
     echo "STEP 4: colocalization deferred (RUN_COLOC=false)"
 fi
@@ -428,7 +450,7 @@ echo "Pipeline Submitted"
 echo "=============================================="
 echo "GWAS jobs: ${#TRAITS[@]} traits × ${#STRATA[@]} strata × 22 chromosomes"
 [[ "${RUN_PRS}" == true ]]   && echo "PRS jobs: ${#TRAITS[@]} traits × 6 methods"
-[[ "${RUN_COLOC}" == true ]] && echo "Colocalization: ${#QTL_TYPES[@]} QTL types × 3 methods"
+[[ "${RUN_COLOC}" == true ]] && echo "Colocalization: ${#TRAITS[@]} traits × ${#QTL_TYPES[@]} QTL types × 3 methods"
 [[ "${RUN_GXG}" == true ]]   && echo "GxG interaction: ${#TRAITS[@]} traits × 8 strata (+ ancestry heterogeneity)"
 if [[ ${#DEFERRED[@]} -gt 0 ]]; then echo "deferred: ${DEFERRED[*]} (RUN_*=false)"; fi
 echo "Logs: ${LOG_DIR}"

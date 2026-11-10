@@ -55,18 +55,33 @@ PHENO="${PHENO:-$([[ -f "${PCAIR_PHENO}" ]] && echo "${PCAIR_PHENO}" || echo "${
 echo "Phenotype: ${PHENO}"
 mkdir -p "${RESULTS_DIR}"
 
-# Hits come from EVERY GWAS variant for this trait: pooled meta + each stratum
-SUMSTATS=$(ls "${GWAS_DIR}"/POOLED.sumstats.gz "${GWAS_DIR}"/{EUR,AAC,LAT1,LAT2,EAS,SAS,OTHER}.sumstats.gz 2>/dev/null | paste -sd, -)
+# Hits come from EVERY GWAS variant for this trait: pooled meta + each stratum. A stratum with no
+# sumstats (skipped below MIN_STRATUM_N, or not analysed) is left out and named; none at all stops
+# the task. (The old `ls ... | paste` died under pipefail as soon as one file was missing.)
+SUMSTATS_FILES=(); SUMSTATS_MISSING=()
+for s in POOLED EUR AAC LAT1 LAT2 EAS SAS OTHER; do
+    if [[ -s "${GWAS_DIR}/${s}.sumstats.gz" ]]; then SUMSTATS_FILES+=("${GWAS_DIR}/${s}.sumstats.gz"); else SUMSTATS_MISSING+=("${s}"); fi
+done
+if [[ ${#SUMSTATS_FILES[@]} -eq 0 ]]; then
+    echo "ERROR: no sumstats for ${TRAIT}: none of ${GWAS_DIR}/{POOLED,EUR,AAC,LAT1,LAT2,EAS,SAS,OTHER}.sumstats.gz exists" >&2
+    exit 1
+fi
+if [[ ${#SUMSTATS_MISSING[@]} -gt 0 ]]; then
+    echo "Sumstats not found, left out of hit selection: ${SUMSTATS_MISSING[*]} (${GWAS_DIR}/<stratum>.sumstats.gz)"
+fi
+SUMSTATS="$(IFS=,; echo "${SUMSTATS_FILES[*]}")"
 
 SURV_ARGS=""
 if [[ "${MODEL}" == "survival" ]]; then
     SURV_ARGS="--time_col ${TRAIT}_time --event_col ${TRAIT}_status"
 fi
 
-# Optional: Tractor dosages for local-ancestry-aware epistasis (pooled task only)
+# Optional: Tractor dosages for local-ancestry-aware epistasis (pooled task only). The ancestry list
+# sits next to the Tractor files it describes: data/tractor/ancestries.txt for data/tractor/all_chr.*
 TRACTOR_ARGS=""
 if [[ "${STRATUM}" == "POOLED" && -d "${DATA_DIR}/tractor" ]]; then
-    TRACTOR_ARGS="--tractor_prefix ${DATA_DIR}/tractor/all_chr --ancestries EUR,AFR,AMR"
+    GXG_ANCESTRIES="$(read_stratum_ancestries "${DATA_DIR}/tractor/ancestries.txt")" || exit 1
+    TRACTOR_ARGS="--tractor_prefix ${DATA_DIR}/tractor/all_chr --ancestries ${GXG_ANCESTRIES}"
 fi
 
 # ---- customisable (env vars) ----------------------------------------------
@@ -80,8 +95,7 @@ PRUNE_MODE="${GXG_PRUNE_MODE:-conditional}" # conditional = test LD-correlated h
 COND_P="${GXG_COND_P:-1e-4}"                # conditional P below which an LD-correlated hit is an independent signal
 # ---------------------------------------------------------------------------
 
-IFS=',' read -ra SUMSTATS_FILES <<< "${SUMSTATS}"
-rr_args "${TRAIT} ${MODEL} ${STRATUM}" "${PHENO}" ${SUMSTATS_FILES[@]+"${SUMSTATS_FILES[@]}"}
+rr_args "${TRAIT} ${MODEL} ${STRATUM}" "${PHENO}" "${SUMSTATS_FILES[@]}"
 Rscript "${SCRIPT_DIR}/bin/run_gxg_interaction.R" \
     --sumstats "${SUMSTATS}" \
     --p_threshold "${GXG_P_THRESHOLD:-1e-5}" \

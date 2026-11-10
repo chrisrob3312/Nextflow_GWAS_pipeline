@@ -78,16 +78,29 @@ LOCAL_ANC="${DATA_DIR}/local_ancestry/cohort.msp.tsv.gz"
 # Phenotype for validation
 PHENO="${DATA_DIR}/phenotypes/phenotypes.tsv"
 
+# Ancestries: the cohort's list, next to the cohort-wide Tractor files (data/tractor/ancestries.txt).
+# PRS_ANCESTRY_PROPS (global ancestry proportions for the weighted combined score) must name exactly
+# the same ancestries; a mismatch stops here instead of weighting the wrong backgrounds.
+ANC_FILE="${DATA_DIR}/tractor/ancestries.txt"
+PRS_ANCESTRIES="$(read_stratum_ancestries "${ANC_FILE}")" || exit 1
+PRS_ANCESTRY_PROPS="${PRS_ANCESTRY_PROPS:-EUR:0.35,AFR:0.15,AMR:0.50}"
+props_labels="$(tr ',' '\n' <<< "${PRS_ANCESTRY_PROPS}" | cut -d: -f1 | sort | paste -sd, -)"
+if [[ "${props_labels}" != "$(tr ',' '\n' <<< "${PRS_ANCESTRIES}" | sort | paste -sd, -)" ]]; then
+    echo "ERROR: PRS_ANCESTRY_PROPS (${PRS_ANCESTRY_PROPS}) names ${props_labels}, but ${ANC_FILE} lists ${PRS_ANCESTRIES}; set PRS_ANCESTRY_PROPS to match" >&2
+    exit 1
+fi
+ANC_INDEX_MAP="${ANC_INDEX_MAP:-${DATA_DIR}/tractor/flare_index_map.tsv}"
+
 # Run PRS calculation
-rr_args "${TRAIT} ${METHOD}" "${PHENO}"
+rr_args "${TRAIT} ${METHOD} ancestries=${PRS_ANCESTRIES} props=${PRS_ANCESTRY_PROPS}" "${PHENO}" "${ANC_FILE}"
 Rscript "${SCRIPT_DIR}/bin/calculate_prs_admixed.R" \
     --method "${METHOD}" \
     --sumstats_dir "${SUMSTATS_DIR}" \
     --ld_ref "${LD_REF}" \
     --geno "${GENO}" \
     --local_ancestry "${LOCAL_ANC}" \
-    --ancestries "EUR,AFR,AMR" \
-    --ancestry_props "EUR:0.35,AFR:0.15,AMR:0.50" \
+    --ancestries "${PRS_ANCESTRIES}" \
+    --ancestry_props "${PRS_ANCESTRY_PROPS}" \
     --phenotype "${PHENO}" \
     --trait "${TRAIT}" \
     --ancestry_col "GRAF_ANC" \
@@ -110,11 +123,14 @@ if [[ "${METHOD}" == "prs_csx" && -d "${DATA_DIR}/tractor" ]]; then
         LA_WEIGHTS="${SCRIPT_DIR}/results/gwas/${TRAIT}/POOLED.sumstats.gz"
         echo "LA partial scores: PRS-CSx weights not found, falling back to Tractor-GENESIS betas (no shrinkage)"
     fi
+    INDEX_MAP_ARGS=()
+    [[ -f "${ANC_INDEX_MAP}" ]] && INDEX_MAP_ARGS=(--ancestry_index_map "${ANC_INDEX_MAP}")
     Rscript "${SCRIPT_DIR}/bin/calculate_prs_admixed.R" \
         --method la_partial \
         --weights "${LA_WEIGHTS}" \
         --tractor_prefix "${DATA_DIR}/tractor/all_chr" \
-        --ancestries "EUR,AFR,AMR" \
+        ${INDEX_MAP_ARGS[@]+"${INDEX_MAP_ARGS[@]}"} \
+        --ancestries "${PRS_ANCESTRIES}" \
         --phenotype "${PHENO}" \
         --trait "${TRAIT}" \
         --output_prefix "${RESULTS_DIR}/${TRAIT}" \

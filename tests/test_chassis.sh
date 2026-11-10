@@ -51,6 +51,14 @@ if [[ "${1:-}" == */check_r_libs.R ]]; then
     exit "$bad"
 fi
 echo "stub Rscript: $*"
+# As the adapter: write <output_prefix>.run_counts.tsv (status from FAKE_ADAPTER_STATUS)
+if [[ "${1:-}" == */tractor_genesis_adapter.R ]]; then
+    prev=""; for a in "$@"; do [[ "$prev" == --output_prefix ]] && out="$a"; prev="$a"; done
+    st="${FAKE_ADAPTER_STATUS:-ok}"
+    if [[ "$st" == ok ]]; then nt=900; else nt=NA; fi
+    printf 'key\tvalue\nstatus\t%s\nstratum\tEUR\nstratum_check\tpassed\nmin_stratum_n\t50\nn_null\t%s\nn_variants\t1000\nn_pass_mac\t950\nn_tested\t%s\nn_failed\t2\n' \
+        "$st" "${FAKE_N_NULL:-120}" "$nt" > "${out}.run_counts.tsv"
+fi
 exit "${FAKE_RSCRIPT_EXIT:-0}"
 EOF
 printf '#!/bin/sh\necho "openjdk version \\"21.0.10\\" (stub)" >&2\n' > "${W}/envs/lai/bin/java"
@@ -62,6 +70,7 @@ for s in "${STRATA_DEFAULT[@]}"; do mkdir -p "${C}/data/tractor/${s}"; done
 printf 'EUR\n' > "${C}/data/tractor/EUR/ancestries.txt"
 printf 'AFR\nEUR\n' > "${C}/data/tractor/AAC/ancestries.txt"
 for s in LAT1 LAT2 OTHER; do printf 'AFR\nAMR\nEUR\n' > "${C}/data/tractor/${s}/ancestries.txt"; done
+printf 'AFR\nAMR\nEUR\n' > "${C}/data/tractor/ancestries.txt"       # cohort-wide list (GxG pooled, PRS)
 L="${C}/slurm/submit_full_pipeline.sh"
 SITE=(SLURM_PARTITION=testpart SLURM_ACCOUNT=testacct)
 
@@ -207,7 +216,7 @@ gx="$(grep '\[DRY-RUN\] GxG' <<< "$out")"
 [[ "$(grep -c -- '--dependency=afterok:dry17:dry18:dry19 ' <<< "$gx")" -eq 3 ]] && ok "RUN_GXG without PRS: GxG waits on the three combine jobs" || bad "GxG dependency: $gx"
 grep -q -- 'afterok: \|afterok::\|afterok:$\|--dependency= ' <<< "$out" && bad "an empty job id in a dependency" || ok "no empty job id in any dependency"
 out="$(cd /tmp && env "${SITE[@]}" RUN_PRS=true RUN_COLOC=true RUN_VALIDATION=true RUN_GXG=true "$L" --dry-run 2>&1)"
-has "$out" "deferred: none" && [[ "$(grep -c '\[DRY-RUN\] \(PRS\|colocalization\|PRS validation\|GxG\)' <<< "$out")" -eq 8 ]] && ok "all RUN_*=true: every step submitted" || bad "all on"
+has "$out" "deferred: none" && [[ "$(grep -c '\[DRY-RUN\] \(PRS\|colocalization\|PRS validation\|GxG\)' <<< "$out")" -eq 10 ]] && ok "all RUN_*=true: every step submitted (coloc once per trait)" || bad "all on"
 out="$(cd /tmp && env "${SITE[@]}" RUN_VALIDATION=true "$L" --dry-run 2>&1)"; rc=$?
 [[ $rc -ne 0 ]] && has "$out" "RUN_VALIDATION=true needs RUN_PRS=true" && ok "RUN_VALIDATION without RUN_PRS: refused" || bad "validation alone: rc=$rc"
 out="$(cd /tmp && env "${SITE[@]}" RUN_PRS=yes "$L" --dry-run 2>&1)"; rc=$?
@@ -317,8 +326,8 @@ sha="$(awk -F'\t' '$1 == "gwas-py" {print $3}' "$REPO/envs.tsv")"
 [[ "$(col max_rss)" == "2048K 2048K" ]] && ok "MaxRSS from sacct on both rows" || bad "max_rss: $(col max_rss)"
 [[ "$(col script_sha256 | awk '{print length($1)}')" -eq 64 ]] && ok "script sha256 recorded" || bad "script_sha256: $(col script_sha256)"
 has "$(col inputs_md5)" "envs.tsv=$(md5sum "${C}/envs.tsv" | cut -d' ' -f1)" && ok "input md5 recorded" || bad "inputs_md5: $(col inputs_md5)"
-[[ "$(col n_tested)" == "NA NA" ]] && ok "adapter counts NA (the adapter writes no sidecar)" || bad "n_tested: $(col n_tested)"
-grep -q '| stub | 2 | 1 | 1 | 0 |' "${SELF}/summary.md" && ok "summary.md: stub step, 2 tasks, 1 ok, 1 non-zero" || bad "summary: $(cat "${SELF}/summary.md")"
+[[ "$(col n_tested)" == "NA NA" && "$(col task_status)" == "NA NA" ]] && ok "no counts file for a stub step: n_* and task_status NA" || bad "n_tested: $(col n_tested)"
+grep -q '| stub | 2 | 1 | 1 | 0 | 0 |' "${SELF}/summary.md" && ok "summary.md: stub step, 2 tasks, 1 ok, 1 non-zero" || bad "summary: $(cat "${SELF}/summary.md")"
 out2="$(cd "$C" && env "${SITE[@]}" MAC_MIN=30 FAKE_SBATCH_RUN=1 RR_SACCT_WAIT=0 bash tests/run_record_selftest.sh 2>&1)"
 SELF2="$(sed -n 's/^run directory: //p' <<< "$out2")"
 d="$(diff "${SELF}/params.tsv" "${SELF2}/params.tsv" | grep -c '^[<>]')"
@@ -372,6 +381,101 @@ grep -q 'stub Rscript: .*genesis_pcair_pcrelate.R' "${C}/logs/pcair_${jid}.out" 
 ls "${C}/results/run_record/direct_${jid}/trace.d/"pcair.*.tsv >/dev/null 2>&1 && ok "its trace row goes to results/run_record/direct_${jid}/" || bad "direct trace row"
 out="$(cd /tmp && env "${SITE[@]}" FAKE_SBATCH_RUN=1 sbatch --parsable --output="${W}/pcair_elsewhere.out" "${C}/slurm/submit_pcair.sh" 2>&1)"
 grep -q 'cannot find the repo' "${W}/pcair_elsewhere.out" && ok "from another directory: stops with 'cannot find the repo'" || bad "elsewhere: $(cat "${W}/pcair_elsewhere.out")"
+
+# ============================================================================
+section "Adapter: --stratum, --min_stratum_n, no positional Tractor files (bin/tractor_io.R)"
+if command -v Rscript >/dev/null 2>&1 && Rscript -e 'quit(status = !requireNamespace("data.table", quietly = TRUE))' >/dev/null 2>&1; then
+    out="$(Rscript "$REPO/tests/test_tractor_io.R" "$REPO" 2>&1)"; rc=$?
+    while IFS= read -r line; do
+        case "$line" in "ok   "*) ok "tractor_io.R: ${line#ok   }" ;; "FAIL "*) bad "tractor_io.R: ${line#FAIL }" ;; esac
+    done <<< "$out"
+    [[ $rc -eq 0 ]] || bad "tests/test_tractor_io.R exited $rc: $(tail -3 <<< "$out")"
+    out="$(Rscript -e 'for (f in commandArgs(TRUE)) invisible(parse(f)); cat("parsed\n")' \
+           "$REPO"/bin/tractor_genesis_adapter.R "$REPO"/bin/calculate_prs_admixed.R "$REPO"/bin/run_gxg_interaction.R "$REPO"/bin/tractor_io.R 2>&1)"
+    has "$out" parsed && ok "the changed R scripts parse" || bad "R parse: $out"
+else
+    echo "  (R with data.table not available here: tractor_io.R checks skipped)"
+fi
+A="$REPO/bin/tractor_genesis_adapter.R"
+grep -q 'anc_code' "$A" && bad "adapter still derives a file number from the position in --ancestries" || ok "adapter: no file number taken from the position in --ancestries"
+grep -q 'source(file.path(.adapter_dir, "tractor_io.R"))' "$A" && ok "adapter sources bin/tractor_io.R" || bad "adapter does not source tractor_io.R"
+grep -q 'check_stratum_membership(opt$stratum, tractor_ids, opt$strata_file, pheno)' "$A" && ok "adapter: --stratum checked against the Tractor files' samples" || bad "adapter: no stratum check"
+grep -q 'if (n_null < opt$min_stratum_n)' "$A" && grep -q 'quit(save = "no", status = 0)' "$A" && ok "adapter: below --min_stratum_n, skip with exit 0" || bad "adapter: no min_stratum_n gate"
+grep -q 'results\[, STRATUM := opt$stratum\]' "$A" && ok "adapter: outputs labelled with a STRATUM column" || bad "adapter: no STRATUM label"
+grep -q 'write_run_counts(opt$output_prefix, run_counts)' "$A" && ok "adapter: writes <output_prefix>.run_counts.tsv" || bad "adapter: no counts file"
+grep -q '".ancdose.", k' "$REPO/bin/calculate_prs_admixed.R" && bad "PRS still reads Tractor files by position" || ok "PRS LA partial: no file number from the position either"
+for m in modules/local/tractor_genesis_adapter/main.nf modules/local/prs_admixed/main.nf; do
+    grep -q -- '--ancestry_index_map ancestry_index_map.tsv' "$REPO/$m" && ok "${m}: passes its declared order as an explicit index map" || bad "${m}: no index map"
+done
+grep -q 'EUR,AFR,AMR' "$REPO/slurm/submit_gxg_array.sh" "$REPO/slurm/submit_prs_array.sh" && bad "GxG/PRS still hard-code EUR,AFR,AMR" || ok "GxG and PRS no longer hard-code EUR,AFR,AMR"
+grep -q '^TRAITS=' "$REPO/bin/slurm_utils.sh" && bad "slurm_utils.sh still sets TRAITS" || ok "slurm_utils.sh no longer sets or exports TRAITS"
+
+section "GWAS array: strata file and index map reach the adapter when present"
+out="$(cd /tmp && DRY_RUN=1 bash "$G" EUR OS survival 2>&1)"
+has "$out" "data/ancestry/strata.tsv not found" && ! grep -q -- '--strata_file' <<< "$(grep '^\[DRY-RUN\]' <<< "$out")" && ok "no strata file: not passed, and the log says the check falls back" || bad "no strata file: $out"
+mkdir -p "${C}/data/ancestry"; printf 'sample_id\tstratum\nS1\tEUR\n' > "${C}/data/ancestry/strata.tsv"
+printf 'anc_index\tlabel\n0\tAFR\n1\tAMR\n2\tEUR\n' > "${C}/data/tractor/flare_index_map.tsv"
+out="$(cd /tmp && DRY_RUN=1 bash "$G" EUR OS survival 2>&1 | grep '^\[DRY-RUN\]')"
+has "$out" "--strata_file ${C}/data/ancestry/strata.tsv" && has "$out" "--ancestry_index_map ${C}/data/tractor/flare_index_map.tsv" && has "$out" "--min_stratum_n 50 " \
+    && ok "strata file, index map and MIN_STRATUM_N 50 passed" || bad "args: $out"
+rm -f "${C}/data/ancestry/strata.tsv" "${C}/data/tractor/flare_index_map.tsv"
+
+section "Run record: the adapter's counts and a stratum skipped below MIN_STRATUM_N"
+rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results" "${C:?}/logs"
+out="$(cd /tmp && env "${SITE[@]}" STRATA_LIST=EUR TRAITS_LIST=OS FAKE_SBATCH_RUN=1 RR_SACCT_WAIT=0 "$L" 2>&1)"
+RD="$(ls -d "${C}"/results/run_record/*/ | head -1)"; T="${RD%/}/trace.tsv"
+row="$(awk -F'\t' 'NR > 1 && $1 == "gwas" {print $15, $16, $17, $18, $23; exit}' "$T")"
+[[ "$row" == "120 900 950 2 ok" ]] && ok "gwas rows: n_null 120, n_tested 900, n_pass_mac 950, n_failed 2, task_status ok (from run_counts.tsv)" || bad "counts row: '$row'"
+rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results" "${C:?}/logs"
+out="$(cd /tmp && env "${SITE[@]}" STRATA_LIST=EUR TRAITS_LIST=OS FAKE_SBATCH_RUN=1 RR_SACCT_WAIT=0 FAKE_ADAPTER_STATUS=skipped_below_min_stratum_n FAKE_N_NULL=31 "$L" 2>&1)"
+RD="$(ls -d "${C}"/results/run_record/*/ | head -1)"
+grep -q '| gwas | 22 | 22 | 0 | 0 | 22 |' "${RD%/}/summary.md" && ok "summary.md: 22 gwas tasks exit 0, all 22 skipped below MIN_STRATUM_N" || bad "summary: $(grep '| gwas' "${RD%/}/summary.md")"
+grep -q 'skipped: N below MIN_STRATUM_N' "${C}"/logs/combine_OS_*.out && ok "combine names the likely reason for a stratum without results" || bad "combine message"
+
+section "GxG: missing sumstats are left out and named; none at all stops the task"
+rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results" "${C:?}/logs"; mkdir -p "${C}/results/gwas/OS" "${C}/logs"
+echo x | gzip > "${C}/results/gwas/OS/POOLED.sumstats.gz"; echo x | gzip > "${C}/results/gwas/OS/EUR.sumstats.gz"
+out="$(cd "$C" && env "${SITE[@]}" GWAS_REPO="$C" LOG_DIR="${C}/logs" FAKE_SBATCH_RUN=1 sbatch --parsable \
+        --output="${C}/logs/gxg_%A_%a.out" slurm/submit_gxg_array.sh OS survival 2>&1)"
+jid="$(head -1 <<< "$out")"
+lg="${C}/logs/gxg_${jid}_0.out"
+has "$(cat "$lg" 2>/dev/null)" "left out of hit selection: AAC LAT1 LAT2 EAS SAS OTHER" && grep -q "stub Rscript: .*--sumstats ${C}/results/gwas/OS/POOLED.sumstats.gz,${C}/results/gwas/OS/EUR.sumstats.gz " "$lg" \
+    && ok "two of eight sumstats present: the task runs on those two and names the six left out" || bad "gxg partial: $(tail -5 "$lg" 2>&1)"
+grep -q -- "--tractor_prefix ${C}/data/tractor/all_chr --ancestries AFR,AMR,EUR" "$lg" && ok "pooled task: --ancestries from data/tractor/ancestries.txt" || bad "gxg ancestries: $(grep stub "$lg")"
+[[ "$(grep -l 'Completed GxG' "${C}"/logs/gxg_"${jid}"_*.out | wc -l)" -eq 8 ]] && ok "all 8 GxG tasks completed (pipefail no longer kills them)" || bad "gxg tasks completed: $(grep -L 'Completed GxG' "${C}"/logs/gxg_"${jid}"_*.out)"
+rm -f "${C}"/results/gwas/OS/*.sumstats.gz
+out="$(cd "$C" && env "${SITE[@]}" GWAS_REPO="$C" LOG_DIR="${C}/logs" FAKE_SBATCH_RUN=1 sbatch --parsable \
+        --output="${C}/logs/gxgnone_%A_%a.out" slurm/submit_gxg_array.sh OS survival 2>&1)"
+jid="$(head -1 <<< "$out")"
+grep -q "ERROR: no sumstats for OS" "${C}/logs/gxgnone_${jid}_0.out" && grep -q "^${jid}_0|FAILED|1:0" "${FAKE_SLURM_DIR}/sacct.db" \
+    && ok "no sumstats at all: the task fails, saying so" || bad "gxg none: $(tail -3 "${C}/logs/gxgnone_${jid}_0.out")"
+
+section "PRS: ancestries from data/tractor/ancestries.txt; proportions must name the same ones"
+rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/logs"; mkdir -p "${C}/logs"
+out="$(cd "$C" && env "${SITE[@]}" GWAS_REPO="$C" FAKE_SBATCH_RUN=1 sbatch --parsable --output="${C}/logs/prs_%A_%a.out" slurm/submit_prs_array.sh OS 2>&1)"
+jid="$(head -1 <<< "$out")"
+grep -q -- "--ancestries AFR,AMR,EUR --ancestry_props EUR:0.35,AFR:0.15,AMR:0.50" "${C}/logs/prs_${jid}_1.out" && ok "PRS gets --ancestries AFR,AMR,EUR from the file" || bad "prs ancestries: $(grep stub "${C}/logs/prs_${jid}_1.out")"
+printf 'AFR\nEUR\n' > "${C}/data/tractor/ancestries.txt"
+out="$(cd "$C" && env "${SITE[@]}" GWAS_REPO="$C" FAKE_SBATCH_RUN=1 sbatch --parsable --output="${C}/logs/prsbad_%A_%a.out" slurm/submit_prs_array.sh OS 2>&1)"
+jid="$(head -1 <<< "$out")"
+grep -q "PRS_ANCESTRY_PROPS (EUR:0.35,AFR:0.15,AMR:0.50) names AFR,AMR,EUR, but .*lists AFR,EUR" "${C}/logs/prsbad_${jid}_1.out" && ok "proportions naming other ancestries than the file: refused" || bad "prs mismatch: $(tail -2 "${C}/logs/prsbad_${jid}_1.out")"
+printf 'AFR\nAMR\nEUR\n' > "${C}/data/tractor/ancestries.txt"
+
+section "Colocalization: per trait, refuses without coloc / susieR / hyprcoloc"
+out="$(cd /tmp && env "${SITE[@]}" RUN_COLOC=true "$L" --dry-run 2>&1)"
+cl="$(grep '\[DRY-RUN\] colocalization' <<< "$out")"
+[[ "$(wc -l <<< "$cl")" -eq 3 ]] && grep -q 'colocalization OS .*--dependency=afterok:dry17 .*coloc_OS_%A_%a.out' <<< "$cl" \
+    && grep -q 'colocalization MRD .*--dependency=afterok:dry19 ' <<< "$cl" && ok "one coloc array per trait, each waiting on its own combine job" || bad "coloc dry run: $cl"
+rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results" "${C:?}/logs"
+out="$(cd /tmp && env "${SITE[@]}" STRATA_LIST=EUR TRAITS_LIST=OS RUN_COLOC=true FAKE_SBATCH_RUN=1 RR_SACCT_WAIT=0 "$L" 2>&1)"
+grep -q "stub Rscript: .*run_colocalization.R --gwas ${C}/results/gwas/OS/POOLED.sumstats.gz .*--output_prefix ${C}/results/coloc/OS/eqtl " "${C}"/logs/coloc_OS_*_1.out \
+    && ok "coloc reads results/gwas/OS/POOLED.sumstats.gz and writes results/coloc/OS/" || bad "coloc paths: $(grep stub "${C}"/logs/coloc_OS_*_1.out)"
+rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results" "${C:?}/logs"
+out="$(cd /tmp && env "${SITE[@]}" STRATA_LIST=EUR TRAITS_LIST=OS RUN_COLOC=true FAKE_R_MISSING=hyprcoloc FAKE_SBATCH_RUN=1 RR_SACCT_WAIT=0 "$L" 2>&1)"
+RD="$(ls -d "${C}"/results/run_record/*/ | head -1)"
+grep -q "REFUSED: colocalization needs the R packages coloc, susieR and hyprcoloc" "${C}"/logs/coloc_OS_*_1.out && grep -q "MISSING hyprcoloc" "${C}"/logs/coloc_OS_*_1.out \
+    && [[ "$(awk -F'\t' 'NR > 1 && $1 == "coloc" && $14 == 3' "${RD%/}/trace.tsv" | wc -l)" -eq 6 ]] \
+    && ok "hyprcoloc missing: all 6 coloc tasks refuse (exit 3), naming it" || bad "coloc refusal: $(tail -3 "${C}"/logs/coloc_OS_*_1.out)"
 
 # ============================================================================
 echo ""

@@ -168,9 +168,7 @@ PRS_METHODS="prs_csx,gaudi,disco_divas,sdpr_admix,mussel,prosper"
 # QTL types
 QTL_TYPES="eqtl,sqtl,pqtl,mqtl,caqtl,hqtl"
 
-# Traits
-TRAITS="OS,relapse,MRD"
-
-# Export for use in other scripts. There is no cohort-wide ancestry list here: each stratum's
-# list comes from its own ancestries.txt (read_stratum_ancestries above).
-export GWAS_TYPES PRS_METHODS QTL_TYPES TRAITS
+# Export for use in other scripts. There is no cohort-wide ancestry list here (each stratum's comes
+# from its own ancestries.txt, read_stratum_ancestries above) and no trait list: traits come only
+# from the launcher's switch table (bin/run_record.sh); the stale list that was here is gone.
+export GWAS_TYPES PRS_METHODS QTL_TYPES
