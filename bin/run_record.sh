@@ -10,7 +10,8 @@
 #                 host, partition, account, deferred steps
 #   jobs.tsv      every job the launcher submitted (label, job id)
 #   trace.d/      one file per task, written only by that task (see "Why no locking" below)
-#   trace.tsv     every task's row, plus State, MaxRSS and Elapsed from sacct   (finalise)
+#   trace.tsv     every task's row, plus State, MaxRSS and Elapsed from sacct, and the task's
+#                 own status (e.g. skipped_below_min_stratum_n)                (finalise)
 #   summary.md    tasks per step, failures, deferred steps                       (finalise)
 #
 # run_id is <yyyymmdd-HHMM>_<git commit, 7 characters>_<n>. The launcher computes it once and
@@ -28,6 +29,8 @@
 # that fails while activating still leaves a row:
 #   rr_begin STEP ["ARGS" [INPUT_FILE...]]
 #   rr_args "ARGS" [INPUT_FILE...]          later, once the command line and inputs are known
+#   rr_sidecar FILE                         the counts file the program writes (the adapter's
+#                                           <output_prefix>.run_counts.tsv), read when the task ends
 # rr_begin writes the task's row with an empty end time and exit status, then sets an EXIT trap
 # (a command bash runs when the script ends, however it ends) that rewrites the row with the end
 # time, the exit status and the env that was active. A job killed by Slurm (time limit, scancel) gets SIGTERM first; the TERM trap turns
@@ -76,6 +79,9 @@ RR_SWITCHES=(
     "GENO|@job|PLINK prefix for PC-AiR (default data/genotypes/cohort)"
     "PHENO_IN|@job|phenotype file PC-AiR reads (default data/phenotypes/phenotypes.tsv)"
     "KNOWN_LOCI|@job|known-loci table for GxG (default assets/known_leukemia_risk_loci.tsv)"
+    "STRATA_FILE|@job|sample_id/stratum table the adapter checks --stratum against (default data/ancestry/strata.tsv)"
+    "ANC_INDEX_MAP|@job|anc_index/label map for numbered Tractor files (default data/tractor/flare_index_map.tsv)"
+    "PRS_ANCESTRY_PROPS|EUR:0.35,AFR:0.15,AMR:0.50|global ancestry proportions weighting the combined PRS; labels must match data/tractor/ancestries.txt"
 )
 declare -A RR_SET_BY=()
 
@@ -185,11 +191,20 @@ rr_note_job() { printf '%s\t%s\n' "$2" "$3" >> "$1/jobs.tsv"; }
 # ---------------------------------------------------------------------------
 RR_COLUMNS="step	slurm_id	job_id	array_job_id	array_task_id	host	env	yml_sha256	script_sha256	args	inputs_md5	start	end	exit_status	n_null	n_tested	n_pass_mac	n_failed"
 
-# The adapter sidecar (n in the null model, n variants tested, n passing the MAC gate, n failed).
-# bin/tractor_genesis_adapter.R writes no such file: its outputs are <prefix>.null_model.rds and
-# the <prefix>.tractor_genesis*.tsv[.gz] tables. Until it writes one, the four columns are NA;
-# nothing here guesses a format.
-_rr_sidecar_counts() { printf 'NA\tNA\tNA\tNA'; }
+# The program's counts file, set with rr_sidecar: bin/tractor_genesis_adapter.R writes
+# <output_prefix>.run_counts.tsv (key<TAB>value; keys in bin/tractor_io.R, write_run_counts).
+# Prints n_null, n_tested, n_pass_mac, n_failed and the task status, NA for anything absent.
+rr_sidecar() { RR_SIDECAR="$1"; rm -f -- "$1"; }   # removed now, so a stale file from an earlier run is never read
+_rr_sidecar_counts() {
+    local f="${RR_SIDECAR:-}"
+    if [[ -n "$f" && -s "$f" ]]; then
+        awk -F'\t' '{v[$1] = $2} END {
+            n = split("n_null n_tested n_pass_mac n_failed status", k, " ")
+            for (i = 1; i <= n; i++) printf "%s%s", (i > 1 ? "\t" : ""), ((k[i] in v) && v[k[i]] != "" ? v[k[i]] : "NA") }' "$f"
+    else
+        printf 'NA\tNA\tNA\tNA\tNA'
+    fi
+}
 
 _rr_clean() { local v="$1"; v="${v//[$'\t\n\r']/ }"; printf '%s' "${v:-NA}"; }
 
@@ -307,7 +322,7 @@ rr_finalize() {
     # The job line carries State, ExitCode and Elapsed; MaxRSS is on the .batch step line.
     local files=("${dir}/.sacct.txt" "${dir}/.rows.tsv")
     [[ -f "${dir}/jobs.tsv" ]] && files+=("${dir}/jobs.tsv")
-    awk -F'\t' -v OFS='\t' -v header="${RR_COLUMNS}	state	max_rss	elapsed	exit_from" '
+    awk -F'\t' -v OFS='\t' -v header="${RR_COLUMNS}	state	max_rss	elapsed	exit_from	task_status" '
         FILENAME ~ /\.sacct\.txt$/ {
             split($0, f, "|"); id = f[1]; base = id; sub(/\..*$/, "", base)
             if (id == base)          { state[id] = f[2]; code[id] = f[3]; el[id] = f[5] }
@@ -319,7 +334,7 @@ rr_finalize() {
         FILENAME ~ /jobs\.tsv$/ && FNR > 1 { label[$2] = $1; next }
         function norow(lbl, id, st, ex, from, elv) {     # a task or job with no row of its own
             print lbl, id, id, "NA", "NA", "NA", "NA", "NA", "NA", "NA", "NA", "NA", "NA", ex, \
-                  "NA", "NA", "NA", "NA", st, "NA", elv, from
+                  "NA", "NA", "NA", "NA", st, "NA", elv, from, "NA"
         }
         END {
             print header
@@ -331,7 +346,7 @@ rr_finalize() {
                 }
                 line = c[1]; for (k = 2; k <= 18; k++) line = line OFS c[k]
                 r = (id in rss) ? rss[id] : ((id in other) ? other[id] : "NA")
-                print line, (id in state ? state[id] : "NA"), r, (id in el ? el[id] : "NA"), from
+                print line, (id in state ? state[id] : "NA"), r, (id in el ? el[id] : "NA"), from, (c[19] == "" ? "NA" : c[19])
             }
             # Slurm knows of a task (or a whole job) that wrote no row: it never started (pending when
             # cancelled, e.g. after a failed dependency), or it died before rr_begin.
@@ -366,8 +381,8 @@ _rr_summary() {
     echo ""
     echo "## Tasks by step"
     echo ""
-    echo "| step | tasks | exit 0 | non-zero | no exit status | largest MaxRSS | longest Elapsed |"
-    echo "|---|---|---|---|---|---|---|"
+    echo "| step | tasks | exit 0 | non-zero | no exit status | skipped, stratum below MIN_STRATUM_N | largest MaxRSS | longest Elapsed |"
+    echo "|---|---|---|---|---|---|---|---|"
     awk -F'\t' '
         function mib(x,   v, u) { if (x == "" || x == "NA") return -1; v = x + 0; u = substr(x, length(x))
             if (u == "K") return v / 1024; if (u == "M") return v; if (u == "G") return v * 1024; if (u == "T") return v * 1048576; return v / 1048576 }
@@ -377,10 +392,11 @@ _rr_summary() {
         NR == 1 { next }
         { s = $1; if (!(s in t)) order[++k] = s; t[s]++
           if ($14 == "") none[s]++; else if ($14 == 0) ok[s]++; else bad[s]++
+          if ($23 == "skipped_below_min_stratum_n") skip[s]++
           r = mib($20);  if (r >= 0 && (!(s in maxr) || r > maxr[s])) { maxr[s] = r; maxrs[s] = $20 }
           e = secs($21); if (e >= 0 && (!(s in maxe) || e > maxe[s])) { maxe[s] = e; maxes[s] = $21 } }
         END { for (i = 1; i <= k; i++) { s = order[i]
-            printf "| %s | %d | %d | %d | %d | %s | %s |\n", s, t[s], ok[s], bad[s], none[s], (s in maxrs ? maxrs[s] : "NA"), (s in maxes ? maxes[s] : "NA") } }' "${dir}/trace.tsv"
+            printf "| %s | %d | %d | %d | %d | %d | %s | %s |\n", s, t[s], ok[s], bad[s], none[s], skip[s], (s in maxrs ? maxrs[s] : "NA"), (s in maxes ? maxes[s] : "NA") } }' "${dir}/trace.tsv"
     echo ""
     echo "## Tasks that did not exit 0"
     echo ""
@@ -390,9 +406,11 @@ _rr_summary() {
     echo ""
     echo "## Adapter counts"
     echo ""
-    echo "bin/tractor_genesis_adapter.R writes no sidecar with the number of samples in the null model,"
-    echo "variants tested, variants passing the MAC gate or failed tests, so n_null, n_tested,"
-    echo "n_pass_mac and n_failed are NA in trace.tsv."
+    echo "For gwas rows, n_null (samples in the null model), n_tested (variants with a joint P),"
+    echo "n_pass_mac (variants where an ancestry passed the MAC gate), n_failed (tests that raised an"
+    echo "error) and task_status come from the adapter's <output_prefix>.run_counts.tsv; NA elsewhere."
+    awk -F'\t' 'NR > 1 && $1 == "gwas" { n++; if ($23 == "skipped_below_min_stratum_n") k++; if ($15 ~ /^[0-9]+$/) nn += $15; if ($16 ~ /^[0-9]+$/) nt += $16; if ($18 ~ /^[0-9]+$/) nf += $18 }
+                 END { if (n) printf "\ngwas: %d tasks, %d skipped below MIN_STRATUM_N; %d variants tested, %d failed tests.\n", n, k, nt, nf }' "${dir}/trace.tsv"
     echo ""
     echo "A job submitted later by a running job (the GxG heterogeneity job) is not waited for; run"
     echo "\`bin/run_record_finalize.sh ${dir}\` again once it has ended to add its row."

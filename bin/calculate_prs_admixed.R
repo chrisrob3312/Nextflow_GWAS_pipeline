@@ -60,7 +60,10 @@ option_list <- list(
     make_option(c("--local_ancestry"), type = "character", default = NULL,
                 help = "Local ancestry files prefix (RFMix MSP format)"),
     make_option(c("--tractor_prefix"), type = "character", default = NULL,
-                help = "Tractor prefix (.ancdose.<k>.tsv.gz / .dosage.<anc>.txt.gz) for local-ancestry PARTIAL scores"),
+                help = "Tractor prefix (files named by ancestry: .dosage.<anc>.txt.gz, .ancdose.<anc>.tsv.gz) for local-ancestry PARTIAL scores"),
+    make_option(c("--ancestry_index_map"), type = "character", default = NULL,
+                help = paste("anc_index<TAB>label table (the handoff's local_ancestry/flare_index_map.tsv), needed only",
+                             "when the Tractor files are numbered (anc0, 0, ...) instead of named by ancestry")),
     make_option(c("--weights"), type = "character", default = NULL,
                 help = "Ancestry-specific weights: Tractor-GENESIS sumstats (BETA_<anc>, ALT) or a table with ID, A1, BETA_<anc>"),
     make_option(c("--la_p_threshold"), type = "numeric", default = 1e-5,
@@ -132,6 +135,13 @@ option_list <- list(
     make_option(c("--array_total"), type = "integer", default = NULL,
                 help = "Total SLURM array tasks")
 )
+
+# Shared Tractor file resolution (bin/tractor_io.R, next to this script)
+.prs_dir <- local({
+    f <- sub("^--file=", "", grep("^--file=", commandArgs(trailingOnly = FALSE), value = TRUE))
+    if (length(f) > 0) dirname(normalizePath(f[1])) else "."
+})
+source(file.path(.prs_dir, "tractor_io.R"))
 
 opt <- parse_args(OptionParser(
     option_list = option_list,
@@ -579,12 +589,13 @@ run_la_partial <- function(weights_file, tractor_prefix, ancestries, output_pref
     if (any(is.na(wcols))) stop("No BETA_<anc> or BETA column for: ", paste(ancestries[is.na(wcols)], collapse = ","))
     if (any(wcols == "BETA")) cat("  WARNING: shared BETA used for", paste(ancestries[wcols == "BETA"], collapse = ","), "(no ancestry-specific effect)\n")
 
-    read_dose <- function(a, k) {
-        cands <- c(paste0(tractor_prefix, ".ancdose.", a, ".tsv.gz"), paste0(tractor_prefix, ".ancdose.", k, ".tsv.gz"),
-                   paste0(tractor_prefix, ".dosage.", a, ".txt.gz"), paste0(tractor_prefix, ".dosage.", k, ".txt.gz"))
-        f <- cands[file.exists(cands)][1]
-        if (is.na(f)) stop("No Tractor dosage file for ", a, " (tried ", paste(basename(cands), collapse = ", "), ")")
-        d <- fread(f)
+    # Which file holds which ancestry: by label, or numbered and mapped through --ancestry_index_map;
+    # never by position in --ancestries (bin/tractor_io.R)
+    index_map <- if (!is.null(opt$ancestry_index_map)) read_index_map(opt$ancestry_index_map) else NULL
+    read_dose <- function(a) {
+        r <- resolve_tractor_file(tractor_prefix, a, "dosage", index_map)
+        cat("  ", a, ": ", basename(r$path), " (", r$how, ")\n", sep = "")
+        d <- fread(r$path)
         info <- intersect(names(d), c("CHR", "CHROM", "#CHROM", "POS", "BP", "ID", "SNP", "REF", "ALT"))
         idn <- intersect(c("ID", "SNP"), names(d))[1]
         ids <- if (!is.na(idn)) as.character(d[[idn]]) else paste0(d[[1]], ":", d[[2]])
@@ -596,7 +607,7 @@ run_la_partial <- function(weights_file, tractor_prefix, ancestries, output_pref
     scores <- NULL; used <- list()
     for (k in seq_along(ancestries)) {
         a <- ancestries[k]
-        dd <- read_dose(a, k - 1)
+        dd <- read_dose(a)
         common <- intersect(w$ID, dd$ids)
         if (length(common) == 0) { cat("  ", a, ": no overlapping variants\n"); next }
         wa <- w[match(common, ID)]

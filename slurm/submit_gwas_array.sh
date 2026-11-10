@@ -26,6 +26,12 @@
 #
 # Survival traits expect columns <trait>_time and <trait>_status in the
 # phenotype file (override with TIME_COL / EVENT_COL env vars).
+# The adapter checks every sample in the stratum's Tractor files against STRATA_FILE
+# (default data/ancestry/strata.tsv, the handoff's ancestry/strata.tsv) when it exists, and
+# skips the stratum (exit 0, no results) below MIN_STRATUM_N analysable samples; the run
+# record reads its counts from results/gwas/<trait>/<stratum>/chr<N>.run_counts.tsv.
+# Numbered Tractor files (anc0, ...) are read only with ANC_INDEX_MAP (default
+# data/tractor/flare_index_map.tsv, a copy of the handoff's local_ancestry/flare_index_map.tsv).
 # The ancestries come from data/tractor/<stratum>/ancestries.txt; a stratum without
 # that file is refused (docs/HANDOFF_CONTRACT.md).
 # Output: results/gwas/<trait>/<stratum>/chr<N>.tractor_genesis.tsv.gz
@@ -108,6 +114,14 @@ CMD=(Rscript "${SCRIPT_DIR}/bin/tractor_genesis_adapter.R"
 if [[ "${MODEL}" == "survival" ]]; then
     CMD+=(--time_col "${TIME_COL:-${TRAIT}_time}" --event_col "${EVENT_COL:-${TRAIT}_status}")
 fi
+STRATA_FILE="${STRATA_FILE:-${DATA_DIR}/ancestry/strata.tsv}"
+if [[ -f "${STRATA_FILE}" ]]; then
+    CMD+=(--strata_file "${STRATA_FILE}")
+else
+    echo "Stratum membership: ${STRATA_FILE} not found; the adapter checks a 'stratum' phenotype column if there is one, else records the check as not run"
+fi
+ANC_INDEX_MAP="${ANC_INDEX_MAP:-${DATA_DIR}/tractor/flare_index_map.tsv}"
+[[ -f "${ANC_INDEX_MAP}" ]] && CMD+=(--ancestry_index_map "${ANC_INDEX_MAP}")
 CMD+=(--ancestries "${STRATUM_ANCESTRIES}"
     --ref_ancestry "${REF_ANCESTRY}"
     --kinship "${KINSHIP}"
@@ -125,8 +139,12 @@ if [[ "${DRY_RUN}" == 1 ]]; then
     echo "[DRY-RUN] $(print_cmd "${CMD[@]}")"
     exit 0
 fi
-# Run record: the command line and inputs (phenotype, GRM, ancestry list, this chromosome's Tractor files)
-rr_args "$(print_cmd "${CMD[@]}")" "${PHENO}" "${KINSHIP}" "${ANC_FILE}" "${TRACTOR_PREFIX}".*
+# Run record: the command line and inputs (phenotype, GRM, ancestry list, strata, index map, this
+# chromosome's Tractor files), and the adapter's counts file (read when the task ends)
+INPUTS=("${PHENO}" "${KINSHIP}" "${ANC_FILE}" "${STRATA_FILE}" "${TRACTOR_PREFIX}".*)
+[[ -f "${ANC_INDEX_MAP}" ]] && INPUTS+=("${ANC_INDEX_MAP}")
+rr_args "$(print_cmd "${CMD[@]}")" "${INPUTS[@]}"
+rr_sidecar "${RESULTS_DIR}/chr${CHR}.run_counts.tsv"
 "${CMD[@]}"
 
 echo "Completed chr${CHR} | ${TRAIT} (${MODEL}) | ${STRATUM}"

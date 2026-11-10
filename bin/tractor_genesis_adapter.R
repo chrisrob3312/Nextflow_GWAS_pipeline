@@ -112,9 +112,17 @@ option_list <- list(
 
     # Ancestry stratification
     make_option(c("--stratum"), type = "character", default = NULL,
-                help = "Ancestry stratum to analyze (EUR, AAC, LAT1, LAT2, OTHER, or POOLED)"),
+                help = paste("Stratum these Tractor files belong to (EUR, AAC, LAT1, LAT2, OTHER, POOLED, ...).",
+                             "Every sample in them must be in this stratum per --strata_file (or a 'stratum'",
+                             "column of the phenotype file); the outputs carry it in a STRATUM column")),
+    make_option(c("--strata_file"), type = "character", default = NULL,
+                help = "sample_id<TAB>stratum table to check --stratum against (the handoff's ancestry/strata.tsv)"),
     make_option(c("--min_stratum_n"), type = "integer", default = 50,
-                help = "Minimum samples per stratum [default: 50]"),
+                help = paste("Fewer analysable samples than this: the stratum is skipped (exit 0, no results,",
+                             "status skipped_below_min_stratum_n in <output_prefix>.run_counts.tsv) [default: 50]")),
+    make_option(c("--ancestry_index_map"), type = "character", default = NULL,
+                help = paste("anc_index<TAB>label table (the handoff's local_ancestry/flare_index_map.tsv), needed only",
+                             "when the Tractor files are numbered (anc0, 0, ...) instead of named by ancestry")),
     make_option(c("--ancestry_config"), type = "character", default = NULL,
                 help = "Path to ancestry_config.R for cohort-specific settings")
 )
@@ -171,6 +179,15 @@ if (!is.null(opt$ancestry_config) && file.exists(opt$ancestry_config)) {
     source(opt$ancestry_config)
     cat("Loaded ancestry config from:", opt$ancestry_config, "\n")
 }
+
+`%||%` <- function(a, b) if (is.null(a)) b else a
+
+# Shared helpers (file resolution, stratum check, N gate, counts sidecar), next to this script
+.adapter_dir <- local({
+    f <- sub("^--file=", "", grep("^--file=", commandArgs(trailingOnly = FALSE), value = TRUE))
+    if (length(f) > 0) dirname(normalizePath(f[1])) else "."
+})
+source(file.path(.adapter_dir, "tractor_io.R"))
 
 # Parse ancestries
 ancestries <- strsplit(opt$ancestries, ",")[[1]]
@@ -279,55 +296,46 @@ if (!is.null(opt$kinship) && file.exists(opt$kinship)) {
 # ============================================================================
 cat("\nLoading Tractor data...\n")
 
-# Function to read Tractor hapcount/dosage files
-read_tractor_files <- function(prefix, ancestries) {
+# Which file holds which ancestry: named by label, or numbered and mapped through
+# --ancestry_index_map; never by position in --ancestries (bin/tractor_io.R)
+index_map <- if (!is.null(opt$ancestry_index_map)) read_index_map(opt$ancestry_index_map) else NULL
+tractor_files <- lapply(setNames(ancestries, ancestries), function(a) list(
+    hapcount = resolve_tractor_file(opt$tractor_prefix, a, "hapcount", index_map),
+    dosage   = resolve_tractor_file(opt$tractor_prefix, a, "dosage",   index_map)
+))
+for (a in ancestries) {
+    cat("  ", a, ": ", basename(tractor_files[[a]]$hapcount$path), ", ", basename(tractor_files[[a]]$dosage$path),
+        " (", tractor_files[[a]]$dosage$how, ")\n", sep = "")
+}
+
+# --stratum and --min_stratum_n, from the file headers, before the matrices are read
+tractor_ids <- tractor_sample_ids(tractor_files[[1]]$hapcount$path)
+stratum_check <- check_stratum_membership(opt$stratum, tractor_ids, opt$strata_file, pheno)
+cat("  Stratum check:", stratum_check$status, "(", stratum_check$source, ")\n")
+outcome_cols <- if (opt$model == "survival") c(opt$time_col, opt$event_col) else opt$trait
+gate_covariates <- if (!is.null(opt$covariates)) strsplit(opt$covariates, ",")[[1]] else NULL
+n_null <- n_analysable(pheno, intersect(pheno$sample_id, tractor_ids), outcome_cols, gate_covariates)
+run_counts <- list(status = "ok", stratum = opt$stratum %||% NA, stratum_check = stratum_check$status,
+                   min_stratum_n = opt$min_stratum_n, n_null = n_null, n_variants = NA,
+                   n_pass_mac = NA, n_tested = NA, n_failed = NA)
+if (n_null < opt$min_stratum_n) {
+    run_counts$status <- "skipped_below_min_stratum_n"
+    write_run_counts(opt$output_prefix, run_counts)
+    cat("\nSKIPPED: stratum ", opt$stratum %||% "(unnamed)", " has ", n_null,
+        " analysable samples, fewer than --min_stratum_n ", opt$min_stratum_n,
+        ". No association results are written; see ", opt$output_prefix, ".run_counts.tsv\n", sep = "")
+    quit(save = "no", status = 0)
+}
+
+# Function to read Tractor hapcount/dosage files (paths resolved above)
+read_tractor_files <- function(files, ancestries) {
     hapcount <- list()
     dosage <- list()
     variant_info <- NULL
 
-    for (i in seq_along(ancestries)) {
-        anc <- ancestries[i]
-        anc_code <- i - 1  # Tractor uses 0-indexed ancestry codes
-
-        # Try different file naming conventions
-        hapcount_files <- c(
-            paste0(prefix, ".hapcount.", anc, ".txt.gz"),
-            paste0(prefix, ".hapcount.", anc_code, ".txt.gz"),
-            paste0(prefix, ".", anc, ".hapcount.txt.gz"),
-            paste0(prefix, ".hapcount.", anc, ".tsv.gz"),
-            paste0(prefix, ".hapcount.", anc_code, ".tsv.gz")   # TRACTOR_EXTRACT_TRACTS naming
-        )
-
-        dosage_files <- c(
-            paste0(prefix, ".dosage.", anc, ".txt.gz"),
-            paste0(prefix, ".dosage.", anc_code, ".txt.gz"),
-            paste0(prefix, ".", anc, ".dosage.txt.gz"),
-            paste0(prefix, ".ancdose.", anc, ".tsv.gz"),
-            paste0(prefix, ".ancdose.", anc_code, ".tsv.gz")    # TRACTOR_EXTRACT_TRACTS naming
-        )
-
-        # Find hapcount file
-        hc_file <- NULL
-        for (f in hapcount_files) {
-            if (file.exists(f)) {
-                hc_file <- f
-                break
-            }
-        }
-
-        # Find dosage file
-        dos_file <- NULL
-        for (f in dosage_files) {
-            if (file.exists(f)) {
-                dos_file <- f
-                break
-            }
-        }
-
-        if (is.null(hc_file) || is.null(dos_file)) {
-            stop("Cannot find Tractor files for ancestry '", anc, "'\n",
-                 "  Tried: ", paste(hapcount_files, collapse = ", "))
-        }
+    for (anc in ancestries) {
+        hc_file  <- files[[anc]]$hapcount$path
+        dos_file <- files[[anc]]$dosage$path
 
         cat("  Loading", anc, "...\n")
         cat("    Hapcount:", basename(hc_file), "\n")
@@ -340,15 +348,8 @@ read_tractor_files <- function(prefix, ancestries) {
 
         # Extract variant info from first file
         if (is.null(variant_info)) {
-            # Identify variant info columns (typically CHR, POS, ID, REF, ALT or similar)
-            info_cols <- intersect(names(hc_data),
-                                   c("CHR", "CHROM", "POS", "ID", "SNP", "REF", "ALT",
-                                     "chrom", "pos", "id", "snp", "ref", "alt",
-                                     "#CHROM", "BP"))
-            if (length(info_cols) == 0) {
-                # Assume first 5 columns are variant info
-                info_cols <- names(hc_data)[1:min(5, ncol(hc_data))]
-            }
+            # Variant info columns (CHR, POS, ID, REF, ALT or similar; else the first 5)
+            info_cols <- tractor_info_cols(names(hc_data))
             variant_info <- hc_data[, ..info_cols]
 
             # Standardize column names
@@ -383,7 +384,7 @@ read_tractor_files <- function(prefix, ancestries) {
 }
 
 # Load Tractor data
-tractor_data <- read_tractor_files(opt$tractor_prefix, ancestries)
+tractor_data <- read_tractor_files(tractor_files, ancestries)
 
 # Match samples between phenotype and Tractor data
 common_samples <- intersect(pheno$sample_id, tractor_data$sample_ids)
@@ -614,11 +615,12 @@ saveRDS(nullmod, paste0(opt$output_prefix, ".null_model.rds"))
 #   Per-ancestry:    beta = V_c^-1 U_c (one-step estimate), se = sqrt(diag V_c^-1)
 #   Heterogeneity:   contrasts C beta (beta_j - beta_1),  Q = (Cb)'(C V_c^-1 C')^-1 (Cb) ~ chi2_{k-1}
 #                    - uses the full covariance, so correlated dose terms are handled
-empty_result <- function(ancestries, n_dose, mac) list(
+empty_result <- function(ancestries, n_dose, mac, status) list(
     joint = list(stat = NA, df = n_dose, p = NA),
     marginal = setNames(lapply(ancestries, function(a) list(ancestry = a, beta = NA, se = NA, z = NA, p = NA)), ancestries),
     het = list(Q = NA, df = n_dose - 1, p = NA, I2 = NA),
-    n_eff = NA, mac = mac
+    n_eff = NA, mac = mac,
+    status = status          # "mac": no ancestry passed the MAC gate; "error": the test failed
 )
 
 test_variant_tractor <- function(
@@ -647,7 +649,7 @@ test_variant_tractor <- function(
     mac <- sapply(ancestries, function(a) sum(D[, paste0("Dose_", a)]))
     names(mac) <- ancestries
     testable <- ancestries[mac >= mac_min & apply(D[, paste0("Dose_", ancestries), drop = FALSE], 2, var) > 1e-10]
-    if (length(testable) == 0) return(empty_result(ancestries, n_dose, mac))
+    if (length(testable) == 0) return(empty_result(ancestries, n_dose, mac, "mac"))
 
     # Drop LA columns with no variation (e.g. no AFR tracts in this chunk)
     la_cols <- paste0("LA_", non_ref)
@@ -695,8 +697,8 @@ test_variant_tractor <- function(
         list(joint = list(stat = stat_joint, df = df_joint, p = p_joint),
              marginal = marginal,
              het = list(Q = Q, df = df_het, p = p_het, I2 = I2),
-             n_eff = n - n_missing, mac = mac)
-    }, error = function(e) empty_result(ancestries, n_dose, mac))
+             n_eff = n - n_missing, mac = mac, status = "ok")
+    }, error = function(e) empty_result(ancestries, n_dose, mac, "error"))
 
     res
 }
@@ -739,6 +741,7 @@ results$P_HET <- numeric()
 results$I2 <- numeric()
 
 # Process variants
+n_status <- c(ok = 0L, mac = 0L, error = 0L)      # per-variant outcome, for <output_prefix>.run_counts.tsv
 pb_interval <- max(1, floor(n_variants / 20))
 start_time <- Sys.time()
 
@@ -767,6 +770,8 @@ for (v in 1:n_variants) {
         ref_anc = ref_anc,
         mac_min = opt$mac_min
     )
+
+    n_status[[res$status]] <- n_status[[res$status]] + 1L
 
     # Build result row
     row <- data.table(
@@ -817,6 +822,9 @@ cat("\nWriting results...\n")
 # Sort results for different output files
 # 1. Genomic order (for LD, fine-mapping, visualization)
 # 2. P-value order (for quick interpretation)
+
+# --stratum labels every output table
+if (!is.null(opt$stratum)) results[, STRATUM := opt$stratum]
 
 results_genomic <- copy(results)
 results_genomic[, CHR_NUM := as.integer(gsub("chr|X|Y|M", "", CHR, ignore.case = TRUE))]
@@ -940,5 +948,12 @@ cat("                 Significant = Effect size varies by ancestral background\n
 cat("  I2           : Heterogeneity magnitude (0-100%)\n")
 cat("                 >50% = substantial heterogeneity, >75% = considerable\n")
 cat("─────────────────────────────────────────────────────────────────────\n")
+
+# Counts for the run record (bin/run_record.sh reads <output_prefix>.run_counts.tsv)
+run_counts$n_variants <- n_variants
+run_counts$n_pass_mac <- n_status[["ok"]] + n_status[["error"]]
+run_counts$n_tested   <- sum(!is.na(results$P_JOINT))
+run_counts$n_failed   <- n_status[["error"]]
+cat("  Counts:", write_run_counts(opt$output_prefix, run_counts), "\n")
 
 cat("\nDone!\n")

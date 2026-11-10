@@ -42,9 +42,14 @@ process TRACTOR_GENESIS {
     def covar_arg    = covariate_cols ? "--covariates ${covariate_cols}" : ''
     def kinship_arg  = kinship_matrix ? "--kinship ${kinship_matrix}" : ''
     def ref_arg      = meta.ref_ancestry ? "--ref_ancestry ${meta.ref_ancestry}" : ''
-    // TRACTOR_EXTRACT_TRACTS writes <id>.ancdose.<anc>.tsv.gz / <id>.hapcount.<anc>.tsv.gz
+    // TRACTOR_EXTRACT_TRACTS writes <id>.ancdose.<k>.tsv.gz / <id>.hapcount.<k>.tsv.gz, numbered in
+    // the order of meta.tractor_pops (declared as the RFMix coding order). The adapter no longer
+    // assumes that order: it is written out below as an explicit index map.
     def tractor_prefix = ancestry_dosages[0].name.replaceAll(/\.ancdose\..*$/, '')
     """
+    printf 'anc_index\\tlabel\\n' > ancestry_index_map.tsv
+    i=0; for a in \$(echo "${meta.tractor_pops}" | tr ',' ' '); do printf '%s\\t%s\\n' "\$i" "\$a" >> ancestry_index_map.tsv; i=\$((i + 1)); done
+
     tractor_genesis_adapter.R \\
         --tractor_prefix ${tractor_prefix} \\
         --phenotype ${phenotype} \\
@@ -52,10 +57,12 @@ process TRACTOR_GENESIS {
         --model ${model} \\
         ${surv_args} \\
         --ancestries ${meta.tractor_pops} \\
+        --ancestry_index_map ancestry_index_map.tsv \\
         ${ref_arg} \\
         ${covar_arg} \\
         ${kinship_arg} \\
         --mac_min ${params.tractor_mac_min ?: 10} \\
+        --min_stratum_n ${params.min_stratum_n ?: 50} \\
         --output_prefix ${prefix} \\
         --threads ${task.cpus} \\
         --verbose \\
