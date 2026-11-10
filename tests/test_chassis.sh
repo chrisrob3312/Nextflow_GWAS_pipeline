@@ -101,7 +101,8 @@ o=""; while [ $# -gt 0 ]; do [ "$1" = "-o" ] && o="$2"; shift; done
 exit 0
 EOF
 for e in gwas-r lai; do printf '#!/bin/sh\necho "bcftools 1.25 (stub)"\necho "Using htslib 1.25"\n' > "${W}/envs/${e}/bin/bcftools"; done
-chmod +x "${W}/envs/gwas-r/bin/Rscript" "${W}/envs/lai/bin/java" "${W}/envs/mrmega/bin/MR-MEGA" "${W}"/envs/*/bin/bcftools
+cp "${C}/tests/toy/fake_extract_tracts_flare.py" "${W}/envs/lai/bin/extract_tracts_flare.py"   # Tractor's script, stood in for
+chmod +x "${W}/envs/gwas-r/bin/Rscript" "${W}/envs/lai/bin/java" "${W}/envs/mrmega/bin/MR-MEGA" "${W}"/envs/*/bin/bcftools "${W}/envs/lai/bin/extract_tracts_flare.py"
 STRATA_DEFAULT=(EUR AAC LAT1 LAT2 OTHER)
 for s in "${STRATA_DEFAULT[@]}"; do mkdir -p "${C}/data/tractor/${s}"; done
 printf 'EUR\n' > "${C}/data/tractor/EUR/ancestries.txt"
@@ -1089,6 +1090,35 @@ if [[ -n "${REAL_RSCRIPT}" ]] && "${REAL_RSCRIPT}" -e 'quit(status = !all(sapply
     out="$("${REAL_RSCRIPT}" "${C}/bin/meta_analyze_strata.R" --input_dir "$TD" --strata S1,S3 --method fixed --output "${TD}/Q.gz" --threads 1 2>&1)"; rc=$?
     [[ $rc -ne 0 ]] && has "$out" "is pooled as stratum S3 but its STRATUM column says S9" && ok "the input's STRATUM column is kept and checked, not re-derived" || bad "STRATUM check: rc=$rc"
 fi
+
+section "CP-16 (extraction): FLARE -> Tractor files, labelled through the index map, checked"
+TD="${W}/cp16a"; rm -rf "${TD:?}"; mkdir -p "${TD}/handoff/local_ancestry/flare"
+python3 -I "${C}/tests/toy/make_toy_flare.py" "${TD}/handoff/local_ancestry/flare/chr22.anc.vcf.gz" 120 80 EUR,AFR,AMR chr22 3 >/dev/null
+printf 'anc_index\tlabel\n0\tEUR\n1\tAFR\n2\tAMR\n' > "${TD}/handoff/local_ancestry/flare_index_map.tsv"
+X="${C}/tests/toy/fake_extract_tracts_flare.py"
+out="$(bash "${C}/bin/la_flare_to_tractor.sh" "${TD}/handoff/local_ancestry/flare/chr22.anc.vcf.gz" "${TD}/handoff/local_ancestry/flare_index_map.tsv" "${TD}/out/chr22" "$X" 2>&1)"; rc=$?
+n=0; for lab in AFR AMR EUR; do for kind in hapcount dosage; do [[ -s "${TD}/out/chr22.${kind}.${lab}.txt.gz" ]] && n=$((n + 1)); done; done
+[[ $rc -eq 0 && $n -eq 6 ]] && has "$out" "hapcounts sum to 2, 0 <= dosage <= hapcount everywhere; first 80 records agree with" && has "$out" "the index map matches its ##ANCESTRY line" \
+    && [[ "$(zcat "${TD}/out/chr22.hapcount.EUR.txt.gz" | head -1 | cut -f1-6)" == $'CHROM\tPOS\tID\tREF\tALT\tS0001' ]] \
+    && ok "chr22: a hapcount AND a dosage file for each of AFR, AMR, EUR (CHROM POS ID REF ALT then IIDs); sums 2, dosage <= hapcount, records agree with GT + AN1/AN2" || bad "extraction: rc=$rc n=$n $(tail -2 <<< "$out")"
+printf 'anc_index\tlabel\n0\tAFR\n1\tEUR\n2\tAMR\n' > "${TD}/alphabetical_map.tsv"
+out="$(bash "${C}/bin/la_flare_to_tractor.sh" "${TD}/handoff/local_ancestry/flare/chr22.anc.vcf.gz" "${TD}/alphabetical_map.tsv" "${TD}/bad/chr22" "$X" 2>&1)"; rc=$?
+[[ $rc -ne 0 ]] && has "$out" "but the FLARE VCF's own ##ANCESTRY line says" && ok "an index map in another order than FLARE's own (e.g. alphabetical): refused" || bad "map order: rc=$rc"
+out="$(FAKE_EXTRACT_DOSAGE_ONLY=1 bash "${C}/bin/la_flare_to_tractor.sh" "${TD}/handoff/local_ancestry/flare/chr22.anc.vcf.gz" "${TD}/handoff/local_ancestry/flare_index_map.tsv" "${TD}/d/chr22" "$X" 2>&1)"; rc=$?
+[[ $rc -ne 0 ]] && has "$out" "the extraction wrote no hapcount file for ancestry index 0 (EUR)" && ok "an extraction that writes dosage files only: refused (the regression needs both)" || bad "dosage only: rc=$rc"
+if [[ -n "${REAL_RSCRIPT}" ]] && "${REAL_RSCRIPT}" -e 'quit(status = !all(sapply(c("data.table", "optparse", "survival", "Matrix"), requireNamespace, quietly = TRUE)))' >/dev/null 2>&1; then
+    "${REAL_RSCRIPT}" "${C}/tests/toy/make_toy_tractor.R" "${TD}/ph" 120 20 EUR id_prefix=S >/dev/null    # its phenotype file (IDs S0001..)
+    out="$(cd "$TD" && GWAS_QC_DIR="${TD}/qc" "${REAL_RSCRIPT}" "${C}/bin/tractor_genesis_adapter.R" --tractor_prefix out/chr22 --phenotype ph.phenotypes.tsv \
+            --trait os --model survival --time_col os_time --event_col os_event --ancestries AFR,AMR,EUR --ref_ancestry EUR \
+            --covariates sex --stratum ALL --min_stratum_n 50 --chromosome 22 --mac_min 1 --output_prefix res/chr22 2>&1)"; rc=$?
+    [[ $rc -eq 0 ]] && [[ "$(grep -c '(named by label)' <<< "$out")" -eq 3 ]] && ok "the adapter reads them by label, no naming fallback (3 ancestries)" || bad "adapter on extraction: rc=$rc $(grep -i 'named\|error' <<< "$out" | head -3)"
+fi
+mkdir -p "${C}/logs"
+out="$(cd "$C" && env "${SITE[@]}" GWAS_REPO="$C" HANDOFF_DIR="${TD}/handoff" FAKE_SBATCH_RUN=1 sbatch --parsable --array=22 --output="${C}/logs/lae_%A_%a.out" slurm/submit_la_extract.sh 2>&1)"
+jid="$(head -1 <<< "$out")"
+grep -q "Completed chr22" "${C}/logs/lae_${jid}_22.out" 2>/dev/null && [[ -s "${C}/data/tractor/cohort/chr22.dosage.AMR.txt.gz" ]] && grep -q "activated lai\|lai" "${C}/logs/lae_${jid}_22.out" \
+    && ok "slurm/submit_la_extract.sh: chromosome 22's task, in the lai env, writes data/tractor/cohort/chr22.*" || bad "la_extract array: $(tail -3 "${C}/logs/lae_${jid}_22.out" 2>&1)"
+rm -rf "${C:?}/data/tractor/cohort" "${C:?}/logs" "${C:?}/results"
 
 section "GxG: missing sumstats are left out and named; none at all stops the task"
 rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results" "${C:?}/logs"; mkdir -p "${C}/results/gwas/os" "${C}/logs"
