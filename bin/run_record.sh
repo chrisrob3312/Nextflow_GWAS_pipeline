@@ -74,6 +74,8 @@ RR_SWITCHES=(
     "RUN_VALIDATION|false|step 5, PRS validation|bool"
     "RUN_GXG|false|step 6, GxG|bool"
     "RUN_MRMEGA|false|step 2b, MR-MEGA across strata per trait (slurm/submit_mrmega.sh)|bool"
+    "RUN_TRACTOR_PREP|false|steps 0b-0d: FLARE -> Tractor files (slurm/submit_la_extract.sh), each stratum's ancestries and files (slurm/submit_tractor_layout.sh) before the GWAS|bool"
+    "LA_MIN_SHARE|0.01|share of a stratum's haplotypes an ancestry needs to be modelled in it (data/tractor/<S>/ancestries.txt, written when absent)|num"
     "MRMEGA_PCS|3|most MR-MEGA axes of genetic variation; each trait uses min(K-2, MRMEGA_PCS) for its K strata with sumstats|int1"
     "STRUCTURE_SOURCE|bundle|step 0: ingest the bundle's PCs and GRM (bundle), or compute them (compute, the comparator)|enum:bundle,compute"
     "SKIP_PCAIR|false|skip step 0 and reuse the structure already in results/pcair|bool"

@@ -1120,6 +1120,39 @@ grep -q "Completed chr22" "${C}/logs/lae_${jid}_22.out" 2>/dev/null && [[ -s "${
     && ok "slurm/submit_la_extract.sh: chromosome 22's task, in the lai env, writes data/tractor/cohort/chr22.*" || bad "la_extract array: $(tail -3 "${C}/logs/lae_${jid}_22.out" 2>&1)"
 rm -rf "${C:?}/data/tractor/cohort" "${C:?}/logs" "${C:?}/results"
 
+section "CP-16 (layout): each stratum's Tractor files and ancestries.txt; k = 1 gets one ancdose file"
+TD="${W}/cp16b"; rm -rf "${TD:?}"; mkdir -p "${TD}/handoff/local_ancestry/flare" "${C}/results/strata" "${C}/logs"
+printf 'S%04d\n' $(seq 1 60) > "${TD}/all.txt"; head -40 "${TD}/all.txt" > "${C}/results/strata/ADM.samples.txt"; tail -20 "${TD}/all.txt" > "${C}/results/strata/EUO.samples.txt"
+python3 -I "${C}/tests/toy/make_toy_flare.py" "${TD}/handoff/local_ancestry/flare/chr22.anc.vcf.gz" "${TD}/all.txt" 60 EUR,AFR chr22 5 "pure=$(paste -sd, "${C}/results/strata/EUO.samples.txt")" >/dev/null
+printf 'anc_index\tlabel\n0\tEUR\n1\tAFR\n' > "${TD}/handoff/local_ancestry/flare_index_map.tsv"
+bash "${C}/bin/la_flare_to_tractor.sh" "${TD}/handoff/local_ancestry/flare/chr22.anc.vcf.gz" "${TD}/handoff/local_ancestry/flare_index_map.tsv" "${C}/data/tractor/cohort/chr22" "${C}/tests/toy/fake_extract_tracts_flare.py" >/dev/null 2>&1
+lay() { (cd "$C" && env "${SITE[@]}" GWAS_REPO="$C" HANDOFF_DIR="${TD}/handoff" STRATA_LIST=ADM,EUO FAKE_SBATCH_RUN=1 sbatch --parsable "$@" 2>&1 | head -1); }
+jid="$(lay --output="${C}/logs/lanc_%j.out" slurm/submit_tractor_layout.sh ancestries)"
+[[ "$(paste -sd, "${C}/data/tractor/ADM/ancestries.txt" 2>/dev/null)" == "AFR,EUR" && "$(paste -sd, "${C}/data/tractor/EUO/ancestries.txt" 2>/dev/null)" == "EUR" ]] \
+    && grep -q "Stratum EUO: haplotype shares EUR=1.000000 AFR=0.000000 -> EUR" "${C}/logs/lanc_${jid}.out" \
+    && ok "ancestries: the admixed stratum gets AFR,EUR, the EUR-only one EUR (shares logged; LA_MIN_SHARE 0.01)" || bad "ancestries: $(cat "${C}/logs/lanc_${jid}.out" 2>&1 | tail -3)"
+jid="$(lay --array=21,43 --output="${C}/logs/lay_%A_%a.out" slurm/submit_tractor_layout.sh split)"
+cols() { zcat "$1" | head -1 | cut -f6- | tr '\t' '\n'; }
+A="${C}/data/tractor/ADM/chr22"; E="${C}/data/tractor/EUO/chr22"
+[[ -s "${A}.hapcount.AFR.txt.gz" && -s "${A}.hapcount.EUR.txt.gz" && -s "${A}.dosage.AFR.txt.gz" && -s "${A}.dosage.EUR.txt.gz" ]] \
+    && [[ "$(cols "${A}.dosage.AFR.txt.gz")" == "$(cat "${C}/results/strata/ADM.samples.txt")" && "$(cols "${E}.ancdose.EUR.tsv.gz")" == "$(cat "${C}/results/strata/EUO.samples.txt")" ]] \
+    && [[ -s "${E}.ancdose.EUR.tsv.gz" && "$(ls "${C}/data/tractor/EUO" | grep -c 'hapcount')" -eq 0 ]] \
+    && ok "split (tasks 21, 43 = chr22 of each stratum): ADM hapcount + dosage for AFR and EUR, EUO only chr22.ancdose.EUR.tsv.gz; columns = each samples.txt" || bad "split: $(ls "${C}/data/tractor/ADM" "${C}/data/tractor/EUO" 2>&1)"
+if [[ -n "${REAL_RSCRIPT}" ]] && "${REAL_RSCRIPT}" -e 'quit(status = !all(sapply(c("data.table", "optparse", "survival", "Matrix"), requireNamespace, quietly = TRUE)))' >/dev/null 2>&1; then
+    same="$("${REAL_RSCRIPT}" -e 'suppressPackageStartupMessages(library(data.table)); a <- commandArgs(TRUE)
+        e <- fread(a[1]); d1 <- fread(a[2]); d2 <- fread(a[3]); s <- names(e)[-(1:5)]
+        cat(identical(as.matrix(e[, ..s]), as.matrix(d1[, ..s]) + as.matrix(d2[, ..s])), "\n")' \
+        "${E}.ancdose.EUR.tsv.gz" "${C}/data/tractor/cohort/chr22.dosage.EUR.txt.gz" "${C}/data/tractor/cohort/chr22.dosage.AFR.txt.gz" 2>&1)"
+    [[ "$same" == "TRUE " ]] && ok "the k=1 ancdose is the hard-call ALT count summed over every ancestry (the genotype)" || bad "ancdose sum: $same"
+fi
+out="$(cd /tmp && env "${SITE[@]}" RUN_TRACTOR_PREP=true "$L" --dry-run 2>&1)"
+has "$out" "STEPS 0b-0d: Submitting the Tractor extraction and the per-stratum layout" \
+    && grep -q 'Tractor layout: each stratum.s ancestries: sbatch .*--dependency=afterok:dry2:dry1 ' <<< "$out" \
+    && grep -q 'Tractor layout: 4 strata x 22 chromosomes: sbatch .*--dependency=afterok:dry3 --array=0-87 ' <<< "$out" \
+    && grep -q 'GWAS mrd (binary) / AFR, 22 chromosomes: sbatch .*--dependency=afterok:dry4:dry1 ' <<< "$out" && ! has "$out" "WARNING: missing" \
+    && ok "RUN_TRACTOR_PREP=true: extraction, then ancestries (after it and step 0), then the 88-task layout; every GWAS array waits on the layout and step 0" || bad "prep wiring: $(grep 'Tractor\|GWAS mrd (binary) / AFR' <<< "$out")"
+rm -rf "${C:?}/data/tractor/cohort" "${C:?}/data/tractor/ADM" "${C:?}/data/tractor/EUO" "${C:?}/results" "${C:?}/logs" "${FAKE_SLURM_DIR:?}"/*
+
 section "GxG: missing sumstats are left out and named; none at all stops the task"
 rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results" "${C:?}/logs"; mkdir -p "${C}/results/gwas/os" "${C}/logs"
 echo x | gzip > "${C}/results/gwas/os/POOLED.ivw_descriptive.sumstats.gz"; echo x | gzip > "${C}/results/gwas/os/EUR.sumstats.gz"

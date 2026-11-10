@@ -121,9 +121,18 @@ fi
 # submit_gwas_array.sh reads it in every task and refuses without it. A dry run lists what is
 # missing; a launch refuses.
 MISSING_ANC=()
-for stratum in "${STRATA[@]}"; do
-    [[ -s "${REPO}/data/tractor/${stratum}/ancestries.txt" ]] || MISSING_ANC+=("${REPO}/data/tractor/${stratum}/ancestries.txt")
-done
+if [[ "${RUN_TRACTOR_PREP}" == true ]]; then
+    # steps 0b-0d write each stratum's Tractor files and (when absent) its ancestries.txt; they
+    # need the bundle's FLARE output for every chromosome and its index map
+    for n in $(seq 1 22); do
+        [[ -s "${HANDOFF_DIR}/local_ancestry/flare/chr${n}.anc.vcf.gz" ]] || MISSING_ANC+=("${HANDOFF_DIR}/local_ancestry/flare/chr${n}.anc.vcf.gz")
+    done
+    [[ -s "${HANDOFF_DIR}/local_ancestry/flare_index_map.tsv" ]] || MISSING_ANC+=("${HANDOFF_DIR}/local_ancestry/flare_index_map.tsv")
+else
+    for stratum in "${STRATA[@]}"; do
+        [[ -s "${REPO}/data/tractor/${stratum}/ancestries.txt" ]] || MISSING_ANC+=("${REPO}/data/tractor/${stratum}/ancestries.txt")
+    done
+fi
 # PRS, and GxG's pooled task when there are Tractor files, read the cohort-wide list instead
 if [[ "${RUN_PRS}" == true || ( "${RUN_GXG}" == true && -d "${REPO}/data/tractor" ) ]]; then
     [[ -s "${REPO}/data/tractor/ancestries.txt" ]] || MISSING_ANC+=("${REPO}/data/tractor/ancestries.txt")
@@ -329,6 +338,30 @@ else
 fi
 
 # ============================================================================
+# STEPS 0b-0d: the Tractor files (CP-16)                                 RUN_TRACTOR_PREP
+# ============================================================================
+# 0b: FLARE -> the cohort's Tractor files, 22 tasks in the lai env; 0c: each stratum's ancestries
+# (after 0b and step 0, which writes results/strata); 0d: each stratum x chromosome's files. The
+# GWAS waits on 0d as well as on step 0. Off: data/tractor/<S>/ is prepared beforehand.
+DEPEND_GWAS_IN="${DEPEND_PCAIR}"
+if [[ "${RUN_TRACTOR_PREP}" == true ]]; then
+    echo ""
+    echo "STEPS 0b-0d: Submitting the Tractor extraction and the per-stratum layout..."
+    submit "Tractor extraction (FLARE -> Tractor), 22 chromosomes" \
+        --output="${LOG_DIR}/la_extract_%A_%a.out" --error="${LOG_DIR}/la_extract_%A_%a.err" \
+        "${SCRIPT_DIR}/submit_la_extract.sh"
+    J_EXTRACT="$JOB"
+    J_STRUCT="${DEPEND_PCAIR#--dependency=afterok:}"
+    submit "Tractor layout: each stratum's ancestries" --dependency=afterok:"${J_EXTRACT}${J_STRUCT:+:${J_STRUCT}}" \
+        --output="${LOG_DIR}/la_ancestries_%j.out" --error="${LOG_DIR}/la_ancestries_%j.err" \
+        "${SCRIPT_DIR}/submit_tractor_layout.sh" ancestries
+    submit "Tractor layout: ${#STRATA[@]} strata x 22 chromosomes" --dependency=afterok:"${JOB}" --array="0-$(( 22 * ${#STRATA[@]} - 1 ))" \
+        --output="${LOG_DIR}/la_layout_%A_%a.out" --error="${LOG_DIR}/la_layout_%A_%a.err" \
+        "${SCRIPT_DIR}/submit_tractor_layout.sh" split
+    DEPEND_GWAS_IN="--dependency=afterok:${JOB}${J_STRUCT:+:${J_STRUCT}}"
+fi
+
+# ============================================================================
 # STEP 1: Tractor-GENESIS GWAS for every trait x stratum (array over chromosomes)
 # ============================================================================
 # ALL traits use the same adapter so they are comparable:
@@ -340,7 +373,7 @@ declare -A GWAS_JOBS
 for trait in "${TRAITS[@]}"; do
     model=$(trait_model "$trait")
     for stratum in "${STRATA[@]}"; do
-        submit "GWAS ${trait} (${model}) / ${stratum}, 22 chromosomes" ${DEPEND_PCAIR:+"$DEPEND_PCAIR"} \
+        submit "GWAS ${trait} (${model}) / ${stratum}, 22 chromosomes" ${DEPEND_GWAS_IN:+"$DEPEND_GWAS_IN"} \
             --output="${LOG_DIR}/gwas_${trait}_${stratum}_%A_%a.out" \
             --error="${LOG_DIR}/gwas_${trait}_${stratum}_%A_%a.err" \
             "${SCRIPT_DIR}/submit_gwas_array.sh" "${stratum}" "${trait}" "${model}"

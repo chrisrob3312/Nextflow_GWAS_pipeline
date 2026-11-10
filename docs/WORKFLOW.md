@@ -234,6 +234,8 @@ Each pair reports Wald and LRT p-values with Bonferroni over pairs and BH FDR.
 flowchart TD
     S0["STEP 0  submit_pcair.sh<br/>ingest the bundle's PCs (cohort + within-stratum) and GRM<br/>STRUCTURE_SOURCE=compute: PC-AiR / PC-Relate instead"]
     S1["STEP 1  submit_gwas_array.sh<br/>traits x strata, 22-chromosome arrays<br/>Tractor-GENESIS for every trait<br/>--ancestries from data/tractor/&lt;stratum&gt;/ancestries.txt"]
+    S0b["STEPS 0b-0d  RUN_TRACTOR_PREP=true<br/>submit_la_extract.sh: FLARE -> Tractor (22 tasks, lai)<br/>submit_tractor_layout.sh: ancestries, then strata x 22 split"]
+    S0 -.-> S0b -.-> S1
     S0 --> S1
     S2["STEP 2  per trait: strata disjoint, every stratum complete or skipped<br/>chr* -> <stratum>.sumstats.gz<br/>bin/meta_analyze_strata.R -> POOLED.ivw_descriptive.sumstats.gz"]
     S3["STEP 3  submit_prs_array.sh<br/>6 PRS methods per trait<br/>RUN_PRS=true"]
@@ -251,7 +253,15 @@ flowchart TD
 ```
 
 Dashed steps are off by default and run only with their `RUN_*` variable set to `true`; every
-launch prints the ones it deferred. STEP 2b (MR-MEGA, CP-20) counts K, the strata whose
+launch prints the ones it deferred. Steps 0b-0d (CP-16, `RUN_TRACTOR_PREP=true`) make the Tractor
+files from the bundle's FLARE output instead of expecting `data/tractor/<S>/` to be prepared: 0b
+runs Tractor's `extract_tracts_flare.py` per chromosome (`bin/la_flare_to_tractor.sh`: labels from
+the index map, checked against the FLARE VCF's own `##ANCESTRY` line; every ancestry needs a
+hapcount and a dosage file; hapcounts sum to 2) into `data/tractor/cohort/`; 0c writes each
+stratum's `ancestries.txt` (the ancestries carrying at least `LA_MIN_SHARE`, default 0.01, of its
+haplotypes; a curated file already there is kept); 0d splits each stratum x chromosome by
+`results/strata/<S>.samples.txt`, folding an ancestry left out into EUR, and gives a one-ancestry
+stratum a single `chr<N>.ancdose.<anc>.tsv.gz` (the summed hard-call dose) and no hapcount file. STEP 2b (MR-MEGA, CP-20) counts K, the strata whose
 `<stratum>.sumstats.gz` exists, and uses `pc_axes = min(K-2, MRMEGA_PCS)` (default 3): K = 2 is a
 fixed-effect meta-analysis, not MR-MEGA, and says so in its output header; K < 2 excludes the
 trait, and the log says why. `DRY_RUN=1 bash slurm/submit_mrmega.sh <trait>` prints the decision.
