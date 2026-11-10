@@ -92,7 +92,14 @@ fi
 exit "${FAKE_RSCRIPT_EXIT:-0}"
 EOF
 printf '#!/bin/sh\necho "openjdk version \\"21.0.10\\" (stub)" >&2\n' > "${W}/envs/lai/bin/java"
-printf '#!/bin/sh\necho "MR-MEGA (stub)"\n' > "${W}/envs/mrmega/bin/MR-MEGA"
+# stub MR-MEGA: with -o <root>, writes <root>.result (a header and one row) as MR-MEGA does
+cat > "${W}/envs/mrmega/bin/MR-MEGA" <<'EOF'
+#!/bin/sh
+echo "MR-MEGA (stub) $*"
+o=""; while [ $# -gt 0 ]; do [ "$1" = "-o" ] && o="$2"; shift; done
+[ -n "$o" ] && printf 'MarkerName\tChromosome\tPosition\tEA\tNEA\tNcohort\tP-value_association\n1:1:A:G\t1\t1\tG\tA\t3\t0.5\n' > "$o.result"
+exit 0
+EOF
 for e in gwas-r lai; do printf '#!/bin/sh\necho "bcftools 1.25 (stub)"\necho "Using htslib 1.25"\n' > "${W}/envs/${e}/bin/bcftools"; done
 chmod +x "${W}/envs/gwas-r/bin/Rscript" "${W}/envs/lai/bin/java" "${W}/envs/mrmega/bin/MR-MEGA" "${W}"/envs/*/bin/bcftools
 STRATA_DEFAULT=(EUR AAC LAT1 LAT2 OTHER)
@@ -986,7 +993,7 @@ if [[ -n "${REAL_RSCRIPT}" ]] && "${REAL_RSCRIPT}" -e 'quit(status = !all(sapply
             --trait os --model survival --time_col os_time --event_col os_event --ancestries EUR --ref_ancestry EUR \
             --covariates sex,age_at_diagnosis --stratum EUR --min_stratum_n 50 --chromosome 22 --output_prefix out/chr22 2>&1)"; rc=$?
     chk="$("${REAL_RSCRIPT}" -e 'suppressPackageStartupMessages(library(data.table)); a <- fread(commandArgs(TRUE)[1])
-            cat(identical(unique(a$STRATUM), "EUR"), names(a)[1], length(grep("^BETA_", names(a))), identical(a$P_JOINT, a$P_EUR), unique(a$DF_JOINT), "\n")' \
+            cat(identical(unique(a$STRATUM), "EUR"), names(a)[1], length(setdiff(grep("^BETA_", names(a), value = TRUE), "BETA_TOTAL")), identical(a$P_JOINT, a$P_EUR), unique(a$DF_JOINT), "\n")' \
             "${TD}/out/chr22.tractor_genesis.genomic_order.tsv.gz" 2>&1)"
     [[ $rc -eq 0 && "$chk" == "TRUE STRATUM 1 TRUE 1 " ]] && has "$out" "EUR: (one ancestry: hapcount 2 for every sample), eur.dosage.EUR.txt.gz" && ! grep -qi "hapcount file\|no hapcount" <<< "$out" \
         && ok "EUR-only toy stratum: STRATUM=EUR first, one BETA_EUR/SE_EUR/P_EUR set, P_JOINT identical to P_EUR (1 df), no hapcount file needed" || bad "k=1: rc=$rc chk=$chk $(tail -3 <<< "$out")"
@@ -1011,6 +1018,51 @@ if [[ -n "${REAL_RSCRIPT}" ]] && "${REAL_RSCRIPT}" -e 'quit(status = !all(sapply
         && ok "a dose file missing a row: stops, naming the file and the first variant out of step (no silent misalignment)" || bad "out of step: rc=$rc $(tail -2 <<< "$out")"
 else
     echo "  (real R with data.table, optparse, survival and Matrix not available: M-02 checks skipped)"
+fi
+
+section "CP-19: the total-dose 1-df test and EAF in every table; the MR-MEGA input; STEP 2b runs"
+if [[ -n "${REAL_RSCRIPT}" ]] && "${REAL_RSCRIPT}" -e 'quit(status = !all(sapply(c("data.table", "optparse", "survival", "Matrix"), requireNamespace, quietly = TRUE)))' >/dev/null 2>&1 \
+   && python3 -c 'import pandas' >/dev/null 2>&1; then
+    TD="${W}/cp19"; rm -rf "${TD:?}"; mkdir -p "$TD"
+    "${REAL_RSCRIPT}" "${C}/tests/toy/make_toy_tractor.R" "${TD}/a" 120 100 AFR,EUR >/dev/null
+    "${REAL_RSCRIPT}" "${C}/tests/toy/make_toy_tractor.R" "${TD}/e" 120 100 EUR id_prefix=T >/dev/null; rm -f "${TD}/e.hapcount.EUR.txt.gz"
+    ad() { local pre=$1 anc=$2 st=$3; shift 3; (cd "$TD" && GWAS_QC_DIR="${TD}/qc" "${REAL_RSCRIPT}" "${C}/bin/tractor_genesis_adapter.R" --tractor_prefix "$pre" \
+            --phenotype "${pre}.phenotypes.tsv" --trait os --model survival --time_col os_time --event_col os_event --ancestries "$anc" --ref_ancestry EUR \
+            --covariates sex,age_at_diagnosis --stratum "$st" --min_stratum_n 50 --chromosome 22 --output_prefix "$st/chr22" "$@" 2>&1); }
+    ad a AFR,EUR AAA >/dev/null; ad e EUR EUR >/dev/null
+    chk="$("${REAL_RSCRIPT}" -e 'suppressPackageStartupMessages(library(data.table)); a <- fread(commandArgs(TRUE)[1]); e <- fread(commandArgs(TRUE)[2])
+            cat(all(c("EAF", "BETA_TOTAL", "SE_TOTAL", "P_TOTAL", "EAF_AFR", "EAF_EUR") %in% names(a)), sum(!is.na(a$BETA_TOTAL)),
+                identical(e$BETA_TOTAL, e$BETA_EUR) && identical(e$SE_TOTAL, e$SE_EUR), "\n")' \
+            "${TD}/AAA/chr22.tractor_genesis.genomic_order.tsv.gz" "${TD}/EUR/chr22.tractor_genesis.genomic_order.tsv.gz" 2>&1)"
+    [[ "$chk" == "TRUE 100 TRUE " ]] && ok "toy sumstats carry EAF, BETA_TOTAL / SE_TOTAL / P_TOTAL and EAF_<anc>; EUR-only stratum: BETA_TOTAL identical to BETA_EUR" || bad "total columns: $chk"
+    hd="$(zcat "${TD}/AAA/chr22.tractor_genesis.genomic_order.tsv.gz" | grep '^##' | cut -d= -f1 | paste -sd' ' -)"
+    [[ "$hd" == "## stratum ## trait ## model ## n ## method ## covariates" ]] && grep -q '^## method=.*null: Cox proportional hazards (Breslow ties), no GRM$' <<< "$(zcat "${TD}/AAA/chr22.tractor_genesis.genomic_order.tsv.gz" | head -8)" \
+        && ok "'##' lines: stratum, trait, model, n, method (with the null actually fitted), covariates" || bad "header lines: $hd"
+    zcat "${TD}/a.dosage.AFR.txt.gz" | awk -F'\t' 'NR > 1 {print $1 "\t" $3 "\t0\t" $2 "\t" $5 "\t" $4}' > "${TD}/a.bim"
+    out="$(python3 -I "${C}/bin/sumstats_to_mrmega.py" --input "${TD}/AAA/chr22.tractor_genesis.genomic_order.tsv.gz" --output "${TD}/AAA.mrmega_in.tsv" --variants "${TD}/a.bim" 2>&1)"; rc=$?
+    [[ $rc -eq 0 ]] && has "$out" "orientation: 100 of 100 rows checked against" && grep -qx '## beta_source=BETA_TOTAL' "${TD}/AAA.mrmega_in.tsv" \
+        && [[ "$(grep -v '^##' "${TD}/AAA.mrmega_in.tsv" | head -1)" == $'MARKERNAME\tCHROMOSOME\tPOSITION\tEA\tNEA\tEAF\tN\tBETA\tSE' ]] \
+        && [[ "$(grep -v '^##' "${TD}/AAA.mrmega_in.tsv" | awk -F'\t' 'NR > 1 && !($4 == "G" && $5 == "A")' | wc -l)" -eq 0 ]] \
+        && ok "sumstats_to_mrmega.py: 100 rows, EA/NEA = ALT/REF on every row against the variant table; header names BETA_TOTAL as the source" || bad "converter: rc=$rc $out"
+    awk -F'\t' 'BEGIN {OFS = "\t"} {split($2, p, ":"); $2 = p[1] ":" p[2] ":" p[4] ":" p[3]; print}' "${TD}/a.bim" > "${TD}/swapped.bim"
+    out="$(python3 -I "${C}/bin/sumstats_to_mrmega.py" --input "${TD}/AAA/chr22.tractor_genesis.genomic_order.tsv.gz" --output "${TD}/x.tsv" --variants "${TD}/swapped.bim" 2>&1)"; rc=$?
+    [[ $rc -ne 0 ]] && has "$out" "ERROR: orientation: 100 row(s) do not match" && ok "... a variant table with ref and alt the other way round: refused" || bad "swapped: rc=$rc $out"
+    # STEP 2b for real (fake Slurm, stub MR-MEGA): K=3 -> MR-MEGA with pc_axes 1; K=2 -> fixed effect
+    rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results" "${C:?}/logs"; mkdir -p "${C}/results/gwas/os" "${C}/logs"
+    for s in AFR AMR EUR; do zcat "${TD}/AAA/chr22.tractor_genesis.genomic_order.tsv.gz" | gzip > "${C}/results/gwas/os/${s}.sumstats.gz"; done
+    mm() { (cd "$C" && env "${SITE[@]}" GWAS_REPO="$C" LOG_DIR="${C}/logs" FAKE_SBATCH_RUN=1 sbatch --parsable --output="${C}/logs/mm_%j.out" slurm/submit_mrmega.sh os 2>&1 | head -1); }
+    jid="$(mm)"; MO="${C}/results/mrmega/os/os.mrmega.result.tsv"
+    [[ "$(grep '^##' "$MO" 2>/dev/null | paste -sd'|' -)" == "## method=MR-MEGA|## pc_axes=1|## K=3|## strata=AFR,AMR,EUR|## beta_source=BETA_TOTAL" ]] \
+        && grep -q "MR-MEGA (stub) -i ${C}/results/mrmega/os/mrmega_inputs.in --pc 1 --qt -o ${C}/results/mrmega/os/os.mrmega" "${C}/logs/mm_${jid}.out" \
+        && ! grep -q '^##' "${C}/results/mrmega/os/EUR.mrmega_in.plain.tsv" \
+        && ok "K=3: MR-MEGA --pc 1 --qt on '##'-free copies; result with method / pc_axes / K / strata / beta_source lines" || bad "mrmega K=3: $(tail -3 "${C}/logs/mm_${jid}.out")"
+    rm -f "${C}/results/gwas/os/AMR.sumstats.gz"
+    jid="$(mm)"; FE="${C}/results/mrmega/os/os.fixed_effect.tsv"
+    head -1 "$FE" 2>/dev/null | grep -qx '## pc_axes=0: fixed-effect meta-analysis, not MR-MEGA' && grep -qx '## strata=AFR,EUR' "$FE" \
+        && ok "K=2: os.fixed_effect.tsv, its first line 'pc_axes=0: fixed-effect meta-analysis, not MR-MEGA'" || bad "mrmega K=2: $(tail -3 "${C}/logs/mm_${jid}.out")"
+    rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results" "${C:?}/logs"
+else
+    echo "  (real R with data.table, optparse, survival and Matrix, or pandas, not available: CP-19 checks skipped)"
 fi
 
 section "GxG: missing sumstats are left out and named; none at all stops the task"

@@ -21,8 +21,10 @@
 # Usage (normally submitted by slurm/submit_full_pipeline.sh with RUN_MRMEGA=true):
 #   sbatch <site args> slurm/submit_mrmega.sh <trait>
 #   DRY_RUN=1 bash slurm/submit_mrmega.sh <trait>     logs K, pc_axes and the decision; runs nothing
-# The per-stratum MR-MEGA input (one effect per variant and stratum) is written by
-# bin/sumstats_to_mrmega.py (CP-19); without it a real run stops, saying so.
+# The per-stratum MR-MEGA input (one effect per variant and stratum: BETA_TOTAL / SE_TOTAL) is
+# written by bin/sumstats_to_mrmega.py (CP-19), which also checks EA = ALT / NEA = REF against the
+# bundle's variant table. Results: results/gwas -> results/mrmega/<trait>/<trait>.mrmega.result.tsv
+# (K >= 3) or <trait>.fixed_effect.tsv (K = 2), each with "##" lines saying what it is.
 # ============================================================================
 set -euo pipefail
 
@@ -60,7 +62,42 @@ else
 fi
 [[ "${DRY_RUN}" == 1 ]] && exit 0
 
+# One effect per variant and stratum: BETA_TOTAL / SE_TOTAL (the total-dose test), as MR-MEGA input,
+# EA = ALT and NEA = REF checked against the bundle's variant table (bin/sumstats_to_mrmega.py, CP-19)
 CONVERT="${SCRIPT_DIR}/bin/sumstats_to_mrmega.py"
-[[ -f "${CONVERT}" ]] || { echo "ERROR: ${CONVERT} (one effect per variant and stratum for MR-MEGA; CP-19) does not exist yet: MR-MEGA (${MODE}) cannot run" >&2; exit 1; }
-echo "ERROR: the MR-MEGA run itself is wired in with the converter (CP-19)" >&2
-exit 1
+OUT_DIR="${GWAS_RESULTS}/mrmega/${TRAIT}"
+mkdir -p "${OUT_DIR}"
+BIM="${HANDOFF_DIR:-${SCRIPT_DIR}/data/handoff}/genotypes/cohort.hardcall.maf01.bim"
+VAR_ARGS=(); [[ -s "${BIM}" ]] && VAR_ARGS=(--variants "${BIM}")
+SS_FILES=(); for s in "${PRESENT[@]}"; do SS_FILES+=("${GWAS_DIR}/${s}.sumstats.gz"); done
+rr_args "K=${K} pc_axes=${PC_AXES} mode=${MODE} strata=$(list "${PRESENT[@]}")" "${SS_FILES[@]}"
+source "${SCRIPT_DIR}/bin/activate_env.sh" gwas-py
+IN_FILES=()
+for s in "${PRESENT[@]}"; do
+    f="${OUT_DIR}/${s}.mrmega_in.tsv"
+    python3 "${CONVERT}" --input "${GWAS_DIR}/${s}.sumstats.gz" --output "$f" ${VAR_ARGS[@]+"${VAR_ARGS[@]}"}
+    IN_FILES+=("$f")
+done
+
+if [[ "${MODE}" == fixed_effect ]]; then
+    python3 "${CONVERT}" --fixed_effect --inputs "$(list "${IN_FILES[@]}")" --strata "$(list "${PRESENT[@]}")" \
+        --output "${OUT_DIR}/${TRAIT}.fixed_effect.tsv"
+    echo "MR-MEGA ${TRAIT}: K=2: ${OUT_DIR}/${TRAIT}.fixed_effect.tsv (fixed effect, not MR-MEGA)"
+    exit 0
+fi
+
+# MR-MEGA reads plain tables: it gets copies without the "##" lines (they stay in the converter's
+# files), listed one per line; --qt because the inputs carry BETA / SE
+LIST="${OUT_DIR}/mrmega_inputs.in"
+: > "${LIST}"
+for f in "${IN_FILES[@]}"; do
+    grep -v '^##' "$f" > "${f%.tsv}.plain.tsv"
+    echo "${f%.tsv}.plain.tsv" >> "${LIST}"
+done
+source "${SCRIPT_DIR}/bin/activate_env.sh" mrmega
+MR-MEGA -i "${LIST}" --pc "${PC_AXES}" --qt -o "${OUT_DIR}/${TRAIT}.mrmega"
+[[ -s "${OUT_DIR}/${TRAIT}.mrmega.result" ]] || { echo "ERROR: MR-MEGA wrote no ${OUT_DIR}/${TRAIT}.mrmega.result" >&2; exit 1; }
+{ printf '## method=MR-MEGA\n## pc_axes=%s\n## K=%s\n## strata=%s\n## beta_source=BETA_TOTAL\n' \
+         "${PC_AXES}" "${K}" "$(list "${PRESENT[@]}")"
+  cat "${OUT_DIR}/${TRAIT}.mrmega.result"; } > "${OUT_DIR}/${TRAIT}.mrmega.result.tsv"
+echo "MR-MEGA ${TRAIT}: ${OUT_DIR}/${TRAIT}.mrmega.result.tsv (K=${K}, pc_axes=${PC_AXES})"

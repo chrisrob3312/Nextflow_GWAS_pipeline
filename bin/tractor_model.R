@@ -102,13 +102,30 @@ cox_ops <- function(time, event, eta, Xc) {
 # a small MINOR count even though its ALT count is large. Stratum-wide: min(ALT, 2n - ALT).
 mac_minor <- function(alt, n_hap) pmax(0, pmin(alt, n_hap - alt))
 
-empty_result <- function(ancestries, n_dose, mac, mac_stratum, status) list(
+NA_TOTAL <- list(beta = NA, se = NA, p = NA)
+
+empty_result <- function(ancestries, n_dose, mac, mac_stratum, status, total = NA_TOTAL, eaf = NULL, n_eff = NA) list(
     joint = list(stat = NA, df = n_dose, p = NA),
     marginal = setNames(lapply(ancestries, function(a) list(ancestry = a, beta = NA, se = NA, z = NA, p = NA)), ancestries),
     het = list(Q = NA, df = n_dose - 1, p = NA, I2 = NA),
-    n_eff = NA, mac = mac, mac_stratum = mac_stratum,
+    n_eff = n_eff, mac = mac, mac_stratum = mac_stratum,
+    total = total,           # the total-dose 1-df test (CP-19)
+    eaf = eaf,               # list(stratum = , <anc> = ): ALT frequency in the stratum and on each background
     status = status          # "mac": below the MAC gate; "error": the test failed
 )
+
+# total_dose_test(G, null_ops): the 1-df score test of the total ALT dose G = sum of the ancestry doses,
+# with the same null and the same ridge as the conditional test, so with one ancestry it is that
+# test exactly (BETA_TOTAL = BETA_<anc>). No local-ancestry term: the standard single-effect GWAS
+# test, one effect per variant and stratum (what MR-MEGA pools; CP-19).
+total_dose_test <- function(G, null_ops) tryCatch({
+    Gm <- matrix(G, ncol = 1)
+    U <- as.numeric(crossprod(Gm, null_ops$PY))
+    V <- as.matrix(null_ops$proj_crossprod(Gm)); V <- (V + t(V)) / 2
+    Vi <- solve(V + diag(1e-8, 1))
+    beta <- as.numeric(Vi %*% U); se <- sqrt(Vi[1, 1])
+    list(beta = beta, se = se, p = 2 * pnorm(-abs(beta / se)))
+}, error = function(e) NA_TOTAL)
 
 # Conditional score test (identical for binary / quantitative / survival):
 #   D = [LA_1..LA_{k-1} | Dose_1..Dose_k]
@@ -151,9 +168,14 @@ test_variant_tractor <- function(
     n_hap <- vapply(ancestries, function(a) sum(as.numeric(hap_vec[[a]]), na.rm = TRUE), 0)
     mac <- setNames(mac_minor(alt, n_hap), ancestries)
     mac_stratum <- mac_minor(sum(alt), 2 * n)
-    if (mac_stratum < mac_min) return(empty_result(ancestries, n_dose, mac, mac_stratum, "mac"))
+    # ALT allele frequency in the stratum and on each background (NA where it has no haplotypes)
+    eaf <- c(list(stratum = sum(alt) / (2 * n)), as.list(setNames(ifelse(n_hap > 0, alt / n_hap, NA_real_), ancestries)))
+    if (mac_stratum < mac_min) return(empty_result(ancestries, n_dose, mac, mac_stratum, "mac", eaf = eaf, n_eff = n - n_missing))
+    # the total-dose test: whenever the variant passes the stratum-wide gate and varies
+    G <- rowSums(D[, paste0("Dose_", ancestries), drop = FALSE])
+    total <- if (var(G) > 1e-10) total_dose_test(G, null_ops) else NA_TOTAL
     testable <- ancestries[mac >= mac_min & apply(D[, paste0("Dose_", ancestries), drop = FALSE], 2, var) > 1e-10]
-    if (length(testable) == 0) return(empty_result(ancestries, n_dose, mac, mac_stratum, "mac"))
+    if (length(testable) == 0) return(empty_result(ancestries, n_dose, mac, mac_stratum, "mac", total, eaf, n - n_missing))
 
     # Drop LA columns with no variation (e.g. no AFR tracts in this chunk)
     la_cols <- la_names[apply(D[, la_names, drop = FALSE], 2, var) > 1e-10]
@@ -201,8 +223,8 @@ test_variant_tractor <- function(
         list(joint = list(stat = stat_joint, df = df_joint, p = p_joint),
              marginal = marginal,
              het = list(Q = Q, df = df_het, p = p_het, I2 = I2),
-             n_eff = n - n_missing, mac = mac, mac_stratum = mac_stratum, status = "ok")
-    }, error = function(e) empty_result(ancestries, n_dose, mac, mac_stratum, "error"))
+             n_eff = n - n_missing, mac = mac, mac_stratum = mac_stratum, total = total, eaf = eaf, status = "ok")
+    }, error = function(e) empty_result(ancestries, n_dose, mac, mac_stratum, "error", total, eaf, n - n_missing))
 
     res
 }
@@ -219,11 +241,16 @@ result_row <- function(var_info, res, ancestries, stratum = NULL) {
     row$ALT <- if (!is.null(vi$ALT)) as.character(vi$ALT) else NA_character_
     row$N <- as.integer(res$n_eff)
     row$MAC_STRATUM <- as.numeric(res$mac_stratum)
+    row$EAF <- as.numeric(res$eaf$stratum %||% NA)
+    row$BETA_TOTAL <- as.numeric(res$total$beta)
+    row$SE_TOTAL <- as.numeric(res$total$se)
+    row$P_TOTAL <- as.numeric(res$total$p)
     row$STAT_JOINT <- as.numeric(res$joint$stat)
     row$DF_JOINT <- as.integer(res$joint$df)
     row$P_JOINT <- as.numeric(res$joint$p)
     for (anc in ancestries) {
         row[[paste0("MAC_", anc)]]  <- as.numeric(res$mac[[anc]])
+        row[[paste0("EAF_", anc)]]  <- as.numeric(res$eaf[[anc]] %||% NA)
         row[[paste0("BETA_", anc)]] <- as.numeric(res$marginal[[anc]]$beta)
         row[[paste0("SE_", anc)]]   <- as.numeric(res$marginal[[anc]]$se)
         row[[paste0("Z_", anc)]]    <- as.numeric(res$marginal[[anc]]$z)

@@ -486,7 +486,7 @@ null_ops <- NULL; nullmod <- NULL; null_source <- "fitted"
 if (!is.null(opt$null_model_rds) && file.exists(opt$null_model_rds)) {
     cached <- tryCatch(readRDS(opt$null_model_rds), error = function(e) NULL)
     if (!is.null(cached) && identical(cached$key, null_key)) {
-        null_ops <- cached$null_ops; nullmod <- cached$nullmod; null_source <- "loaded"
+        null_ops <- cached$null_ops; nullmod <- cached$nullmod; null_method <- cached$method; null_source <- "loaded"
         cat("  null loaded from", opt$null_model_rds, "\n")
     } else {
         cat("  null cache", opt$null_model_rds, "was fitted on other samples or settings: refitting\n")
@@ -523,6 +523,7 @@ if (!is.null(null_ops)) {
                                  varlist = coxme::coxmeMlist(list(K), rescale = FALSE))
         eta <- as.numeric(cox_null$linear.predictor)   # fixed effects + frailty
         cat("  Fitted Cox MIXED model (coxme; frailty on 2 x kinship)\n")
+        null_method <- "Cox mixed model (coxme, frailty on 2 x GRM, Breslow ties)"
         cat("    Frailty variance:", signif(as.numeric(coxme::VarCorr(cox_null)[[1]]), 4), "\n")
     } else {
         if (!is.null(kinship)) {
@@ -532,6 +533,8 @@ if (!is.null(null_ops)) {
         cox_null <- coxph(f_null, data = surv_df, ties = "breslow")
         eta <- as.numeric(cox_null$linear.predictors)
         cat("  Fitted Cox proportional hazards model (Breslow ties)\n")
+        null_method <- if (is.null(kinship)) "Cox proportional hazards (Breslow ties), no GRM" else
+            "Cox proportional hazards (Breslow ties), GRM NOT used (--allow_unrelated_cox, no coxme)"
     }
     null_ops <- cox_ops(surv_time, surv_event, eta, cov_mat)
     nullmod  <- list(type = "cox", model = cox_null, martingale = null_ops$PY,
@@ -553,6 +556,8 @@ if (!is.null(null_ops)) {
         family = fam,
         verbose = opt$verbose
     )
+    null_method <- sprintf("GENESIS %s mixed model%s", if (opt$model == "binary") "logistic" else "linear",
+                           if (is.null(kinship)) ", no GRM" else " with the GRM")
     cat("  Fitted", if (opt$model == "binary") "logistic" else "linear",
         "mixed model (GENESIS", if (is.null(kinship)) "- no kinship)" else "with kinship)", "\n")
     null_ops <- genesis_ops(nullmod, n_samples)
@@ -560,10 +565,17 @@ if (!is.null(null_ops)) {
 if (null_source == "fitted" && !is.null(opt$null_model_rds)) {
     tmp <- paste0(opt$null_model_rds, ".tmp.", Sys.getpid())
     dir.create(dirname(opt$null_model_rds), recursive = TRUE, showWarnings = FALSE)
-    saveRDS(list(key = null_key, null_ops = null_ops, nullmod = nullmod), tmp)
+    saveRDS(list(key = null_key, null_ops = null_ops, nullmod = nullmod, method = null_method), tmp)
     file.rename(tmp, opt$null_model_rds)
     cat("  null saved to", opt$null_model_rds, "\n")
 }
+
+# "## key=value" lines above every results table (CP-19, docs/SUMSTATS_SCHEMA.md): the same on every
+# chromosome of a stratum x trait, so the combine step keeps them once
+sumstats_header <- c(stratum = opt$stratum %||% "none", trait = opt$trait, model = opt$model, n = n_samples,
+                     method = paste("Tractor-GENESIS conditional score test (dose terms given local ancestry)",
+                                    "+ total-dose 1-df score test; null:", null_method),
+                     sumstats_header)
 
 # Samples the null model was fitted on: must be the complete cases counted above, or the score
 # test would pair residuals with the wrong genotype rows

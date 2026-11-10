@@ -55,6 +55,23 @@ check("k=1: P_JOINT identical to P_EUR, 1 df, no heterogeneity test", identical(
 r <- test_variant_tractor(list(), list(EUR = dose30), list(EUR = two), ops0, "EUR", "EUR", mac_min = 31)
 check("k=1: below the MAC gate -> status mac", r$status == "mac")
 
+# --- the total-dose test (CP-19) --------------------------------------------------------------
+la2 <- rbinom(n, 2, 0.5); dA2 <- rbinom(n, la2, 0.4); dE2 <- rbinom(n, 2 - la2, 0.2)
+r <- test_variant_tractor(list(AFR = la2), list(AFR = dA2, EUR = dE2), list(AFR = la2, EUR = 2 - la2), ops0, c("AFR", "EUR"), "EUR", mac_min = 5)
+tot <- dA2 + dE2
+sc_t <- unname(summary(coxph(Surv(time, event) ~ tot, ties = "breslow"))$sctest[1])
+check(sprintf("BETA_TOTAL: (beta/se)^2 %.6f equals coxph's score test of the total dose %.6f", (r$total$beta / r$total$se)^2, sc_t),
+      abs((r$total$beta / r$total$se)^2 - sc_t) < 1e-4)
+check("EAF: stratum ALT / 2n, per background ALT_a / haplotypes_a",
+      abs(r$eaf$stratum - sum(tot) / (2 * n)) < 1e-12 && abs(r$eaf$AFR - sum(dA2) / sum(la2)) < 1e-12 && abs(r$eaf$EUR - sum(dE2) / sum(2 - la2)) < 1e-12)
+r1 <- test_variant_tractor(list(), list(EUR = g), list(EUR = two), ops0, "EUR", "EUR", mac_min = 1)
+row1 <- result_row(list(CHR = "22", POS = 1L, ID = "22:1:A:G", REF = "A", ALT = "G"), r1, "EUR", "EUR")
+check("k=1: BETA_TOTAL, SE_TOTAL, P_TOTAL identical to BETA_EUR, SE_EUR, P_EUR",
+      identical(row1$BETA_TOTAL, row1$BETA_EUR) && identical(row1$SE_TOTAL, row1$SE_EUR) && identical(row1$P_TOTAL, row1$P_EUR))
+check("row columns: ... N MAC_STRATUM EAF BETA_TOTAL SE_TOTAL P_TOTAL STAT_JOINT ...; MAC_EUR then EAF_EUR",
+      identical(names(row1)[7:13], c("N", "MAC_STRATUM", "EAF", "BETA_TOTAL", "SE_TOTAL", "P_TOTAL", "STAT_JOINT")) &&
+      identical(names(row1)[16:17], c("MAC_EUR", "EAF_EUR")))
+
 # --- k = 2: joint, per-ancestry, heterogeneity -----------------------------------------------
 la <- rbinom(n, 2, 0.5)                                         # AFR haplotypes per person
 dA <- rbinom(n, la, 0.4); dE <- rbinom(n, 2 - la, 0.2)

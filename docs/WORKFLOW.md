@@ -255,8 +255,9 @@ launch prints the ones it deferred. STEP 2b (MR-MEGA, CP-20) counts K, the strat
 `<stratum>.sumstats.gz` exists, and uses `pc_axes = min(K-2, MRMEGA_PCS)` (default 3): K = 2 is a
 fixed-effect meta-analysis, not MR-MEGA, and says so in its output header; K < 2 excludes the
 trait, and the log says why. `DRY_RUN=1 bash slurm/submit_mrmega.sh <trait>` prints the decision.
-Its per-stratum input (one effect per variant) comes from `bin/sumstats_to_mrmega.py` (CP-19);
-until that exists a real run stops, saying so. The launcher needs `SLURM_PARTITION` and `SLURM_ACCOUNT` in
+Its per-stratum input (one effect per variant: `BETA_TOTAL` / `SE_TOTAL`, the total-dose test) comes
+from `bin/sumstats_to_mrmega.py` (CP-19), which checks EA = ALT / NEA = REF against the bundle's
+`.bim`; results go to `results/mrmega/<trait>/` (`docs/SUMSTATS_SCHEMA.md`). The launcher needs `SLURM_PARTITION` and `SLURM_ACCOUNT` in
 the environment and puts them on every sbatch line, with absolute log paths under `LOG_DIR`
 (default `<repo>/logs`). Every job activates its conda env first (`source bin/activate_env.sh
 gwas-r`, which also puts `TMPDIR` on disk) and writes its row of the run record,
