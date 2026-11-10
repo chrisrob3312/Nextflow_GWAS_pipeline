@@ -11,7 +11,7 @@
        (priority: custom > known > GWAS P)
     3. Test every pairwise SNP x SNP interaction:
          - POOLED cohort
-         - within each ancestry stratum (EUR, AAC, LAT1, LAT2, EAS/SAS if N>=30, OTHER)
+         - within each ancestry stratum (EUR, AAC, LAT1, LAT2, EAS/SAS if N>=min_stratum_n, OTHER)
        (one task per stratum -> SLURM array)
     4. Ancestry modification: Cochran's Q across strata + pooled 3-way LRT
     5. Combine into one summary table per trait

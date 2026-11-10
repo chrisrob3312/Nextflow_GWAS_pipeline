@@ -1,0 +1,61 @@
+# gwas-r: every R step of the SLURM path (Tractor-GENESIS adapter, PC-AiR / PC-Relate,
+# strata meta-analysis, GxG, coloc, plots). Built as in the runbook that docs/HPC_SITE.md points to.
+#
+# Versions. Every pin below was checked on 2026-11-09 against the channel repodata
+# (bioconda: full repodata.json; conda-forge: current_repodata.json): the version exists and
+# has a build for r-base 4.5. The five Bioconductor packages are one Bioconductor release
+# (GENESIS 2.40.0 requires exactly these minor versions of the other four) and are built for
+# R 4.5 only, which is why r-base is pinned to the 4.5 series. No conda solve was run where
+# this file was written; `conda env create` on the cluster is the first full solve.
+#
+# coxme and metafor are not optional for this pipeline: without coxme the Cox null model is
+# fitted without the kinship frailty, and without metafor the strata meta-analysis falls back
+# to fixed-effect IVW, both with only a warning. bin/check_envs.sh fails if either is missing.
+#
+# Colocalization (RUN_COLOC): coloc 5.2.3 and susieR 0.14.2 are conda-forge packages (checked
+# 2026-11-09, r-base 4.5 builds). hyprcoloc is in neither channel; it is installed by hand into
+# this env from its GitHub repository (jrs95/hyprcoloc, version 0.0.2, commit 0348bbd), after the
+# env is built. Its dependencies are listed below so that only hyprcoloc itself is compiled; they
+# are unpinned (each exists with an r-base 4.5 build) so the solver can match them to the rest:
+#   conda activate "$GWAS_ENVS_DIR/gwas-r"
+#   Rscript -e 'remotes::install_github("jrs95/hyprcoloc@0348bbdd977be731d82e4efda115a9bed63cd44f",
+#                                      dependencies = FALSE, upgrade = "never", build_vignettes = FALSE)'
+# The colocalization job refuses to start, naming the package, if coloc, susieR or hyprcoloc is
+# missing. pROC (optional, RUN_PRS validation) is not here.
+#
+# bcftools 1.25 (bioconda): bin/check_handoff_bundle.sh needs bcftools and Rscript on PATH
+# together, so it runs in this env.
+name: gwas-r
+channels:
+  - conda-forge
+  - bioconda
+  - nodefaults
+dependencies:
+  - r-base=4.5
+  - bioconductor-genesis=2.40.0
+  - bioconductor-seqarray=1.50.1
+  - bioconductor-seqvartools=1.48.0
+  - bioconductor-snprelate=1.44.0
+  - bioconductor-gwastools=1.56.0
+  - r-coxme=2.2_22
+  - r-survival=3.8_12
+  - r-metafor=5.0_1
+  - r-data.table=1.18.6.1
+  - r-r.utils=2.13.0      # data.table::fread needs R.utils to read any .gz (it decompresses into TMPDIR)
+  - r-optparse=1.8.2
+  - r-argparse=2.3.3
+  - r-qqman=0.1.9
+  - r-ggplot2=4.0.3
+  - r-matrix=1.7_6
+  - r-coloc=5.2.3
+  - r-susier=0.14.2
+  - r-remotes             # installs hyprcoloc (above); unpinned, 2.5.0 has an r-base 4.5 build
+  - r-iterpc              # hyprcoloc dependencies, unpinned (see above)
+  - r-rcpp
+  - r-rcppeigen
+  - r-rmpfr
+  - r-pheatmap
+  - r-rcolorbrewer
+  - r-knitr
+  - r-rmarkdown
+  - bcftools=1.25

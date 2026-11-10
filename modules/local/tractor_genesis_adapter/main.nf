@@ -21,14 +21,18 @@ process TRACTOR_GENESIS {
     path kinship_matrix
     val covariate_cols
 
+    // A stratum below --min_stratum_n analysable samples is skipped by the adapter (exit 0, no
+    // results; status skipped_below_min_stratum_n in <prefix>.run_counts.tsv), as on the SLURM path:
+    // every results output is therefore optional, and the counts file is the one that always exists.
     output:
-    tuple val(meta), path("${prefix}.tractor_genesis.tsv.gz"),               emit: sumstats
-    tuple val(meta), path("${prefix}.tractor_genesis.genomic_order.tsv.gz"), emit: genomic_order
-    tuple val(meta), path("${prefix}.tractor_genesis.top_hits.tsv"),         emit: top_hits
+    tuple val(meta), path("${prefix}.run_counts.tsv"),                       emit: run_counts
+    tuple val(meta), path("${prefix}.tractor_genesis.tsv.gz"),               emit: sumstats, optional: true
+    tuple val(meta), path("${prefix}.tractor_genesis.genomic_order.tsv.gz"), emit: genomic_order, optional: true
+    tuple val(meta), path("${prefix}.tractor_genesis.top_hits.tsv"),         emit: top_hits, optional: true
     tuple val(meta), path("${prefix}.tractor_genesis.significant.tsv"),      emit: significant, optional: true
     tuple val(meta), path("${prefix}.tractor_genesis.heterogeneous.tsv"),    emit: heterogeneous, optional: true
     tuple val(meta), path("${prefix}.tractor_genesis.*_specific.tsv"),       emit: ancestry_specific, optional: true
-    tuple val(meta), path("${prefix}.null_model.rds"),                       emit: null_model
+    tuple val(meta), path("${prefix}.null_model.rds"),                       emit: null_model, optional: true
     path "versions.yml", emit: versions
 
     when:
@@ -42,9 +46,14 @@ process TRACTOR_GENESIS {
     def covar_arg    = covariate_cols ? "--covariates ${covariate_cols}" : ''
     def kinship_arg  = kinship_matrix ? "--kinship ${kinship_matrix}" : ''
     def ref_arg      = meta.ref_ancestry ? "--ref_ancestry ${meta.ref_ancestry}" : ''
-    // TRACTOR_EXTRACT_TRACTS writes <id>.ancdose.<anc>.tsv.gz / <id>.hapcount.<anc>.tsv.gz
+    // TRACTOR_EXTRACT_TRACTS writes <id>.ancdose.<k>.tsv.gz / <id>.hapcount.<k>.tsv.gz, numbered in
+    // the order of meta.tractor_pops (declared as the RFMix coding order). The adapter no longer
+    // assumes that order: it is written out below as an explicit index map.
     def tractor_prefix = ancestry_dosages[0].name.replaceAll(/\.ancdose\..*$/, '')
     """
+    printf 'anc_index\\tlabel\\n' > ancestry_index_map.tsv
+    i=0; for a in \$(echo "${meta.tractor_pops}" | tr ',' ' '); do printf '%s\\t%s\\n' "\$i" "\$a" >> ancestry_index_map.tsv; i=\$((i + 1)); done
+
     tractor_genesis_adapter.R \\
         --tractor_prefix ${tractor_prefix} \\
         --phenotype ${phenotype} \\
@@ -52,10 +61,12 @@ process TRACTOR_GENESIS {
         --model ${model} \\
         ${surv_args} \\
         --ancestries ${meta.tractor_pops} \\
+        --ancestry_index_map ancestry_index_map.tsv \\
         ${ref_arg} \\
         ${covar_arg} \\
         ${kinship_arg} \\
         --mac_min ${params.tractor_mac_min ?: 10} \\
+        --min_stratum_n ${params.min_stratum_n ?: 50} \\
         --output_prefix ${prefix} \\
         --threads ${task.cpus} \\
         --verbose \\

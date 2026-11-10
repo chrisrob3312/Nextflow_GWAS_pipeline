@@ -96,11 +96,16 @@ process PRS_LA_PARTIAL {
     def tractor_prefix = "tractor/" + dos[0].name.replaceAll(/\.(ancdose|dosage)\..*$/, '')
     // Prefer PRS-CSx shrunk per-ancestry posterior weights; fall back to Tractor-GENESIS betas
     def weights_arg = prscsx_weights ? "prscsx" : "${tractor_sumstats}"
+    // Numbered Tractor files: the declared ancestry order (RFMix coding order) as an explicit map
     """
+    printf 'anc_index\\tlabel\\n' > ancestry_index_map.tsv
+    i=0; for a in ${anc_list.join(' ')}; do printf '%s\\t%s\\n' "\$i" "\$a" >> ancestry_index_map.tsv; i=\$((i + 1)); done
+
     calculate_prs_admixed.R \\
         --method la_partial \\
         --weights ${weights_arg} \\
         --tractor_prefix ${tractor_prefix} \\
+        --ancestry_index_map ancestry_index_map.tsv \\
         --ancestries ${anc_list.join(',')} \\
         --phenotype ${phenotype} \\
         --trait ${meta.trait} \\

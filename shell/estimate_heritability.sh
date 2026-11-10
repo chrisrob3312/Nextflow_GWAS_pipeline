@@ -1,4 +1,5 @@
 #!/bin/bash
+# DEBUG-ONLY, not the execution path: an interactive wrapper; production runs use slurm/ or main.nf (shell/README.md)
 # Heritability Estimation Shell Wrapper
 # Maintains parity with modules/local/heritability/main.nf
 

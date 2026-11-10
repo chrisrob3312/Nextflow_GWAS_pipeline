@@ -1,0 +1,17 @@
+# gwas-py: the Python helpers under bin/ (filter_gwas_results.py, extract_credible_sets.py,
+# process_graf_output.py, ...). Build and record it as in docs/HPC_SITE.md, "Building the envs".
+#
+# Versions. Checked on 2026-11-09 against conda-forge current_repodata.json: each version exists
+# with a build for Python 3.13, and their declared numpy ranges overlap (pandas 2.3.3 wants
+# numpy >=1.23,<3; scipy 1.18.1 wants numpy >=2.0,<2.8). pandas stays on the 2.x series because
+# the scripts were written against pandas 2; 3.x changes copy and string-dtype behaviour.
+# No conda solve was run where this file was written.
+name: gwas-py
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.13
+  - numpy=2.5.4
+  - pandas=2.3.3
+  - scipy=1.18.1

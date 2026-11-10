@@ -1,0 +1,36 @@
+# lai: local ancestry. Java for FLARE (flare.jar) and Python for Tractor's extraction script
+# (extract_tracts_flare.py). Built as in the runbook that docs/HPC_SITE.md points to.
+#
+# Where the requirements come from:
+#   - FLARE: its README (github.com/browning-lab/flare, HEAD d6a6c8f, read 2026-11-09) says
+#     "The flare program requires Java version 11 (or a later version)". openjdk 21 is an LTS
+#     release at or above that.
+#   - Tractor: conda_py3_tractor.yml in github.com/Atkinson-Lab/Tractor (HEAD 2860728, read
+#     2026-11-09) pins python 3.9.18, numpy 1.26.0 and pandas 2.1.1. Its extraction scripts,
+#     scripts/extract_tracts_flare.py and scripts/extract_tracts.py, import only the standard
+#     library (argparse, contextlib, gzip, logging, re, os); numpy and pandas are kept because
+#     Tractor's own environment carries them. That file's R packages are for Tractor's own
+#     regression script, which this pipeline replaces with bin/tractor_genesis_adapter.R (gwas-r).
+#
+# Versions. Checked on 2026-11-09 against conda-forge current_repodata.json. python 3.9.18
+# matches Tractor exactly. numpy 1.26.0 and pandas 2.1.1 are not in current_repodata, so the
+# closest listed patch releases with a Python 3.9 build are used: numpy 1.26.4 and pandas 2.1.4
+# (pandas 2.1.4 wants numpy >=1.22.4,<2). No conda solve was run where this file was written.
+#
+# bcftools 1.25 (bioconda, checked 2026-11-09): the extraction step restricts each dosage VCF to
+# the maf01 site list before Tractor's extraction (docs/HANDOFF_CONTRACT.md), which needs bcftools.
+#
+# Not conda packages, placed in this env by hand: flare.jar (from the FLARE README's link) into
+# <prefix>/share/flare/, and Tractor's scripts/extract_tracts_flare.py (commit 2860728) into
+# <prefix>/bin/.
+name: lai
+channels:
+  - conda-forge
+  - bioconda
+  - nodefaults
+dependencies:
+  - openjdk=21
+  - python=3.9.18
+  - numpy=1.26.4
+  - pandas=2.1.4
+  - bcftools=1.25

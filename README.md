@@ -111,7 +111,7 @@ nextflow run main.nf \
   --input samplesheet.csv \
   --phenotype_file phenotypes.txt \
   --phenotype_cols "WBC,Lymphocytes,Monocytes" \
-  --covariate_cols "age,sex,PC1,PC2,PC3,PC4,PC5" \
+  --covariate_cols "sex,age_at_diagnosis,cd19_pos_pct,storage_days,PC1,PC2,PC3,PC4,PC5" \
   --run_ancestry_inference false \
   --ancestry_calls_file ancestry_calls.tsv \
   --gwas_tool genesis \
@@ -142,6 +142,67 @@ nextflow run main.nf \
   --outdir results \
   -profile singularity
 ```
+
+## Running on SLURM without Nextflow
+
+The same `bin/` scripts also run as plain SLURM jobs from `slurm/`. The site settings to fill in
+are in [docs/HPC_SITE.md](docs/HPC_SITE.md); the setup and check steps are in the combined runbook
+(the harmonization repo's `genotyping_pipeline/benchmarking/SMOKE_RUNBOOK.md`, part "GWAS
+pipeline"); the run record is described in [docs/WORKFLOW.md](docs/WORKFLOW.md), section 9. In short:
+
+1. **Environments.** Build the four conda envs in `envs/` (`gwas-r`, `gwas-py`, `lai`, `mrmega`)
+   into `$GWAS_ENVS_DIR`, run `bin/envs_tsv.sh` to record the sha256 of each yml in `envs.tsv`, and
+   check them with `sbatch ... bin/check_envs.sh`. Every job starts with
+   `source bin/activate_env.sh <env>`, which also puts `TMPDIR` on disk (`$SLURM_TMPDIR`, else
+   `$GWAS_SCRATCH/tmp`), never on a tmpfs `/tmp`.
+2. **Site settings.** `SLURM_PARTITION` and `SLURM_ACCOUNT` are required; the launcher refuses to
+   start without them. No site path is written in any script.
+   ```bash
+   export SLURM_PARTITION=<partition> SLURM_ACCOUNT=<account> GWAS_ENVS_DIR=<dir> GWAS_SCRATCH=<dir>
+   ```
+3. **Launch**, from any directory; the dry run prints every sbatch line and submits nothing:
+   ```bash
+   slurm/submit_full_pipeline.sh --dry-run
+   slurm/submit_full_pipeline.sh
+   ```
+   Step 0 ingests the population structure the handoff bundle ships (`HANDOFF_DIR`: cohort and
+   within-stratum PCs, the GRM; `STRUCTURE_SOURCE=compute` recomputes it with PC-AiR / PC-Relate,
+   as a comparator, only when asked). Step 0, the Tractor-GENESIS GWAS (traits × strata × 22
+   chromosomes) and the combine + meta-analysis step always run. PRS, colocalization, PRS validation and GxG run only
+   with `RUN_PRS=true`, `RUN_COLOC=true`, `RUN_VALIDATION=true` (needs `RUN_PRS`) and
+   `RUN_GXG=true`; every launch prints the ones it deferred, e.g.
+   `deferred: PRS COLOC VALIDATION GXG (RUN_*=false)`.
+   Traits are `mrd` (binary), `efs` and `os` (time-to-event), the handoff contract's columns: each
+   survival trait reads its own `<trait>_time` and `<trait>_event` (override one trait with
+   `TIME_COL_<trait>` / `EVENT_COL_<trait>`); the launcher checks every column before queuing.
+   The number-changing switches (all recorded in the run record) include `MIN_STRATUM_N`, the
+   smallest stratum analysed (default 50, decided 10 Nov 2026), and `MAC_MIN`, the minor allele
+   count an ancestry's dose term needs (default 10; the handoff contract says 20, still open).
+4. **Ancestries per stratum.** Each stratum needs `data/tractor/<stratum>/ancestries.txt`, the
+   ancestry labels its Tractor files carry; GxG's pooled task and PRS read the cohort-wide
+   `data/tractor/ancestries.txt` ([docs/HANDOFF_CONTRACT.md](docs/HANDOFF_CONTRACT.md)). Tractor
+   files are read by ancestry label, or through `data/tractor/flare_index_map.tsv` when numbered;
+   never by their position in the list. The strata are the bundle's (`ancestry/strata.tsv`; set
+   `STRATA_LIST` to run fewer). With `data/ancestry/strata.tsv` present, the adapter
+   checks every sample against its stratum; a stratum under `MIN_STRATUM_N` analysable samples is
+   skipped, and the run record says so.
+5. **Run record.** Each launch writes `results/run_record/<run_id>/`: `params.tsv` (every
+   number-changing switch) at launch, a row per task as it runs, and `trace.tsv` (with MaxRSS and
+   Elapsed from `sacct`, and the adapter's sample and variant counts) and `summary.md` once the final
+   job, which waits on all the others, has run.
+6. **Switches.** Every number-changing switch has one default and a domain (`RR_SWITCHES`,
+   `bin/run_record.sh`); a value outside it is refused before anything is queued, and `params.tsv`
+   records every value. `RUN_LABEL=<name>` writes a sensitivity arm under `results/<name>/`;
+   `PC_SCALE` and `MIX_RETAIN` are two such arms ([docs/WORKFLOW.md](docs/WORKFLOW.md) section 9).
+7. **QC gates.** Steps file QC verdicts and per-join sample counts into the run record's `qc/`;
+   each GWAS task requires the structure step's `pcair_pc_merge`, the combine job the adapter's
+   join checks. A failed **or missing** verdict stops the job (exit 3);
+   `QC_GATE_OVERRIDE=<id>` proceeds on purpose and is recorded
+   ([docs/WORKFLOW.md](docs/WORKFLOW.md) section 10).
+
+Logs go to `<repo>/logs/` (absolute paths; `LOG_DIR` to change). The wrappers under `shell/` are
+debug-only, not the execution path. `tests/test_chassis.sh` checks all of this locally with fake
+`sbatch`, `sacct` and `conda`.
 
 ## Input Requirements
 
@@ -375,6 +436,8 @@ Key methods:
 - Nextflow >= 23.04.0
 - Container runtime: Docker, Singularity, or Apptainer
 - OR Conda/Mamba for local execution
+- For the SLURM path without Nextflow: Slurm and conda (or mamba), with the envs in `envs/`
+  (see "Running on SLURM without Nextflow" above)
 
 ## License
 

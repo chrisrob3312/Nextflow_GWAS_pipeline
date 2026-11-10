@@ -48,7 +48,8 @@ process ANNOVAR_ANNOTATE {
     """
     # Convert summary stats to ANNOVAR input format
     # Format: chr, start, end, ref, alt, [optional columns]
-    zcat -f ${sumstats} | awk -F'\\t' 'NR>1 {
+    # (leading "## key=value" lines, e.g. "## covariates=", and the column header are skipped)
+    zcat -f ${sumstats} | awk -F'\\t' '/^##/ && !h {next} !h {h = 1; next} {
         chr=\$1; pos=\$2; ref=\$4; alt=\$5;
         gsub("chr", "", chr);
         print chr, pos, pos, ref, alt, \$3, \$7, \$8

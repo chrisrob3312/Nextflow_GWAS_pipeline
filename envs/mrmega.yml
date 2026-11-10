@@ -1,0 +1,19 @@
+# mrmega: puts MR-MEGA (and, by hand, env-MR-MEGA) on PATH, nothing else.
+# Build and record it as in docs/HPC_SITE.md, "Building the envs".
+#
+# How the binaries get there:
+#   - MR-MEGA is packaged in bioconda: mr-mega 0.2, build h3be2455_0, confirmed in bioconda's
+#     repodata on 2026-11-09. The recipe (bioconda-recipes, recipes/mr-mega) compiles the
+#     authors' MR-MEGA_v0.2.zip from tools.gi.ut.ee and installs the binary as $PREFIX/bin/MR-MEGA,
+#     so `conda activate` puts it on PATH. 0.2 is the only version in the channel.
+#   - env-MR-MEGA (docs/ENV_MRMEGA.md, needed by CP-29) is not in conda-forge or bioconda. Build
+#     it from the authors' release and copy the binary into <prefix>/bin of this env; the steps
+#     are in docs/HPC_SITE.md. bin/check_envs.sh checks MR-MEGA only; the env-MR-MEGA check is
+#     added when CP-29 fixes how that binary is named and called.
+name: mrmega
+channels:
+  - conda-forge
+  - bioconda
+  - nodefaults
+dependencies:
+  - mr-mega=0.2

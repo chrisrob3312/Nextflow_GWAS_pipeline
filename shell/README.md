@@ -1,5 +1,13 @@
 # Shell Wrappers for Ancestry-Aware GWAS Pipeline
 
+> **These wrappers are debug-only, not the execution path.** They call the `bin/` scripts by hand,
+> for interactive debugging. `tractor_genesis_adapter.sh` does not pass `--stratum`, `--mac_min` or
+> `--chromosome`, so the adapter runs with its own defaults on whatever the prefix holds; none of the
+> wrappers activates a conda env (`bin/activate_env.sh`), puts `TMPDIR` on disk, or writes a run
+> record. Results from them are not comparable with the production runs, which go through
+> `slurm/submit_full_pipeline.sh` (SLURM, `docs/HPC_SITE.md`) or `main.nf` (Nextflow). The
+> "Equivalent I/O" principle below describes the original intent, not the current state.
+
 ## Dual Shell + Nextflow Structure
 
 This directory contains shell wrapper scripts that provide command-line access to the same core analysis scripts used by the Nextflow modules. This dual structure prevents code drift between interactive debugging and production pipeline runs.

@@ -18,16 +18,17 @@
 #   - AAC: African American (run separately)
 #   - LAT1: Latino high-Indigenous (run separately)
 #   - LAT2: Latino high-European (run separately)
-#   - EAS: East Asian (run separately IF N >= 30, else pool to OTHER)
-#   - SAS: South Asian (run separately IF N >= 30, else pool to OTHER)
-#   - OTHER: Small groups (<30) - pooled/meta-analyzed
+#   - EAS: East Asian (run separately IF N >= MIN_STRATUM_N, else pool to OTHER)
+#   - SAS: South Asian (run separately IF N >= MIN_STRATUM_N, else pool to OTHER)
+#   - OTHER: Small groups (< MIN_STRATUM_N) - pooled/meta-analyzed
 #
 # DYNAMIC: Groups with N >= MIN_STRATUM_N run separately
 #          Groups with N < MIN_STRATUM_N pool to OTHER
 # ============================================================================
 
-# Minimum sample size for separate analysis
-MIN_STRATUM_N <- 30
+# Minimum sample size for separate analysis (50: decided 10 Nov 2026; the scripts' --min_stratum_n
+# option, when given, takes precedence over this constant)
+MIN_STRATUM_N <- 50
 
 # Guaranteed primary ancestries (always attempt separate analysis)
 PRIMARY_ANCESTRIES <- c("EUR", "AAC", "LAT1", "LAT2")

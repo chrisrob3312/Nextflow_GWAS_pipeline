@@ -60,7 +60,10 @@ option_list <- list(
     make_option(c("--local_ancestry"), type = "character", default = NULL,
                 help = "Local ancestry files prefix (RFMix MSP format)"),
     make_option(c("--tractor_prefix"), type = "character", default = NULL,
-                help = "Tractor prefix (.ancdose.<k>.tsv.gz / .dosage.<anc>.txt.gz) for local-ancestry PARTIAL scores"),
+                help = "Tractor prefix (files named by ancestry: .dosage.<anc>.txt.gz, .ancdose.<anc>.tsv.gz) for local-ancestry PARTIAL scores"),
+    make_option(c("--ancestry_index_map"), type = "character", default = NULL,
+                help = paste("anc_index<TAB>label table (the handoff's local_ancestry/flare_index_map.tsv), needed only",
+                             "when the Tractor files are numbered (anc0, 0, ...) instead of named by ancestry")),
     make_option(c("--weights"), type = "character", default = NULL,
                 help = "Ancestry-specific weights: Tractor-GENESIS sumstats (BETA_<anc>, ALT) or a table with ID, A1, BETA_<anc>"),
     make_option(c("--la_p_threshold"), type = "numeric", default = 1e-5,
@@ -133,6 +136,13 @@ option_list <- list(
                 help = "Total SLURM array tasks")
 )
 
+# Shared Tractor file resolution (bin/tractor_io.R, next to this script)
+.prs_dir <- local({
+    f <- sub("^--file=", "", grep("^--file=", commandArgs(trailingOnly = FALSE), value = TRUE))
+    if (length(f) > 0) dirname(normalizePath(f[1])) else "."
+})
+source(file.path(.prs_dir, "tractor_io.R"))
+
 opt <- parse_args(OptionParser(
     option_list = option_list,
     prog = "calculate_prs_admixed.R",
@@ -176,10 +186,10 @@ if (!is.na(slurm_cpus) && slurm_cpus > 0) {
 # Ancestry Configuration for Latino Cohort
 # ============================================================================
 # Primary strata (run separately): EUR, AAC, LAT1, LAT2
-# Small groups (N < 30): Pool to OTHER, meta-analyze into pooled results
+# Small groups (N < MIN_STRATUM_N): Pool to OTHER, meta-analyze into pooled results
 # LAT1/LAT2: Run separately as >60% of cohort is Latino
 
-MIN_STRATUM_N <- 30
+MIN_STRATUM_N <- 50      # smallest stratum (decided 10 Nov 2026)
 PRIMARY_ANCESTRIES <- c("EUR", "AAC", "LAT1", "LAT2")
 
 # Parse ancestries
@@ -579,12 +589,13 @@ run_la_partial <- function(weights_file, tractor_prefix, ancestries, output_pref
     if (any(is.na(wcols))) stop("No BETA_<anc> or BETA column for: ", paste(ancestries[is.na(wcols)], collapse = ","))
     if (any(wcols == "BETA")) cat("  WARNING: shared BETA used for", paste(ancestries[wcols == "BETA"], collapse = ","), "(no ancestry-specific effect)\n")
 
-    read_dose <- function(a, k) {
-        cands <- c(paste0(tractor_prefix, ".ancdose.", a, ".tsv.gz"), paste0(tractor_prefix, ".ancdose.", k, ".tsv.gz"),
-                   paste0(tractor_prefix, ".dosage.", a, ".txt.gz"), paste0(tractor_prefix, ".dosage.", k, ".txt.gz"))
-        f <- cands[file.exists(cands)][1]
-        if (is.na(f)) stop("No Tractor dosage file for ", a, " (tried ", paste(basename(cands), collapse = ", "), ")")
-        d <- fread(f)
+    # Which file holds which ancestry: by label, or numbered and mapped through --ancestry_index_map;
+    # never by position in --ancestries (bin/tractor_io.R)
+    index_map <- if (!is.null(opt$ancestry_index_map)) read_index_map(opt$ancestry_index_map) else NULL
+    read_dose <- function(a) {
+        r <- resolve_tractor_file(tractor_prefix, a, "dosage", index_map)
+        cat("  ", a, ": ", basename(r$path), " (", r$how, ")\n", sep = "")
+        d <- fread(r$path)
         info <- intersect(names(d), c("CHR", "CHROM", "#CHROM", "POS", "BP", "ID", "SNP", "REF", "ALT"))
         idn <- intersect(c("ID", "SNP"), names(d))[1]
         ids <- if (!is.na(idn)) as.character(d[[idn]]) else paste0(d[[1]], ":", d[[2]])
@@ -596,7 +607,7 @@ run_la_partial <- function(weights_file, tractor_prefix, ancestries, output_pref
     scores <- NULL; used <- list()
     for (k in seq_along(ancestries)) {
         a <- ancestries[k]
-        dd <- read_dose(a, k - 1)
+        dd <- read_dose(a)
         common <- intersect(w$ID, dd$ids)
         if (length(common) == 0) { cat("  ", a, ": no overlapping variants\n"); next }
         wa <- w[match(common, ID)]
@@ -821,12 +832,22 @@ if (opt$validate && !is.null(opt$phenotype) && !is.null(opt$trait)) {
     prop_cols <- grep("^(EUR|AFR|AMR|EAS|SAS|NAT|HISP)(_prop|_frac)?$",
                       names(pheno), value = TRUE, ignore.case = TRUE)
 
-    # Check for survival data
-    time_cols <- c("time", "OS_time", "survival_time", "follow_up", "days", "months")
-    event_cols <- c("event", "status", "OS_status", "censored", "death")
-    time_col <- intersect(names(pheno), time_cols)
-    event_col <- intersect(names(pheno), event_cols)
+    # Survival data: the trait's own columns when given (--time_col / --event_col, as the SLURM
+    # path passes <trait>_time / <trait>_event); otherwise the old name search, kept for callers
+    # that pass neither.
+    if (!is.null(opt$time_col) || !is.null(opt$event_col)) {
+        if (is.null(opt$time_col) || is.null(opt$event_col)) stop("give both --time_col and --event_col")
+        missing_cols <- setdiff(c(opt$time_col, opt$event_col), names(pheno))
+        if (length(missing_cols) > 0) stop("survival column(s) not in the phenotype file: ", paste(missing_cols, collapse = ", "))
+        time_col <- opt$time_col; event_col <- opt$event_col
+    } else {
+        time_cols <- c("time", "OS_time", "survival_time", "follow_up", "days", "months")
+        event_cols <- c("event", "status", "OS_status", "censored", "death")
+        time_col <- intersect(names(pheno), time_cols)
+        event_col <- intersect(names(pheno), event_cols)
+    }
     is_survival <- length(time_col) > 0 && length(event_col) > 0
+    if (identical(opt$trait_type, "survival") && !is_survival) stop("--trait_type survival needs --time_col and --event_col")
 
     # Determine trait type
     trait_values <- pheno[[opt$trait]]

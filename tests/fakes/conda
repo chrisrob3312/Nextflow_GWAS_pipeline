@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Fake conda for tests/test_chassis.sh. It knows one thing, `conda shell.bash hook`, which prints
+# a `conda` shell function whose `activate <prefix>` sets CONDA_PREFIX, CONDA_DEFAULT_ENV and PATH
+# the way the real one does. Called directly with `activate` it fails as the real conda does when
+# that shell function was never loaded.
+case "${1:-} ${2:-}" in
+    "shell.bash hook")
+        cat <<'EOF'
+conda() {
+    case "${1:-}" in
+        activate)
+            # Like conda's own activation scripts, this assumes `set +u`: the probe below is an
+            # unbound variable, so a caller that left `set -u` on dies here.
+            : "${FAKE_CONDA_UNSET_PROBE}"
+            [[ -d "${2:-}" ]] || { echo "EnvironmentNameNotFound: ${2:-}" >&2; return 1; }
+            if [[ -n "${CONDA_PREFIX:-}" ]]; then PATH="${PATH//"${CONDA_PREFIX}/bin:"/}"; fi
+            CONDA_PREFIX="$(cd "$2" && pwd)"
+            export CONDA_PREFIX CONDA_DEFAULT_ENV="$CONDA_PREFIX" CONDA_SHLVL=1
+            export PATH="${CONDA_PREFIX}/bin:${PATH}"
+            if [[ -n "${FAKE_SLURM_DIR:-}" ]]; then echo "activate ${CONDA_PREFIX}" >> "${FAKE_SLURM_DIR}/conda.log"; fi
+            ;;
+        *) command conda "$@" ;;
+    esac
+}
+EOF
+        ;;
+    "activate "*)
+        echo "CondaError: Run 'conda init' before 'conda activate'" >&2
+        exit 1
+        ;;
+    *)
+        echo "fake conda: unsupported: $*" >&2
+        exit 1
+        ;;
+esac

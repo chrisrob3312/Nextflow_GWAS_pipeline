@@ -11,17 +11,34 @@ suppressPackageStartupMessages({
 # Parse arguments
 parser <- ArgumentParser(description = "Create Manhattan plot")
 parser$add_argument("--sumstats", required = TRUE, help = "Summary statistics file")
-parser$add_argument("--lambda-gc", required = FALSE, help = "Lambda GC file")
+parser$add_argument("--lambda-gc", required = FALSE, help = "Lambda GC file from elsewhere: printed for comparison, never used in place of the lambda computed here")
 parser$add_argument("--output-prefix", required = TRUE, help = "Output prefix")
 parser$add_argument("--title", default = "Manhattan Plot", help = "Plot title")
 parser$add_argument("--genome-wide", type = "double", default = 5e-8, help = "Genome-wide significance threshold")
 parser$add_argument("--suggestive", type = "double", default = 1e-5, help = "Suggestive threshold")
+parser$add_argument("--p-col", required = FALSE, default = NULL, help = "P column to plot [default: P_JOINT, else P / PVALUE / P_VALUE / p.value]")
 args <- parser$parse_args()
 
-# Read data
+# resolve_p_col(nm, requested): the P column to use. --p-col names it (exactly, else ignoring case);
+# without it P_JOINT (the Tractor joint test) comes first, then the usual single-P names (CP-14)
+resolve_p_col <- function(nm, requested = NULL) {
+  if (!is.null(requested) && nzchar(requested)) {
+    hit <- c(nm[nm == requested], nm[toupper(nm) == toupper(requested)])
+    if (length(hit) == 0) stop("--p-col ", requested, " is not a column (P columns: ",
+                               paste(grep("^P(_|$)|PVAL", nm, value = TRUE, ignore.case = TRUE), collapse = ", "), ")")
+    return(hit[1])
+  }
+  for (pat in c("^P_JOINT$", "^(P|PVALUE|P_VALUE|p.value)$")) {
+    hit <- grep(pat, nm, ignore.case = TRUE, value = TRUE)
+    if (length(hit) > 0) return(hit[1])
+  }
+  stop("Could not detect the P-value column (looked for P_JOINT, P, PVALUE, P_VALUE, p.value; or pass --p-col)")
+}
+
+# Read data (leading "## key=value" lines are skipped by fread)
 cat("Reading summary statistics...\n")
 if (grepl("\\.gz$", args$sumstats)) {
-  df <- fread(cmd = paste("zcat", args$sumstats))
+  df <- fread(cmd = paste("zcat", shQuote(args$sumstats)))
 } else {
   df <- fread(args$sumstats)
 }
@@ -30,10 +47,11 @@ if (grepl("\\.gz$", args$sumstats)) {
 chr_col <- names(df)[grep("^(CHR|CHROM|#CHROM|chromosome)$", names(df), ignore.case = TRUE)[1]]
 pos_col <- names(df)[grep("^(POS|BP|GENPOS|position)$", names(df), ignore.case = TRUE)[1]]
 snp_col <- names(df)[grep("^(SNP|ID|RSID|variant_id|MarkerName)$", names(df), ignore.case = TRUE)[1]]
-p_col <- names(df)[grep("^(P|PVALUE|P_VALUE|p.value)$", names(df), ignore.case = TRUE)[1]]
+p_col <- resolve_p_col(names(df), args$p_col)
+cat("P column:", p_col, "\n")
 
-if (is.na(chr_col) || is.na(pos_col) || is.na(p_col)) {
-  stop("Could not detect required columns (CHR, POS, P)")
+if (is.na(chr_col) || is.na(pos_col)) {
+  stop("Could not detect required columns (CHR / CHROM, POS / BP)")
 }
 
 # Prepare data for manhattan plot
@@ -52,17 +70,15 @@ plot_df <- plot_df[!is.na(plot_df$CHR) & !is.na(plot_df$BP), ]
 plot_df$CHR <- as.numeric(gsub("chr", "", plot_df$CHR, ignore.case = TRUE))
 plot_df <- plot_df[!is.na(plot_df$CHR), ]
 
-# Read lambda GC if provided
-lambda_gc <- NA
+# Lambda GC of the plotted column (as in create_qq_plot.R); a file passed in is printed, not used
+if (nrow(plot_df) == 0) stop("No P values in (0, 1] in column ", p_col)
+lambda_gc <- median(qchisq(plot_df$P, 1, lower.tail = FALSE)) / qchisq(0.5, 1)
 if (!is.null(args$lambda_gc) && file.exists(args$lambda_gc)) {
-  lambda_gc <- as.numeric(readLines(args$lambda_gc)[1])
+  cat("Lambda GC passed in (", args$lambda_gc, "; not used): ", readLines(args$lambda_gc, n = 1), "\n", sep = "")
 }
 
-# Create title with lambda
-plot_title <- args$title
-if (!is.na(lambda_gc)) {
-  plot_title <- paste0(plot_title, " (λGC = ", round(lambda_gc, 3), ")")
-}
+# Create title with the column and its lambda
+plot_title <- paste0(args$title, " (", p_col, ", λGC = ", round(lambda_gc, 3), ")")
 
 # Create PNG
 cat("Creating Manhattan plot...\n")
