@@ -23,156 +23,63 @@ per cluster, then export the variables before launching (for example from a smal
 If the site has no Slurm accounts, set `SLURM_ACCOUNT` to your default account
 (`sacctmgr show user $USER`), so the run record still names one.
 
-## Launching
+## Steps
 
-```bash
-export SLURM_PARTITION=<partition> SLURM_ACCOUNT=<account>
-slurm/submit_full_pipeline.sh --dry-run   # prints every sbatch line, submits nothing
-slurm/submit_full_pipeline.sh
-```
+The steps (the site variables, building the four conda envs, `check_envs`, `test_job_env`, the dry
+run, the run-record self-test) are in the combined runbook: the harmonization repo's
+`genotyping_pipeline/benchmarking/SMOKE_RUNBOOK.md`, part "GWAS pipeline".
 
-The launcher can be started from any directory: it changes to the repo root first. It adds
-`--partition`, `--account`, `--export=ALL` and `--kill-on-invalid-dep=yes` to every sbatch it
-issues, and gives every job an absolute `--output` (and `--error`) under `LOG_DIR`. An `#SBATCH`
-line cannot read a shell variable, which is why the partition and account are on the command line
-and not in the scripts.
+## What each setting does
+
+- **`SLURM_PARTITION`, `SLURM_ACCOUNT`.** The launcher puts both on every sbatch line and refuses
+  to start without them; an `#SBATCH` line cannot read a variable, so the scripts carry neither.
+- **`LOG_DIR`.** Every job's `--output` / `--error` is an absolute path under it.
+- **`GWAS_SCRATCH`, `SLURM_TMPDIR`.** See TMPDIR below.
+- **`GWAS_ENVS_DIR`.** `envs.tsv` gives each env's prefix as `${GWAS_ENVS_DIR}/<env>`;
+  `bin/activate_env.sh` stops, naming the env and the path, if the prefix is not there.
+- **`GWAS_CONDA_MODULE`.** If a job's shell has no `conda`, `bin/activate_env.sh` runs
+  `module load` with it first.
 
 ## Submitting one script by hand
 
 The scripts under `slurm/` carry no partition, account or log path. Submit them from the repo root
-and give those three yourself:
+and give those yourself:
 
 ```bash
-cd <repo>
-mkdir -p logs
 sbatch --partition="$SLURM_PARTITION" --account="$SLURM_ACCOUNT" \
        --output="$PWD/logs/gwas_%A_%a.out" --error="$PWD/logs/gwas_%A_%a.err" \
        slurm/submit_gwas_array.sh EUR OS survival
 ```
 
-Or let sbatch pick the first two up by itself: it reads `SBATCH_PARTITION` and `SBATCH_ACCOUNT`
-from the environment.
+(or export `SBATCH_PARTITION` and `SBATCH_ACCOUNT`, which sbatch reads by itself). From the repo
+root, because Slurm runs a job script from a copy in its spool directory: each script finds the
+repo through `GWAS_REPO` (exported by the launcher) or `SLURM_SUBMIT_DIR`, and stops with "cannot
+find the repo" otherwise.
 
-```bash
-export SBATCH_PARTITION="$SLURM_PARTITION" SBATCH_ACCOUNT="$SLURM_ACCOUNT"
-sbatch --output="$PWD/logs/pcair_%j.out" slurm/submit_pcair.sh
-```
+## TMPDIR
 
-Without `--output`, Slurm writes `slurm-<jobid>.out` in the directory you submitted from.
-
-Why the repo root: Slurm runs a job script from a copy in its own spool directory, so a script
-cannot find the repo from its own path. Each script looks for the repo in `GWAS_REPO` (exported by
-the launcher), then in `SLURM_SUBMIT_DIR` (the directory sbatch was run in), and stops with
-"cannot find the repo" if neither holds it.
-
-## TMPDIR (M-04)
-
-Every job sources `bin/activate_env.sh`, which exports `TMPDIR` before anything else runs. The
-rule: `TMPDIR` is on disk, never on a tmpfs. `data.table::fread()` decompresses a `.gz` into
-`TMPDIR` before reading it, so a chromosome-sized file in a tmpfs `/tmp` fills RAM and fails with
-"No space left on device" (ENOSPC). The first of these that is a writable directory and not
-tmpfs/ramfs becomes `TMPDIR`:
-
-1. `$SLURM_TMPDIR`, if the site sets it (a per-job directory the site cleans up);
-2. `$GWAS_SCRATCH/tmp`, created if missing;
-3. the `TMPDIR` the job already had, or `/tmp`, with a note in the log.
-
-If none qualifies the job stops before running anything, and says what it rejected. R
-(`tempdir()`), Python (`tempfile`) and `sort` all honour `TMPDIR`. Java does not, so a step that
-runs FLARE should pass `-Djava.io.tmpdir="$TMPDIR"` itself.
+Every job sources `bin/activate_env.sh`, which exports `TMPDIR` on disk, never on a tmpfs:
+`data.table::fread()` decompresses a `.gz` into `TMPDIR` first, so a chromosome-sized file in a
+tmpfs `/tmp` fills RAM and fails with "No space left on device". `TMPDIR` is the first of these that
+is a writable directory and not tmpfs/ramfs: `$SLURM_TMPDIR`; `$GWAS_SCRATCH/tmp` (created if
+missing); the job's existing `TMPDIR`, or `/tmp`. If none qualifies the job stops before running
+anything. R, Python and `sort` honour `TMPDIR`; Java does not, so a FLARE step passes
+`-Djava.io.tmpdir="$TMPDIR"` itself.
 
 ## Building the envs
 
-The four specs live in `envs/` (`gwas-r`, `gwas-py`, `lai`, `mrmega`); `envs.tsv` lists each
-env's prefix and the sha256 of the yml it was built from. Build them once per site, into
-`GWAS_ENVS_DIR`:
+The build steps are in the runbook (see Steps). Installed by hand, once per site, after the envs
+are built:
 
-```bash
-export GWAS_ENVS_DIR=<site path>
-for e in gwas-r gwas-py lai mrmega; do
-    CONDA_CHANNEL_PRIORITY=strict conda env create -p "$GWAS_ENVS_DIR/$e" -f "envs/$e.yml"
-done
-bin/envs_tsv.sh        # records the sha256 of each yml; no change if the ymls are the committed ones
-```
-
-`mamba env create` takes the same arguments. Strict channel priority is what bioconda asks for.
-After changing a yml: rebuild that env (`conda env remove -p ...`, then create it again), run
-`bin/envs_tsv.sh`, and commit the yml and `envs.tsv` together.
-
-Two things are not conda packages and go in by hand:
-
-- **flare.jar** for the `lai` env: download it as the FLARE README says
-  (`https://faculty.washington.edu/browning/flare.jar`) to `$GWAS_ENVS_DIR/lai/share/flare/`,
-  and Tractor's `scripts/extract_tracts_flare.py` (github.com/Atkinson-Lab/Tractor, commit
-  2860728) to `$GWAS_ENVS_DIR/lai/bin/`. Record the versions you fetched in the site notes below.
-- **env-MR-MEGA** for the `mrmega` env (CP-29): build it from the authors' release (Wang et al.,
-  Communications Biology 2024, PMID 39543362) and copy the binary to `$GWAS_ENVS_DIR/mrmega/bin/`.
-  MR-MEGA itself comes from bioconda (`mr-mega=0.2`).
-
-Inside a job, an env is used with `source bin/activate_env.sh <env>`; it stops with the env name
-and the missing path if the prefix is not there.
-
-## Checking the envs and a job's environment
-
-From the repo root, with the settings above exported:
-
-```bash
-mkdir -p logs
-sbatch --partition="$SLURM_PARTITION" --account="$SLURM_ACCOUNT" \
-       --output="$PWD/logs/check_envs_%j.out" bin/check_envs.sh
-sbatch --partition="$SLURM_PARTITION" --account="$SLURM_ACCOUNT" \
-       --output="$PWD/logs/test_job_env_%A_%a.out" bin/test_job_env.sh
-```
-
-`check_envs.sh` loads every R package of the SLURM path in `gwas-r` (the 14 of the plan plus
-`R.utils`, which `fread` needs for any `.gz`), the Python imports in `gwas-py` and `lai`, `java`
-in `lai` and `MR-MEGA` in `mrmega`, and checks `envs.tsv` against the ymls. Exit 0 and a last
-line `check_envs: PASS` mean all of it loaded. A missing `coxme` or `metafor` is called out on its
-own line: without them the adapter and the meta-analysis would still run, on a weaker model.
-
-`test_job_env.sh` prints `SLURM_JOB_ID`, `SLURM_ARRAY_TASK_ID` and `SLURM_CPUS_PER_TASK` after
-`conda activate`, from bash and from R, checks that R's `tempdir()` is inside `TMPDIR`, and reads a
-~2 GB `.gz` with `fread()`. Set `TEST_GZ=/path/to/file.gz` to read a real chromosome file instead
-of the generated one. Its last line is `test_job_env: PASS` or `FAIL`.
-
-## Run record (B-03)
-
-Every launch of `slurm/submit_full_pipeline.sh` writes `results/run_record/<run_id>/`
-(`results/` is not committed):
-
-| file | written by | content |
-|---|---|---|
-| `params.tsv` | the launcher, before any job | every number-changing switch: `param`, `value`, `set_by` (`environment`, `default`, or `job` for a file the job picks at run time) |
-| `run_info.tsv` | the launcher | run id, git commit, uncommitted changes yes/no, launch time and host, partition, account, deferred steps, the finalise job id |
-| `jobs.tsv` | the launcher | every job it submitted: label, job id |
-| `trace.d/*.tsv` | each task, for itself | one row per task (see below) |
-| `trace.tsv` | the finalise job | all rows, plus `state`, `max_rss`, `elapsed` from `sacct` |
-| `summary.md` | the finalise job | tasks per step, exit codes, largest MaxRSS, longest Elapsed, the tasks that did not exit 0 |
-
-`run_id` is `<yyyymmdd-HHMM>_<git commit>_<n>`, computed once at launch and passed to every job;
-`n` keeps two launches in the same minute on the same commit apart. A trace row holds: step, Slurm
-ids, host, env and the sha256 of its yml (from `envs.tsv`), the sha256 of the job script, the
-command line, the md5 of each input, start, end and exit status, and the adapter's counts (`NA`:
-the adapter writes no file with them yet). Each task writes its own file, so concurrent array tasks
-never write to the same file. The row is written when the task starts, before the env is activated,
-and rewritten when it ends, so a task that fails at activation still has a row; a task killed by
-Slurm's time limit records exit 143, and one killed outright (out of memory) gets its exit status
-from `sacct` in `trace.tsv` (`exit_from` says which). Tasks that never started (cancelled after a
-failed dependency) are listed from `sacct` too.
-
-The finalise job (`bin/run_record_finalize.sh`) is submitted last, with
-`--dependency=afterany:<every job>`: it starts once all of them have ended, however they ended. It
-can be re-run by hand at any time: `bin/run_record_finalize.sh results/run_record/<run_id>`. Jobs
-submitted later by a running job (the GxG heterogeneity job) are not waited for; re-run it after
-them. A script submitted by hand, without the launcher, writes to `results/run_record/direct_<job id>/`.
-
-In R: `trace <- read.delim("results/run_record/<run_id>/trace.tsv", na.strings = "NA")`.
-
-The switch names are the ones the scripts read; their defaults are in `RR_SWITCHES` in
-`bin/run_record.sh`. The plan's `STRATUM_MIN_N` is `MIN_STRATUM_N` in the scripts; `PC_SCALE`,
-`MRMEGA_PCS` and `BUNDLE_RULES` are read by no script. The launcher refuses to start if any of these
-four is set, rather than ignore it.
+- **hyprcoloc** into `gwas-r` (needed only with `RUN_COLOC=true`): the command is in the header of
+  `envs/gwas-r.yml`;
+- **flare.jar** and Tractor's **extract_tracts_flare.py** into `lai`: where to get them is in the
+  header of `envs/lai.yml`;
+- **env-MR-MEGA** into `mrmega` (CP-29): it is in no conda channel; build it from the authors'
+  release (Wang et al., Communications Biology 2024, PMID 39543362) and copy the binary to
+  `$GWAS_ENVS_DIR/mrmega/bin/`. MR-MEGA itself comes with the env (bioconda `mr-mega=0.2`).
 
 ## Site notes
 
-(What was fetched by hand and when: flare.jar version, Tractor commit, env-MR-MEGA version.)
+(What was fetched by hand and when: flare.jar version, Tractor commit, hyprcoloc commit,
+env-MR-MEGA version.)

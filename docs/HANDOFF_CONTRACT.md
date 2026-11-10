@@ -14,7 +14,7 @@ exactly as written; the chromosome placeholder `{N}` is 1–22 with no `chr` pre
 | `genotypes/chr{N}.phased.dose.vcf.gz` + `.csi` | FLARE input (phased GT); SeqVarGDS source; Tractor extraction (per-haplotype dosages) | bgzipped VCF, hg38, `chr{N}` contigs, phased `GT` (`|`), `FORMAT/DS` present, **`FORMAT/HDS` declared `Number=2`**: per sample the expected ALT count on haplotype 1 and on haplotype 2 of the phased `GT`, with HDS1 + HDS2 = DS within 0.01 (rule 7); INFO carries the per-service quality field and the MagicalRsq-X score as `INFO/MRSQX`; sample order identical to `.fam` | Module 6 per-chromosome filtered VCFs (`FINAL_DOSAGE_VCF`, which writes an All of Us return's `FORMAT/AP1`,`AP2` as `FORMAT/HDS`) |
 | `ancestry/ancestry_calls.tsv` | stratification, per-stratum MAC gate, the label on every result, the 21 continuous scores as covariates or figures | tab-separated, 24 columns exactly: `sample_id AncGroupID MajorGroup GD1 GD2 GD3 EA1 EA2 EA3 EA4 AF1 AF2 AF3 EU1 EU2 EU3 SA1 SA2 IC1 IC2 IC3 Pe Pf Pa`. `AncGroupID` is one of GrafAnc 1.0.0's 46 three-digit codes; `MajorGroup` is derived from its hundreds digit (1 AFR, 2 MEN, 3 EUR, 4 SAS, 5 EAS, 6 AMR, 7 OCN, 8 MIX) — GrafAnc emits no text group itself. One row per `.fam` IID, no duplicates. Made by `grafanc_to_calls.sh`, which also survives GrafAnc's multi-round output (later rounds are *appended* with a repeated header) and strips an `FID_` prefix from `Sample` if that is what the `.fam` matches | Module 7 `01_grafanc`, from `*_grafanc_results.txt` |
 | `ancestry/grafanc_raw.txt` | audit only | GrafAnc's own 27-column output, untouched: `Sample #SNPs GD1-3 EA1-4 AF1-3 EU1-3 SA1-2 IC1-3 Pe Pf Pa RawPe RawPf RawPa AncGroupID` (tab-delimited with a header, inferred from the author's own reader) | Module 7 |
-| `ancestry/strata.tsv` | the analysis unit for every downstream result | tab-separated, header `sample_id stratum`; one row per `.fam` IID; strata already bundled by the rule in `strata_rule.txt` (floor: 50 per stratum, the same as the downstream `MIN_STRATUM_N`), MIX retained as its own stratum | Module 9, `ASSIGN_STRATA` |
+| `ancestry/strata.tsv` | the analysis unit for every downstream result; the adapter checks each stratum's Tractor samples against it (copied to `data/ancestry/strata.tsv`) | tab-separated, header `sample_id stratum`; one row per `.fam` IID; strata already bundled by the rule in `strata_rule.txt` (floor: 50 per stratum, the same as the downstream `MIN_STRATUM_N`), MIX retained as its own stratum | Module 9, `ASSIGN_STRATA` |
 | `ancestry/strata_rule.txt` | so a stratum set is reproducible | the floor, the bundling rule applied, and the list of groups bundled or dropped | Module 9, `ASSIGN_STRATA` |
 | `structure/cohort.pcair.pcs.tsv` | the whole-cohort PCs for the pooled analysis and as covariates | header `sample_id PC1 … PCn`; one row per `.fam` IID | Module 9 `STRUCTURE_COHORT` (PC-AiR, cohort scale) |
 | `structure/strata/<stratum>.pcair.pcs.tsv` | the within-stratum PCs for each stratified GENESIS run | one file per stratum in `strata.tsv`, same header, rows = that stratum's members | Module 9 `STRUCTURE_STRATUM` (PC-AiR, stratum scale) |
@@ -92,10 +92,16 @@ labels from `local_ancestry/ancestry_labels.txt` that the stratum's dosage and h
 one per line, in the same alphabetical order. `slurm/submit_gwas_array.sh` passes exactly that list
 as `--ancestries`; there is no cohort-wide default, and a stratum without the file is refused (the
 launcher refuses before queuing anything, each array task again, naming the path). The file is not
-part of the bundle, so `check_handoff_bundle.sh` does not look for it. The extraction step names the
-Tractor files by label (renaming FLARE's `anc0…ancK-1` through `flare_index_map.tsv`); the adapter
-falls back to position-numbered names only if label-named files are absent, and then the order of
-`ancestries.txt` would decide which ancestry each file is taken to be.
+part of the bundle, so `check_handoff_bundle.sh` does not look for it. The cohort-wide Tractor files
+(`data/tractor/all_chr.*`, used by GxG's pooled task and the PRS local-ancestry scores) have their
+list next to them in the same way, `data/tractor/ancestries.txt`.
+
+**Which file is which ancestry.** The extraction step names the Tractor files by label (renaming
+FLARE's `anc0…ancK-1` through `flare_index_map.tsv`). The adapter and the PRS scores read files
+named by label; numbered files are read only through an index map (`--ancestry_index_map`; on the
+SLURM path a copy of `local_ancestry/flare_index_map.tsv` at `data/tractor/flare_index_map.tsv`),
+and without one the run stops, naming the numbered files it found. An ancestry's position in
+`ancestries.txt` is never taken to be its file number.
 
 ## How to use it
 

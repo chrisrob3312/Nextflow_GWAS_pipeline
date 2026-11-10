@@ -145,8 +145,10 @@ nextflow run main.nf \
 
 ## Running on SLURM without Nextflow
 
-The same `bin/` scripts also run as plain SLURM jobs from `slurm/`. The site settings, the env
-build and the run record are described in [docs/HPC_SITE.md](docs/HPC_SITE.md); in short:
+The same `bin/` scripts also run as plain SLURM jobs from `slurm/`. The site settings to fill in
+are in [docs/HPC_SITE.md](docs/HPC_SITE.md); the setup and check steps are in the combined runbook
+(the harmonization repo's `genotyping_pipeline/benchmarking/SMOKE_RUNBOOK.md`, part "GWAS
+pipeline"); the run record is described in [docs/WORKFLOW.md](docs/WORKFLOW.md), section 9. In short:
 
 1. **Environments.** Build the four conda envs in `envs/` (`gwas-r`, `gwas-py`, `lai`, `mrmega`)
    into `$GWAS_ENVS_DIR`, run `bin/envs_tsv.sh` to record the sha256 of each yml in `envs.tsv`, and
@@ -172,10 +174,16 @@ build and the run record are described in [docs/HPC_SITE.md](docs/HPC_SITE.md); 
    smallest stratum analysed (default 50, decided 10 Nov 2026), and `MAC_MIN`, the minor allele
    count an ancestry's dose term needs (default 10; the handoff contract says 20, still open).
 4. **Ancestries per stratum.** Each stratum needs `data/tractor/<stratum>/ancestries.txt`, the
-   ancestry labels its Tractor files carry ([docs/HANDOFF_CONTRACT.md](docs/HANDOFF_CONTRACT.md)).
+   ancestry labels its Tractor files carry; GxG's pooled task and PRS read the cohort-wide
+   `data/tractor/ancestries.txt` ([docs/HANDOFF_CONTRACT.md](docs/HANDOFF_CONTRACT.md)). Tractor
+   files are read by ancestry label, or through `data/tractor/flare_index_map.tsv` when numbered;
+   never by their position in the list. With `data/ancestry/strata.tsv` present, the adapter
+   checks every sample against its stratum; a stratum under `MIN_STRATUM_N` analysable samples is
+   skipped, and the run record says so.
 5. **Run record.** Each launch writes `results/run_record/<run_id>/`: `params.tsv` (every
    number-changing switch) at launch, a row per task as it runs, and `trace.tsv` (with MaxRSS and
-   Elapsed from `sacct`) and `summary.md` once the final job, which waits on all the others, has run.
+   Elapsed from `sacct`, and the adapter's sample and variant counts) and `summary.md` once the final
+   job, which waits on all the others, has run.
 
 Logs go to `<repo>/logs/` (absolute paths; `LOG_DIR` to change). The wrappers under `shell/` are
 debug-only, not the execution path. `tests/test_chassis.sh` checks all of this locally with fake

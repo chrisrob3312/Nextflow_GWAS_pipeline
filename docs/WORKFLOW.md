@@ -189,7 +189,7 @@ flowchart TD
     S0 --> S1
     S2["STEP 2  combine per trait<br/>chr* -> <stratum>.sumstats.gz<br/>bin/meta_analyze_strata.R -> POOLED.sumstats.gz"]
     S3["STEP 3  submit_prs_array.sh<br/>6 PRS methods per trait<br/>RUN_PRS=true"]
-    S4["STEP 4  colocalization array<br/>6 QTL types x 3 methods<br/>RUN_COLOC=true"]
+    S4["STEP 4  colocalization, one array per trait<br/>results/gwas/&lt;trait&gt;/POOLED.sumstats.gz<br/>6 QTL types x 3 methods<br/>RUN_COLOC=true"]
     S5["STEP 5  PRS validation<br/>overall + per stratum<br/>RUN_VALIDATION=true"]
     S6["STEP 6  submit_gxg_array.sh<br/>per trait: POOLED + 7 strata,<br/>then ancestry-heterogeneity job<br/>RUN_GXG=true"]
     F["run record finalise<br/>afterany on every job<br/>trace.tsv + summary.md"]
@@ -205,11 +205,12 @@ launch prints the ones it deferred. The launcher needs `SLURM_PARTITION` and `SL
 the environment and puts them on every sbatch line, with absolute log paths under `LOG_DIR`
 (default `<repo>/logs`). Every job activates its conda env first (`source bin/activate_env.sh
 gwas-r`, which also puts `TMPDIR` on disk) and writes its row of the run record,
-`results/run_record/<run_id>/` (`params.tsv`, `trace.tsv`, `summary.md`). Site settings, the env
-build and the run record: `docs/HPC_SITE.md`.
+`results/run_record/<run_id>/` (section 9). Site settings: `docs/HPC_SITE.md`; setup and check
+steps: the combined runbook (the harmonization repo's `genotyping_pipeline/benchmarking/SMOKE_RUNBOOK.md`,
+part "GWAS pipeline").
 
 Results land under `results/gwas/<trait>/<stratum>/`, `results/prs/<trait>/`,
-`results/coloc/`, `results/gxg/<trait>/`.
+`results/coloc/<trait>/`, `results/gxg/<trait>/`.
 
 ## 7. Dual structure: both paths call the same scripts
 
@@ -243,3 +244,44 @@ across backgrounds. The per-stratum SLURM runs add stratum-level results
 background across strata. PRS adds the local-ancestry partial scores, and
 GxG reports every interaction pooled, per stratum, and for ancestry
 modification.
+
+## 9. Run record (SLURM)
+
+Every launch of `slurm/submit_full_pipeline.sh` writes `results/run_record/<run_id>/`
+(`results/` is not committed):
+
+| file | written by | content |
+|---|---|---|
+| `params.tsv` | the launcher, before any job | every number-changing switch: `param`, `value`, `set_by` (`environment`, `default`, or `job` for a file the job picks at run time) |
+| `run_info.tsv` | the launcher | run id, git commit, uncommitted changes yes/no, launch time and host, partition, account, deferred steps, the finalise job id |
+| `jobs.tsv` | the launcher | every job it submitted: label, job id |
+| `trace.d/*.tsv` | each task, for itself | one row per task (below) |
+| `trace.tsv` | the finalise job | all rows, plus `state`, `max_rss`, `elapsed` from `sacct`, `exit_from`, `task_status` |
+| `summary.md` | the finalise job | tasks per step: exit codes, strata skipped below `MIN_STRATUM_N`, largest MaxRSS, longest Elapsed; the tasks that did not exit 0; the adapter's totals |
+
+`run_id` is `<yyyymmdd-HHMM>_<git commit>_<n>`, computed once at launch and passed to every job; `n`
+keeps two launches in the same minute on the same commit apart. A trace row holds: step, Slurm ids,
+host, env and the sha256 of its yml (from `envs.tsv`), the sha256 of the job script, the command
+line, the md5 of each input, start, end and exit status. For GWAS tasks it also holds the adapter's
+counts from `<output_prefix>.run_counts.tsv`: `n_null` (samples in the null model), `n_tested`,
+`n_pass_mac`, `n_failed`, and `task_status` (`ok`, or `skipped_below_min_stratum_n`); other steps
+have `NA` there. Each task writes its own file, so concurrent array tasks never write to the same
+file. The row is written when the task starts, before the env is activated, and rewritten when it
+ends: a task that fails at activation still has a row, a task killed by Slurm's time limit records
+exit 143, and one killed outright (out of memory) gets its exit status from `sacct` (`exit_from`
+says which). Tasks that never started (cancelled after a failed dependency) are listed from `sacct`
+too.
+
+The finalise job (`bin/run_record_finalize.sh`) is submitted last, with
+`--dependency=afterany:<every job>`, so it starts once all of them have ended, however they ended.
+Re-run it by hand at any time: `bin/run_record_finalize.sh results/run_record/<run_id>`. Jobs
+submitted later by a running job (the GxG heterogeneity job) are not waited for; re-run it after
+them. A script submitted by hand, without the launcher, writes to
+`results/run_record/direct_<job id>/`.
+
+In R: `trace <- read.delim("results/run_record/<run_id>/trace.tsv", na.strings = "NA")`.
+
+The switch names are the ones the scripts read; their defaults are in `RR_SWITCHES` in
+`bin/run_record.sh`. `STRATUM_MIN_N` (the scripts read `MIN_STRATUM_N`), `PC_SCALE`, `MRMEGA_PCS`
+and `BUNDLE_RULES` are read by no script; the launcher refuses to start if any of them is set,
+rather than ignore it.
