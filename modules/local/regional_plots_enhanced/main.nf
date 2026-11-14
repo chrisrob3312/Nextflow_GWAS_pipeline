@@ -165,7 +165,7 @@ process MIAMI_PLOT {
     tag "$meta.trait"
     label 'process_low'
 
-    conda "conda-forge::r-base=4.3 conda-forge::r-ggplot2 conda-forge::r-dplyr"
+    conda "conda-forge::r-base=4.3 conda-forge::r-ggplot2 conda-forge::r-dplyr conda-forge::r-data.table"
     container "${ workflow.containerEngine == 'singularity' && !task.ext.singularity_pull_docker_container ?
         'https://depot.galaxyproject.org/singularity/r-ggplot2:3.4.4' :
         'quay.io/biocontainers/r-ggplot2:3.4.4' }"
@@ -195,15 +195,16 @@ process MIAMI_PLOT {
     library(ggplot2)
     library(dplyr)
 
-    # Read both summary stats
-    gwas1 <- read.table("${sumstats1}", header=TRUE, sep="\\t") %>%
+    # Read both summary stats through the shared column standardizer
+    # (Tractor-GENESIS P_JOINT, REGENIE LOG10P/GENPOS, SAIGE p.value, GENESIS Score.pval, PLINK2 ...)
+    source(Sys.which("sumstats_utils.R"))
+    gwas1 <- as.data.frame(read_sumstats_std("${sumstats1}")) %>%
         mutate(log10p = -log10(P), panel = "top")
-    gwas2 <- read.table("${sumstats2}", header=TRUE, sep="\\t") %>%
+    gwas2 <- as.data.frame(read_sumstats_std("${sumstats2}")) %>%
         mutate(log10p = log10(P), panel = "bottom")  # Negative for Miami
 
-    # Combine and prepare chromosome positions
+    # Combine (CHR is already numeric: X = 23, Y = 24)
     combined <- bind_rows(gwas1, gwas2) %>%
-        mutate(CHR = as.numeric(gsub("chr", "", CHR))) %>%
         filter(!is.na(CHR)) %>%
         arrange(CHR, POS)
 

@@ -2,7 +2,8 @@ process MANHATTAN_PLOT {
     tag "$meta.trait - $meta.ancestry"
     label 'process_low'
 
-    conda "conda-forge::r-base=4.3 conda-forge::r-qqman conda-forge::r-ggplot2"
+    // Column handling (Tractor-GENESIS, REGENIE, SAIGE, GENESIS, PLINK2, ...) is in bin/sumstats_utils.R
+    conda "conda-forge::r-base=4.3 conda-forge::r-data.table conda-forge::r-argparse"
     container "${ workflow.containerEngine == 'singularity' && !task.ext.singularity_pull_docker_container ?
         'docker://your-registry/gwas-plots:latest' :
         'your-registry/gwas-plots:latest' }"
@@ -20,15 +21,17 @@ process MANHATTAN_PLOT {
 
     script:
     def args = task.ext.args ?: ''
-    prefix = task.ext.prefix ?: "${meta.trait}.${meta.ancestry}"
+    prefix = task.ext.prefix ?: "${meta.trait}.${meta.ancestry ?: 'ALL'}"
+    def per_anc = (params.plot_per_ancestry == null || params.plot_per_ancestry) ? '--per-ancestry' : ''
     """
-    Rscript create_manhattan_plot.R \\
+    create_manhattan_plot.R \\
         --sumstats ${sumstats} \\
         --lambda-gc ${lambda_gc} \\
         --output-prefix ${prefix} \\
-        --title "${meta.trait} - ${meta.ancestry}" \\
-        --genome-wide 5e-8 \\
-        --suggestive 1e-5 \\
+        --title "${meta.trait} - ${meta.ancestry ?: 'ALL'}" \\
+        --genome-wide ${params.p_threshold ?: 5e-8} \\
+        --suggestive ${params.suggestive_threshold ?: 1e-5} \\
+        ${per_anc} \\
         $args
 
     cat <<-END_VERSIONS > versions.yml

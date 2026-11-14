@@ -25,7 +25,8 @@ def detect_columns(df: pd.DataFrame) -> dict:
     chr_patterns = ["CHR", "CHROM", "#CHROM", "chromosome", "chr"]
     pos_patterns = ["POS", "BP", "GENPOS", "position", "pos"]
     snp_patterns = ["SNP", "ID", "RSID", "variant_id", "MarkerName"]
-    p_patterns = ["P", "PVALUE", "P_VALUE", "LOG10P", "p.value", "P-value"]
+    # P_JOINT first so Tractor-GENESIS files use the joint test, not a per-ancestry P_<anc>
+    p_patterns = ["P_JOINT", "P", "PVALUE", "P_VALUE", "PVAL", "LOG10P", "p.value", "P-value", "Score.pval", "P_META", "P_BOLT_LMM"]
     beta_patterns = ["BETA", "EFFECT", "B", "beta", "Effect"]
     se_patterns = ["SE", "STDERR", "se", "StdErr"]
     af_patterns = ["A1FREQ", "AF", "MAF", "EAF", "Freq", "freq"]

@@ -22,16 +22,15 @@ process LAMBDA_GC {
     prefix = task.ext.prefix ?: "${meta.id}.${meta.trait}"
     """
     #!/usr/bin/env Rscript
-    library(data.table)
-    ss <- fread("${sumstats}")
-    pc <- intersect(c("P_JOINT","P","PVAL","pvalue","p.value","P_META"), names(ss))[1]
-    lp <- intersect(c("LOG10P"), names(ss))[1]
-    p <- if (!is.na(pc)) ss[[pc]] else if (!is.na(lp)) 10^(-ss[[lp]]) else stop("No P column")
-    p <- p[!is.na(p) & p > 0 & p <= 1]
+    # Column handling for every GWAS layout lives in bin/sumstats_utils.R
+    source(Sys.which("sumstats_utils.R"))
+    ss <- read_sumstats_std("${sumstats}")
+    p <- ss\$P
     chisq <- qchisq(p, df = 1, lower.tail = FALSE)
     lambda <- median(chisq) / qchisq(0.5, df = 1)
-    writeLines(c(paste0("lambda_gc\\t", signif(lambda, 4)), paste0("n_variants\\t", length(p))), "${prefix}.lambda.txt")
-    cat("lambda GC:", signif(lambda, 4), "\\n")
+    writeLines(c(paste0("lambda_gc\\t", signif(lambda, 4)), paste0("n_variants\\t", length(p)),
+                 paste0("source_format\\t", attr(ss, "source_format"))), "${prefix}.lambda.txt")
+    cat("lambda GC:", signif(lambda, 4), "(", attr(ss, "source_format"), ")\\n")
     writeLines(c('"${task.process}":', '    lambda_gc: "1.0.0"'), "versions.yml")
     """
 }

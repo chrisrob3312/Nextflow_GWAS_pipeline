@@ -36,11 +36,12 @@ workflow VISUALIZATION {
     ch_plots = ch_plots.mix(QQ_PLOT.out.plots.map { m, f -> f })
     ch_versions = ch_versions.mix(QQ_PLOT.out.versions)
 
-    if (gene_annotation) {
-        REGIONAL_PLOT(ch_significant, gene_annotation)
-        ch_plots = ch_plots.mix(REGIONAL_PLOT.out.plots.map { m, f -> f })
-        ch_versions = ch_versions.mix(REGIONAL_PLOT.out.versions)
-    }
+    // Regional plots need the FULL sumstats (for the window) plus the loci list
+    ch_regional_input = ch_gwas_results.join(ch_significant, remainder: true)
+        .map { meta, ss, sig -> [meta, ss, sig ?: []] }
+    REGIONAL_PLOT(ch_regional_input, gene_annotation ?: [])
+    ch_plots = ch_plots.mix(REGIONAL_PLOT.out.plots.map { m, f -> f })
+    ch_versions = ch_versions.mix(REGIONAL_PLOT.out.versions)
 
     // Miami: each stratum vs the reference stratum (EUR if present, else first)
     ch_for_miami = ch_gwas_results
