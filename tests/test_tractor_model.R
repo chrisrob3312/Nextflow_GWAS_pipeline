@@ -7,6 +7,7 @@
 suppressPackageStartupMessages({ library(Matrix); library(survival) })
 here <- local({ f <- sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)); if (length(f)) dirname(normalizePath(f[1])) else "tests" })
 source(file.path(here, "..", "bin", "tractor_model.R"))
+source(file.path(here, "..", "bin", "landmark.R"))
 pass <- 0; fail <- 0
 check <- function(name, ok) { if (isTRUE(ok)) { pass <<- pass + 1; cat("ok  ", name, "\n") } else { fail <<- fail + 1; cat("FAIL", name, "\n") } }
 
@@ -78,6 +79,35 @@ dA <- rbinom(n, la, 0.4); dE <- rbinom(n, 2 - la, 0.2)
 r <- test_variant_tractor(list(AFR = la), list(AFR = dA, EUR = dE), list(AFR = la, EUR = 2 - la), ops0, c("AFR", "EUR"), "EUR", mac_min = 5)
 check("k=2: joint test on 2 df, both backgrounds estimated, heterogeneity on 1 df",
       r$status == "ok" && r$joint$df == 2 && !is.na(r$marginal$AFR$beta) && !is.na(r$marginal$EUR$beta) && r$het$df == 1)
+# --- stratified Cox (COX_STRATA, decided 17 Nov 2026): one baseline hazard per level -------------
+lev <- sample(1:4, n, TRUE)                                     # e.g. the four MRD levels
+ops_s <- cox_ops(time, event, rep(0, n), NULL, strata = lev)
+rs <- tv(g, mac_min = 1, ops = ops_s)
+sc_s <- unname(summary(coxph(Surv(time, event) ~ g + strata(lev), ties = "breslow"))$sctest[1])
+check(sprintf("stratified: score statistic %.6f equals coxph(... + strata())'s %.6f", rs$joint$stat, sc_s), abs(rs$joint$stat - sc_s) < 1e-6)
+check("stratified: four levels, four baselines (n_strata 4)", ops_s$n_strata == 4)
+check("stratified on one level: identical to the unstratified test", abs(tv(g, mac_min = 1, ops = cox_ops(time, event, rep(0, n), NULL, strata = rep(1, n)))$joint$stat - sc) < 1e-9)
+fit0s <- coxph(Surv(time, event) ~ age + strata(lev), ties = "breslow")
+ops_s1 <- cox_ops(time, event, as.numeric(fit0s$linear.predictors), matrix(age, ncol = 1), strata = lev)
+rs <- tv(g, mac_min = 1, ops = ops_s1)
+f1s <- coxph(Surv(time, event) ~ age + g + strata(lev), ties = "breslow", init = c(coef(fit0s), 0), control = coxph.control(iter.max = 0))
+check(sprintf("stratified, with a covariate: score statistic %.6f equals coxph's %.6f", rs$joint$stat, f1s$score), abs(rs$joint$stat - f1s$score) < 1e-6)
+lev2 <- lev; lev2[1:6] <- 5; ev2 <- event; ev2[1:6] <- 0; lev2[7] <- 6     # a level with no events, a level of one person
+rs <- tv(g, mac_min = 1, ops = cox_ops(time, ev2, rep(0, n), NULL, strata = lev2))
+sc2 <- unname(summary(coxph(Surv(time, ev2) ~ g + strata(lev2), ties = "breslow"))$sctest[1])
+check(sprintf("stratified with an event-free level and a one-person level: %.6f equals coxph's %.6f", rs$joint$stat, sc2), abs(rs$joint$stat - sc2) < 1e-6)
+
+# --- the end-of-induction landmark and the sample subset (bin/landmark.R) ---------------------
+lm <- landmark_eoi(c(10, 30, 50, NA, 40, 29), c(1, 0, 1, 1, NA, 1), c(29, 29, NA, 29, 29, 29))
+check("landmark: time - eoi_day; event at day 10 and at day 29 (= eoi_day) left out; no eoi_day left out",
+      identical(lm$time, c(NA, 1, NA, NA, NA, NA)) && identical(lm$excluded, c(TRUE, FALSE, TRUE, FALSE, FALSE, TRUE)))
+check("landmark: counts 2 at or before eoi_day, 1 without eoi_day; NA time or event left to the complete-case filter",
+      lm$n_before == 2 && lm$n_no_eoi == 1)
+ss <- parse_sample_subset("study_group=REDIAL, SJ_TXV")
+check("parse_sample_subset: column study_group, values REDIAL and SJ_TXV", ss$column == "study_group" && identical(ss$values, c("REDIAL", "SJ_TXV")))
+check("parse_sample_subset: 'REDIAL' (no column) and 'study_group=' (no value) are refused",
+      inherits(try(parse_sample_subset("REDIAL"), silent = TRUE), "try-error") && inherits(try(parse_sample_subset("study_group="), silent = TRUE), "try-error"))
+
 row <- result_row(list(CHR = "22", POS = 1L, ID = "22:1:A:G", REF = "A", ALT = "G"), r, c("AFR", "EUR"), "LAT1")
 check("result_row: STRATUM first, then CHR POS ID REF ALT N MAC_STRATUM", identical(names(row)[1:8], c("STRATUM", "CHR", "POS", "ID", "REF", "ALT", "N", "MAC_STRATUM")))
 

@@ -5,6 +5,15 @@ Decision (30 Oct 2026): env-MR-MEGA is on the path, not deferred. The environmen
 the unit of meta-regression, how the covariate is built from the handoff bundle, and what the fixture test
 has to show. The implementation is Track B task CP-29 (bash + SLURM, in the `mrmega` conda env).
 
+Decision (17 Nov 2026): the meta-analysis combines **four study groups** — COG P9900s (`COG_P9900`),
+COG AALL0232 + AALL0331 (`COG_AALL0232_0331`), St. Jude Total XV (`SJ_TXV`) and REDIAL (`REDIAL`),
+shipped as the `study_group` column of `phenotypes.tsv` — with **MR-MEGA primary and env-MR-MEGA the
+sensitivity analysis**. Each per-study GWAS adjusts for sex, age at diagnosis, NCI risk group,
+cytogenetic risk (favorable / unfavorable / neutral-unknown) and its within-stratum PCs. The unit that
+decision implies is study group × ancestry stratum; those units are **not built yet** (`docs/WORKFLOW.md`
+section 11), so the unit below is still the ancestry stratum, and CP-29 is where the study × stratum
+units go.
+
 ## The model
 
 MR-MEGA (Mägi et al. 2017) meta-regresses each variant's per-study effect on the first `pc_axes` axes of

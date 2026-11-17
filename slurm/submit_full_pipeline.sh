@@ -9,7 +9,7 @@
 #      compute them with PC-AiR / PC-Relate (=compute); skip with SKIP_PCAIR=true
 #   1. GWAS: Run Tractor-GENESIS for each ancestry stratum (22 chr × 5 strata)
 #   2. Combine: Merge chromosomes, run meta-analysis for OTHER
-#   3. PRS: Run 6 methods × 3 traits                         only with RUN_PRS=true
+#   3. PRS: Run 6 methods × each trait                       only with RUN_PRS=true
 #   4. Colocalization per trait, all QTL types                 only with RUN_COLOC=true
 #   5. Validation: Compare methods overall and by ancestry    only with RUN_VALIDATION=true (needs RUN_PRS)
 #   6. GxG interaction on the GWAS hits                       only with RUN_GXG=true
@@ -62,10 +62,21 @@ export LOG_DIR
 # that params.tsv records.
 #   STRATA_LIST="EUR,AFR"                   strata analysed; default: every stratum in the bundle's
 #                                           ancestry/strata.tsv (strata are assigned upstream)
-#   TRAITS_LIST="mrd,efs,os"               phenotype columns, as the handoff contract names them
+#   TRAITS_LIST="mrd,mrd_level,efs,os"     phenotype columns, as the handoff contract names them
 #   SURVIVAL_TRAITS="efs,os"                traits run as time-to-event, each with its own columns
 #                                           <trait>_time and <trait>_event (TIME_COL_<trait> /
-#                                           EVENT_COL_<trait> override one trait); the rest are binary
+#                                           EVENT_COL_<trait> override one trait)
+#   QUANTITATIVE_TRAITS="mrd_level"         traits run with the linear (gaussian) null; the rest are binary
+#   TIME_ORIGIN=eoi|diagnosis               survival clock: eoi (default) = from the end of induction,
+#                                           <trait>_time - eoi_day, leaving out (and counting) a child
+#                                           whose event or censoring is at or before eoi_day
+#   COX_STRATA=mrd_level                    survival only: each level gets its own baseline hazard;
+#                                           empty = none (decided 17 Nov 2026)
+#   COX_EXTRA_COVARIATES=                   survival only: covariates added to COVARIATES, e.g. the
+#                                           MRD-adjusted arm: COX_STRATA= COX_EXTRA_COVARIATES=mrd_level
+#                                           RUN_LABEL=mrd_adjusted
+#   SAMPLE_SUBSET=study_group=REDIAL        restrict every GWAS to the rows whose column has one of
+#                                           the values (e.g. the REDIAL-only GWAS); needs a RUN_LABEL
 #   COVARIATES="sex,age_at_diagnosis,PC1"  numeric phenotype columns, used by GWAS and GxG; default:
 #                                           the bundle's phenotypes/covariates.txt, then PC1..PC5
 #   GXG_CUSTOM_VARIANTS=/path/list.txt      optional GRCh38 variant list for GxG
@@ -111,6 +122,30 @@ for stratum in "${STRATA[@]}"; do
         && { echo "REFUSED: STRATA_LIST names MIX, but MIX_RETAIN=false" >&2; exit 2; }
 done
 IFS=',' read -ra TRAITS <<< "${TRAITS_LIST}"
+# A trait is one model: survival, quantitative, or (neither list) binary
+for trait in "${TRAITS[@]}"; do
+    if trait_is_survival "$trait" && trait_is_quantitative "$trait"; then
+        echo "REFUSED: trait ${trait} is in both SURVIVAL_TRAITS and QUANTITATIVE_TRAITS" >&2; exit 2
+    fi
+done
+# SAMPLE_SUBSET (decided 17 Nov 2026): a sub-cohort GWAS (e.g. study_group=REDIAL) must not overwrite
+# the full-cohort results, so it needs its own RUN_LABEL. PRS and GxG do not apply the subset, so
+# they are refused alongside it rather than run on the full cohort under the subset's label.
+if [[ -n "${SAMPLE_SUBSET}" ]]; then
+    [[ "${SAMPLE_SUBSET}" =~ ^[A-Za-z][A-Za-z0-9_.]*=[^=]+$ ]] \
+        || { echo "REFUSED: SAMPLE_SUBSET=${SAMPLE_SUBSET}; expected column=value[,value...] (e.g. study_group=REDIAL)" >&2; exit 2; }
+    [[ -n "${RUN_LABEL:-}" ]] \
+        || { echo "REFUSED: SAMPLE_SUBSET=${SAMPLE_SUBSET} needs a RUN_LABEL (e.g. RUN_LABEL=redial_only), so the full-cohort results are not overwritten" >&2; exit 2; }
+    [[ "${RUN_PRS}" == true || "${RUN_GXG}" == true ]] \
+        && { echo "REFUSED: SAMPLE_SUBSET is applied by the GWAS only; PRS and GxG would run on the full cohort (set RUN_PRS=false RUN_GXG=false)" >&2; exit 2; }
+fi
+# COX_EXTRA_COVARIATES must not repeat the stratifying column (or, below, a covariate in COVARIATES)
+if [[ -n "${COX_EXTRA_COVARIATES}" ]]; then
+    IFS=',' read -ra _cx <<< "${COX_EXTRA_COVARIATES}"
+    for c in "${_cx[@]}"; do
+        [[ "$c" == "${COX_STRATA}" ]] && { echo "REFUSED: ${c} is both COX_STRATA and in COX_EXTRA_COVARIATES (stratify on it or adjust for it, not both)" >&2; exit 2; }
+    done
+fi
 
 # Steps 2b and 3-6 run only when asked for (their RUN_* are true / false: rr_check_domains above)
 if [[ "${RUN_VALIDATION}" == true && "${RUN_PRS}" != true ]]; then
@@ -146,9 +181,11 @@ if [[ ${#MISSING_ANC[@]} -gt 0 ]]; then
     fi
 fi
 
-# Every trait's columns must be in the phenotype file: a binary trait its own column, a survival
-# trait <trait>_time and <trait>_event (or its TIME_COL_<trait> / EVENT_COL_<trait>). Checked
-# here, on the header, before anything is queued. A dry run warns; a launch refuses.
+# Every trait's columns must be in the phenotype file: a binary or quantitative trait its own
+# column, a survival trait <trait>_time and <trait>_event (or its TIME_COL_<trait> /
+# EVENT_COL_<trait>), plus eoi_day under TIME_ORIGIN=eoi, the COX_STRATA column and any
+# COX_EXTRA_COVARIATES; SAMPLE_SUBSET's column, with at least one row matching. Checked here,
+# before anything is queued. A dry run warns; a launch refuses.
 PHENO_SOURCE="${PHENO_IN:-${HANDOFF_DIR}/phenotypes/phenotypes.tsv}"
 PHENO_HEADER=""
 [[ -s "${PHENO_SOURCE}" ]] && PHENO_HEADER="$(head -1 "${PHENO_SOURCE}" | tr '\t' '\n')"
@@ -159,6 +196,9 @@ for trait in "${TRAITS[@]}"; do
     if trait_is_survival "$trait"; then
         need=("$(trait_time_col "$trait")" "$(trait_event_col "$trait")")
         SURV_COLS+=("${trait}:${need[0]}/${need[1]}")
+        [[ "${TIME_ORIGIN}" == eoi ]] && need+=(eoi_day)
+        [[ -n "${COX_STRATA}" ]] && need+=("${COX_STRATA}")
+        [[ -n "${COX_EXTRA_COVARIATES}" ]] && { IFS=',' read -ra _cx <<< "${COX_EXTRA_COVARIATES}"; need+=("${_cx[@]}"); }
     else
         need=("$trait")
     fi
@@ -169,6 +209,17 @@ for trait in "${TRAITS[@]}"; do
     fi
 done
 [[ -s "${PHENO_SOURCE}" ]] || PHENO_PROBLEMS+=("phenotype file ${PHENO_SOURCE} is missing or empty")
+if [[ -n "${SAMPLE_SUBSET}" && -s "${PHENO_SOURCE}" ]]; then
+    SUBSET_COL="${SAMPLE_SUBSET%%=*}"
+    if grep -qxF -- "${SUBSET_COL}" <<< "${PHENO_HEADER}"; then
+        SUBSET_N="$(awk -F'\t' -v col="${SUBSET_COL}" -v vals="${SAMPLE_SUBSET#*=}" '
+            NR == 1 { for (i = 1; i <= NF; i++) if ($i == col) c = i; n = split(vals, v, ","); for (j = 1; j <= n; j++) { gsub(/^ +| +$/, "", v[j]); want[v[j]] = 1 }; next }
+            ($c in want) { k++ } END { print k + 0 }' "${PHENO_SOURCE}")"
+        [[ "${SUBSET_N}" -gt 0 ]] || PHENO_PROBLEMS+=("SAMPLE_SUBSET=${SAMPLE_SUBSET}: no row of ${PHENO_SOURCE} has ${SUBSET_COL} = ${SAMPLE_SUBSET#*=}")
+    else
+        PHENO_PROBLEMS+=("SAMPLE_SUBSET=${SAMPLE_SUBSET}: column ${SUBSET_COL} is not in ${PHENO_SOURCE}")
+    fi
+fi
 if [[ ${#PHENO_PROBLEMS[@]} -gt 0 ]]; then
     if [[ $DRY_RUN == 1 ]]; then
         printf 'WARNING: %s (a launch would refuse)\n' "${PHENO_PROBLEMS[@]}"
@@ -198,6 +249,13 @@ if [[ "${RR_SET_BY[COVARIATES]}" == job ]]; then
     export COVARIATES
 fi
 [[ -z "${COVARIATES}" ]] || rr_check_domains COVARIATES || exit 2
+# once COVARIATES is resolved (the bundle's list when unset): COX_EXTRA_COVARIATES must add, not repeat
+if [[ -n "${COX_EXTRA_COVARIATES}" ]]; then
+    IFS=',' read -ra _cx <<< "${COX_EXTRA_COVARIATES}"
+    for c in "${_cx[@]}"; do
+        [[ ",${COVARIATES}," == *",${c},"* ]] && { echo "REFUSED: ${c} is in both COVARIATES and COX_EXTRA_COVARIATES" >&2; exit 2; }
+    done
+fi
 COV_PROBLEMS=()
 [[ -n "${COVARIATES}" ]] || COV_PROBLEMS+=("no covariates: COVARIATES is not set and ${HANDOFF_DIR}/phenotypes/covariates.txt is missing")
 PC_FILES=()        # the files whose PC columns the tasks will use, where they exist already
@@ -227,6 +285,15 @@ if [[ ${#COV_PROBLEMS[@]} -gt 0 ]]; then
     else printf 'REFUSED: %s\n' "${COV_PROBLEMS[@]}" >&2; exit 2; fi
 fi
 RR_EXTRA_PARAMS="$(printf 'SURVIVAL_COLUMNS\t%s\tderived\nHANDOFF_DIR\t%s\tderived' "$(IFS=,; echo "${SURV_COLS[*]:-none}")" "${HANDOFF_DIR}")"
+# The landmark's column, and what downstream steps do with the clock: PRS validation and GxG read
+# the times as shipped (from diagnosis) and do not stratify on COX_STRATA yet (docs/WORKFLOW.md, not done)
+if [[ ${#SURV_COLS[@]} -gt 0 && "${TIME_ORIGIN}" == eoi ]]; then
+    RR_EXTRA_PARAMS+="$(printf '\nEOI_COLUMN\teoi_day\tderived')"
+    if [[ "${RUN_PRS}" == true || "${RUN_GXG}" == true ]]; then
+        echo "NOTE: TIME_ORIGIN=eoi applies to the GWAS; PRS validation and GxG still count survival time from diagnosis"
+        RR_EXTRA_PARAMS+="$(printf '\nDOWNSTREAM_TIME_ORIGIN\tdiagnosis (PRS validation and GxG do not apply the landmark yet)\tderived')"
+    fi
+fi
 
 DEFERRED=()
 for step in PRS COLOC VALIDATION GXG MRMEGA; do
@@ -249,7 +316,11 @@ export GWAS_RUN_ID GWAS_RUN_DIR
 export GWAS_QC_DIR="${GWAS_RUN_DIR}/qc"
 [[ $DRY_RUN == 1 ]] || rr_write_launch_record "${GWAS_RUN_DIR}" "$0" "$@"
 
-trait_model() { if trait_is_survival "$1"; then echo survival; else echo binary; fi; }
+trait_model() {
+    if trait_is_survival "$1"; then echo survival
+    elif trait_is_quantitative "$1"; then echo quantitative
+    else echo binary; fi
+}
 
 # QTL types for colocalization
 QTL_TYPES=("eqtl" "sqtl" "pqtl" "mqtl" "caqtl" "hqtl")
@@ -365,7 +436,9 @@ fi
 # STEP 1: Tractor-GENESIS GWAS for every trait x stratum (array over chromosomes)
 # ============================================================================
 # ALL traits use the same adapter so they are comparable:
-#   mrd -> binary (logistic null), efs/os -> survival (Cox null + PC-Relate GRM)
+#   mrd -> binary (logistic null), mrd_level -> quantitative (linear null, the four MRD levels as
+#   a trend), efs/os -> survival (Cox null + PC-Relate GRM; from the end of induction under
+#   TIME_ORIGIN=eoi, baseline stratified on COX_STRATA)
 echo ""
 echo "STEP 1: Submitting Tractor-GENESIS GWAS jobs..."
 declare -A GWAS_JOBS

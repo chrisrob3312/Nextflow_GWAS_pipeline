@@ -168,6 +168,7 @@ bundle_strata() {
 }
 
 trait_is_survival() { [[ ",${SURVIVAL_TRAITS-$(rr_default SURVIVAL_TRAITS)}," == *",$1,"* ]]; }
+trait_is_quantitative() { [[ ",${QUANTITATIVE_TRAITS-$(rr_default QUANTITATIVE_TRAITS)}," == *",$1,"* ]]; }
 
 # Print a command so it can be read, and pasted back into a shell: plain words as they are,
 # anything with spaces or special characters quoted. Used by the DRY_RUN modes.

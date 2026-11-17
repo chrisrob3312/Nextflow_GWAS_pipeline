@@ -9,10 +9,14 @@
 #   <prefix>.dosage.<ANC>.txt.gz     same columns                        ALT alleles on them (0-2)
 #   <prefix>.phenotypes.tsv          FID IID sample_id mrd efs_time efs_event os_time os_event protocol
 #                                    sex age_at_diagnosis cd19_pos_pct storage_days PC1 PC2
+#                                    mrd_level eoi_day study_group (no extra random draws: mrd_level
+#                                    from mrd and the variant-10 dosage, eoi_day = eoi, study_group
+#                                    alternating REDIAL / COG)
 #   <prefix>.samples.txt             the sample IDs, one per line
 # usage: Rscript tests/toy/make_toy_tractor.R <prefix> [n_samples=120] [n_variants=200] [ancestries=AFR,EUR]
-#        [chrom=22] [seed=1] [na_rows=K] [id_prefix=T]
+#        [chrom=22] [seed=1] [na_rows=K] [id_prefix=T] [eoi=0]
 #   na_rows=K   the first K samples get NA for mrd and os_time (complete-case checks)
+#   eoi=D       every sample's eoi_day (end of induction, days); 0 leaves the landmark a no-op
 # The hapcount of each sample sums to 2 across ancestries; the dosage is <= the hapcount.
 # ============================================================================
 a <- commandArgs(trailingOnly = TRUE)
@@ -70,6 +74,9 @@ ph <- data.frame(FID = ids, IID = ids, sample_id = ids,
                  sex = sex, age_at_diagnosis = age, cd19_pos_pct = round(runif(n, 50, 99), 1),
                  storage_days = sample(100:3000, n, TRUE), PC1 = round(rnorm(n), 4), PC2 = round(rnorm(n), 4))
 if (na_rows > 0) { ph$mrd[seq_len(na_rows)] <- NA; ph$os_time[seq_len(na_rows)] <- NA }
+ph$mrd_level <- ifelse(ph$mrd == 0, 1L, 2L + pmin(2L, as.integer(floor(g))))
+ph$eoi_day <- as.numeric(opt("eoi", "0"))
+ph$study_group <- rep(c("REDIAL", "COG"), length.out = n)
 write.table(ph, paste0(prefix, ".phenotypes.tsv"), sep = "\t", quote = FALSE, row.names = FALSE, na = "NA")
 writeLines(ids, paste0(prefix, ".samples.txt"))
 cat("toy Tractor set:", prefix, "-", n, "samples,", m, "variants on chr", chrom, ", ancestries", paste(anc, collapse = ","),

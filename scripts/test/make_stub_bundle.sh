@@ -76,9 +76,11 @@ printf 'AFR\nAMR\nEUR\n' > local_ancestry/ancestry_labels.txt
 printf 'anc_index\tlabel\n0\tEUR\n1\tAFR\n2\tAMR\n' > local_ancestry/flare_index_map.tsv
 for n in "${CHROMS[@]}"; do printf 'placeholder flare vcf chr%s\n' "$n" | gzip -c > "local_ancestry/flare/chr${n}.anc.vcf.gz"; printf 'csi' > "local_ancestry/flare/chr${n}.anc.vcf.gz.csi"; done
 
-# phenotypes: MRD (binary), EFS and OS (time, event), four covariates
-{ printf 'FID\tIID\tsample_id\tmrd\tefs_time\tefs_event\tos_time\tos_event\tprotocol\tsex\tage_at_diagnosis\tcd19_pos_pct\tstorage_days\n'
-  i=0; protos=(P1 P2 P3); for s in "${SAMPLES[@]}"; do printf 'F_%s\t%s\t%s\t%d\t%s\t%d\t%s\t%d\t%s\t%d\t%d\t%s\t%d\n' "$s" "$s" "$s" $((i % 2)) "$((300 + i * 10)).5" $((i % 2)) "$((400 + i * 10))" $(( (i + 1) % 2 )) "${protos[$((i % 3))]}" $((1 + i % 2)) $((5 + i)) "9$i.5" $((100 + i)); i=$((i + 1)); done; } > phenotypes/phenotypes.tsv
+# phenotypes: MRD (binary) and its level (1-4), EFS and OS (time, event; days from diagnosis), four
+# covariates, then the end of induction (eoi_day: day 29, day 46 at St. Jude) and the study group
+{ printf 'FID\tIID\tsample_id\tmrd\tefs_time\tefs_event\tos_time\tos_event\tprotocol\tsex\tage_at_diagnosis\tcd19_pos_pct\tstorage_days\tmrd_level\teoi_day\tstudy_group\n'
+  i=0; protos=(P1 P2 P3); groups=(COG_P9900 COG_AALL0232_0331 SJ_TXV REDIAL); eoi=(29 29 46 29)
+  for s in "${SAMPLES[@]}"; do printf 'F_%s\t%s\t%s\t%d\t%s\t%d\t%s\t%d\t%s\t%d\t%d\t%s\t%d\t%d\t%d\t%s\n' "$s" "$s" "$s" $((i % 2)) "$((300 + i * 10)).5" $((i % 2)) "$((400 + i * 10))" $(( (i + 1) % 2 )) "${protos[$((i % 3))]}" $((1 + i % 2)) $((5 + i)) "9$i.5" $((100 + i)) $(( i % 2 == 0 ? 1 : 3 )) "${eoi[$((i % 4))]}" "${groups[$((i % 4))]}"; i=$((i + 1)); done; } > phenotypes/phenotypes.tsv
 printf 'sex\nage_at_diagnosis\ncd19_pos_pct\nstorage_days\n' > phenotypes/covariates.txt
 
 # qc and run record

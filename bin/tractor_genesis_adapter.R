@@ -70,6 +70,15 @@ option_list <- list(
                 help = "Time column for survival analysis [default: time]"),
     make_option(c("--event_col"), type = "character", default = "event",
                 help = "Event column for survival (1=event, 0=censored) [default: event]"),
+    make_option(c("--time_origin"), type = "character", default = "diagnosis",
+                help = paste("Survival time origin. diagnosis: the times as given. eoi: the end of induction (a landmark):",
+                             "time - --eoi_col, and a child whose event or censoring is at or before that day, or who has",
+                             "no value for it, is left out and counted (bin/landmark.R) [default: diagnosis]")),
+    make_option(c("--eoi_col"), type = "character", default = "eoi_day",
+                help = "Column with each child's end-of-induction day, in the time column's unit, from diagnosis [default: eoi_day]"),
+    make_option(c("--cox_strata"), type = "character", default = NULL,
+                help = paste("Survival only: a phenotype column whose levels each get their own Cox baseline hazard",
+                             "(e.g. mrd_level); one genotype effect across levels. Missing values are dropped as for a covariate")),
 
     # Ancestry specification (FLEXIBLE - any populations)
     make_option(c("-a", "--ancestries"), type = "character", default = NULL,
@@ -127,6 +136,9 @@ option_list <- list(
     make_option(c("--sample_include"), type = "character", default = NULL,
                 help = paste("File of sample IDs (one per line; results/strata/<S>.samples.txt) the analysis is",
                              "restricted to, intersected with the phenotype and Tractor samples")),
+    make_option(c("--sample_subset"), type = "character", default = NULL,
+                help = paste("column=value[,value...]: analyse only the samples whose phenotype column has one of",
+                             "these values (e.g. study_group=REDIAL for a REDIAL-only GWAS); counted in sample accounting")),
     make_option(c("--min_stratum_n"), type = "integer", default = 50,
                 help = paste("Fewer analysable samples than this: the stratum is skipped (exit 0, no results,",
                              "status skipped_below_min_stratum_n in <output_prefix>.run_counts.tsv) [default: 50]")),
@@ -155,6 +167,9 @@ if (is.null(opt$tractor_prefix) && is.null(opt$msp)) {
 }
 
 if (!opt$read_mode %in% c("stream", "full")) stop("--read_mode must be stream or full")
+if (!opt$model %in% c("binary", "quantitative", "survival")) stop("--model must be binary, quantitative or survival (got '", opt$model, "')")
+if (!opt$time_origin %in% c("diagnosis", "eoi")) stop("--time_origin must be diagnosis or eoi (got '", opt$time_origin, "')")
+if (!is.null(opt$cox_strata) && opt$model != "survival") stop("--cox_strata applies to --model survival only")
 if (!is.null(opt$msp) || !is.null(opt$gds)) {
     stop("--msp / --gds (RFMix input) is not implemented: pass the Tractor files with --tractor_prefix")
 }
@@ -203,6 +218,7 @@ source(file.path(.adapter_dir, "tractor_io.R"))
 source(file.path(.adapter_dir, "qc_assert.R"))    # qc_assert / qc_account (CP-11), check_covariates (CP-08)
 source(file.path(.adapter_dir, "sumstats_io.R"))
 source(file.path(.adapter_dir, "tractor_model.R")) # the score test (genesis_ops, cox_ops, test_variant_tractor)
+source(file.path(.adapter_dir, "landmark.R"))      # landmark_eoi (--time_origin eoi), parse_sample_subset
 dir.create(dirname(opt$output_prefix), recursive = TRUE, showWarnings = FALSE)  # fwrite_sumstats: "## covariates=" above every table (CP-08)
 
 # Parse ancestries
@@ -365,6 +381,17 @@ if (!is.null(opt$sample_include)) {
     joined <- intersect(joined, keep_ids)
     acct("sample_include", n_j, length(joined), paste("joined samples listed in", basename(opt$sample_include)))
 }
+if (!is.null(opt$sample_subset)) {
+    # a sub-cohort of the same chassis (e.g. study_group=REDIAL): the stratum's samples whose
+    # phenotype column has one of the values; everyone else is left out here and counted
+    ss <- parse_sample_subset(opt$sample_subset)
+    if (!ss$column %in% names(pheno)) stop("--sample_subset: column '", ss$column, "' is not in ", opt$phenotype)
+    in_subset <- pheno$sample_id[!is.na(pheno[[ss$column]]) & as.character(pheno[[ss$column]]) %in% ss$values]
+    n_j <- length(joined)
+    joined <- intersect(joined, in_subset)
+    acct("sample_subset", n_j, length(joined), paste0("joined samples with ", ss$column, " in {", paste(ss$values, collapse = ","), "}"))
+    cat("  Sample subset ", opt$sample_subset, ": ", n_j, " -> ", length(joined), " joined samples\n", sep = "")
+}
 if (!is.null(kinship)) {
     # The GRM is keyed by the .fam IID (docs/HANDOFF_CONTRACT.md rule 1): a joined sample missing
     # from it is a broken input, not something to drop quietly.
@@ -379,6 +406,24 @@ if (!is.null(kinship)) {
 } else {
     qc_assert("adapter_grm_cover", verdict = "INFO", n = length(joined), message = paste0(qc_where, ": no --kinship; fitted without relatedness"))
 }
+# Survival time from the end of induction (--time_origin eoi, decided 17 Nov 2026; bin/landmark.R):
+# a child whose event or censoring is at or before its end-of-induction day, or who has none, is
+# left out of this trait here and counted; the others get time - eoi_day
+landmark_note <- NULL
+if (opt$model == "survival" && opt$time_origin == "eoi") {
+    if (!opt$eoi_col %in% names(pheno)) stop("--time_origin eoi: column '", opt$eoi_col, "' is not in ", opt$phenotype,
+                                             " (the end-of-induction day, docs/HANDOFF_CONTRACT.md)")
+    lm <- landmark_eoi(pheno[[opt$time_col]], pheno[[opt$event_col]], pheno[[opt$eoi_col]])
+    in_j <- pheno$sample_id %in% joined
+    n_before <- sum(lm$excluded & in_j & !is.na(pheno[[opt$eoi_col]]))
+    n_no_eoi <- sum(lm$excluded & in_j & is.na(pheno[[opt$eoi_col]]))
+    n_j <- length(joined)
+    joined <- setdiff(joined, pheno$sample_id[lm$excluded])
+    pheno[[opt$time_col]] <- lm$time
+    landmark_note <- sprintf("%d with %s at or before %s, %d without %s", n_before, opt$time_col, opt$eoi_col, n_no_eoi, opt$eoi_col)
+    acct("landmark_eoi", n_j, length(joined), paste0("time origin = end of induction (", opt$time_col, " - ", opt$eoi_col, "); left out: ", landmark_note))
+    cat("  Time origin: end of induction (", opt$time_col, " - ", opt$eoi_col, "); left out ", landmark_note, "\n", sep = "")
+}
 # Covariates: the ones asked for, plus the global-ancestry columns when --global_ancestry_prefix
 covariates <- if (length(covariates_requested) > 0) covariates_requested else NULL
 if (!is.null(opt$global_ancestry_prefix)) {
@@ -392,9 +437,9 @@ if (!is.null(opt$global_ancestry_prefix)) {
 # outcome and every covariate; the others are dropped here and counted, never left for a model
 # function to drop on its own (which misaligned residuals and genotypes before).
 outcome_cols <- if (opt$model == "survival") c(opt$time_col, opt$event_col) else opt$trait
-missing_cols <- setdiff(outcome_cols, names(pheno))
+missing_cols <- setdiff(c(outcome_cols, opt$cox_strata), names(pheno))
 if (length(missing_cols) > 0) stop("outcome column(s) not in ", opt$phenotype, ": ", paste(missing_cols, collapse = ", "))
-cc_cols <- c(outcome_cols, covariates)
+cc_cols <- c(outcome_cols, opt$cox_strata, covariates)
 in_joined <- pheno$sample_id %in% joined
 analysable <- pheno$sample_id[in_joined & complete.cases(pheno[, cc_cols, with = FALSE])]
 n_null <- length(analysable)
@@ -481,7 +526,9 @@ cov_mat <- if (length(covariates) > 0) {
 null_key <- list(samples = common_samples, trait = opt$trait, model = opt$model,
                  outcome = outcome_cols, covariates = covariates %||% character(),
                  kinship = if (!is.null(opt$kinship)) unname(tools::md5sum(opt$kinship)) else NA_character_,
-                 allow_unrelated_cox = isTRUE(opt$allow_unrelated_cox))
+                 allow_unrelated_cox = isTRUE(opt$allow_unrelated_cox),
+                 time_origin = if (opt$model == "survival") c(opt$time_origin, if (opt$time_origin == "eoi") opt$eoi_col) else NA_character_,
+                 cox_strata = opt$cox_strata %||% NA_character_)
 null_ops <- NULL; nullmod <- NULL; null_source <- "fitted"
 if (!is.null(opt$null_model_rds) && file.exists(opt$null_model_rds)) {
     cached <- tryCatch(readRDS(opt$null_model_rds), error = function(e) NULL)
@@ -503,9 +550,19 @@ if (!is.null(null_ops)) {
     surv_event <- as.integer(pheno[[opt$event_col]])
     if (anyNA(surv_time) || anyNA(surv_event)) stop("missing time / event values after the complete-case filter (a bug)")
 
+    if (opt$time_origin == "eoi" && any(surv_time <= 0)) stop("a time <= 0 after the end-of-induction landmark (a bug: landmark_eoi leaves those out)")
     surv_df <- data.frame(time = surv_time, event = surv_event)
     if (!is.null(cov_mat)) surv_df <- cbind(surv_df, as.data.frame(cov_mat))
     cov_str <- if (length(covariates) > 0) paste("+", paste(covariates, collapse = " + ")) else ""
+    # --cox_strata: a separate baseline hazard per level (strata() in the null; cox_ops by level)
+    cox_strata_values <- NULL
+    if (!is.null(opt$cox_strata)) {
+        cox_strata_values <- as.character(pheno[[opt$cox_strata]])
+        surv_df$cox_strata_level <- cox_strata_values
+        cov_str <- paste(cov_str, "+ strata(cox_strata_level)")
+        cat("  Cox baseline stratified on", opt$cox_strata, ":", length(unique(cox_strata_values)), "levels (",
+            paste(sprintf("%s n=%d", names(table(cox_strata_values)), as.integer(table(cox_strata_values))), collapse = ", "), ")\n")
+    }
     has_coxme <- requireNamespace("coxme", quietly = TRUE)
     # With a GRM the Cox null is a frailty model (coxme). Without coxme, refuse rather than drop
     # the relatedness quietly, unless the caller says the samples may be treated as unrelated.
@@ -524,6 +581,7 @@ if (!is.null(null_ops)) {
         eta <- as.numeric(cox_null$linear.predictor)   # fixed effects + frailty
         cat("  Fitted Cox MIXED model (coxme; frailty on 2 x kinship)\n")
         null_method <- "Cox mixed model (coxme, frailty on 2 x GRM, Breslow ties)"
+        if (!is.null(opt$cox_strata)) null_method <- paste0(null_method, ", baseline stratified on ", opt$cox_strata)
         cat("    Frailty variance:", signif(as.numeric(coxme::VarCorr(cox_null)[[1]]), 4), "\n")
     } else {
         if (!is.null(kinship)) {
@@ -535,8 +593,9 @@ if (!is.null(null_ops)) {
         cat("  Fitted Cox proportional hazards model (Breslow ties)\n")
         null_method <- if (is.null(kinship)) "Cox proportional hazards (Breslow ties), no GRM" else
             "Cox proportional hazards (Breslow ties), GRM NOT used (--allow_unrelated_cox, no coxme)"
+        if (!is.null(opt$cox_strata)) null_method <- paste0(null_method, ", baseline stratified on ", opt$cox_strata)
     }
-    null_ops <- cox_ops(surv_time, surv_event, eta, cov_mat)
+    null_ops <- cox_ops(surv_time, surv_event, eta, cov_mat, strata = cox_strata_values)
     nullmod  <- list(type = "cox", model = cox_null, martingale = null_ops$PY,
                      n_events = sum(surv_event == 1))
     cat("  Events:", nullmod$n_events, "| Martingale residual range:",
@@ -575,6 +634,9 @@ if (null_source == "fitted" && !is.null(opt$null_model_rds)) {
 sumstats_header <- c(stratum = opt$stratum %||% "none", trait = opt$trait, model = opt$model, n = n_samples,
                      method = paste("Tractor-GENESIS conditional score test (dose terms given local ancestry)",
                                     "+ total-dose 1-df score test; null:", null_method),
+                     if (opt$model == "survival") c(time_origin = if (opt$time_origin == "eoi")
+                         paste0("end_of_induction (", opt$time_col, " - ", opt$eoi_col, "; left out: ", landmark_note, ")") else "diagnosis"),
+                     if (!is.null(opt$sample_subset)) c(sample_subset = opt$sample_subset),
                      sumstats_header)
 
 # Samples the null model was fitted on: must be the complete cases counted above, or the score

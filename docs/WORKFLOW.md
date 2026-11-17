@@ -23,9 +23,12 @@ one module to the next. The same steps exist as SLURM array scripts under
 Example phenotype file:
 
 ```
-FID   IID   sample_id   mrd   efs_time  efs_event  os_time  os_event  protocol  sex  age_at_diagnosis  cd19_pos_pct  storage_days  PC1 ... PC5
+FID   IID   sample_id   mrd   mrd_level  eoi_day  efs_time  efs_event  os_time  os_event  protocol  study_group  sex  age_at_diagnosis  cd19_pos_pct  storage_days  PC1 ... PC5
 ```
-with `phenotype_cols = 'mrd,efs,os'`, `survival_traits = 'efs,os'`, `binary_traits = 'mrd'`,
+(`mrd_level` 1–4 = < 0.01 %, 0.01–0.099 %, 0.1–0.99 %, ≥ 1 % at the end of induction; `eoi_day` and the
+`*_time` columns in days from diagnosis; `study_group` one of `COG_P9900`, `COG_AALL0232_0331`, `SJ_TXV`, `REDIAL`)
+with `phenotype_cols = 'mrd,mrd_level,efs,os'`, `survival_traits = 'efs,os'`, `binary_traits = 'mrd'` (`mrd_level`,
+in neither list, runs as quantitative),
 `covariate_cols = 'sex,age_at_diagnosis,cd19_pos_pct,storage_days,PC1,PC2,PC3,PC4,PC5'` (the bundle's `phenotypes/covariates.txt`, then five PCs).
 
 ## 1. End-to-end overview
@@ -101,7 +104,7 @@ flowchart TD
 
 ## 3. Tractor-GENESIS: one engine for every trait
 
-Every trait goes through the same conditional score test so mrd, efs and os
+Every trait goes through the same conditional score test so mrd, mrd_level, efs and os
 are comparable. The trait's `model` (set in `main.nf` from `binary_traits` and
 `survival_traits`) only changes where the projection comes from.
 
@@ -156,6 +159,30 @@ samples, covariates or GRM is refitted. A Cox null with a GRM needs coxme: witho
 itself is in `bin/tractor_model.R`; `tests/test_tractor_model.R` checks it against `survival::coxph`
 (the Cox score statistic agrees to 1e-6, with and without covariates). The survival path needs no
 GENESIS, which is loaded only for the binary / quantitative null.
+
+**Survival clock and MRD (decided 17 Nov 2026).** On the SLURM path EFS and OS start at the **end of
+induction** (`TIME_ORIGIN=eoi`, the default; `--time_origin eoi`): the adapter uses `<trait>_time − eoi_day`
+and leaves out, and counts (`sample_accounting.tsv` step `landmark_eoi`), every child whose event or
+censoring is at or before `eoi_day` or who has no `eoi_day`; `bin/landmark.R` does the arithmetic and
+the null refuses any time ≤ 0 afterwards. The clock is written above every survival table as
+`## time_origin=end_of_induction (<time> - eoi_day; left out: …)` (or `## time_origin=diagnosis`).
+MRD enters the survival models in one of two ways, chosen per launch:
+
+- **MRD-stratified Cox** (default, `COX_STRATA=mrd_level`, `--cox_strata`): each MRD level gets its own
+  baseline hazard (`strata()` in the coxph / coxme null; `cox_ops` builds the martingale residuals and
+  the risk-set information within each level and sums the information). `## method=` ends
+  `baseline stratified on mrd_level`. `tests/test_tractor_model.R` checks the score statistic against
+  `coxph(... + strata())`, with and without a covariate, and with an event-free and a one-person level.
+- **MRD-adjusted** (`COX_STRATA= COX_EXTRA_COVARIATES=mrd_level RUN_LABEL=mrd_adjusted`): `mrd_level`
+  is added to the survival traits' covariates (linear in the level), the binary and quantitative traits
+  are untouched.
+
+`mrd_level` itself is a fourth GWAS trait, quantitative (`QUANTITATIVE_TRAITS=mrd_level`): the GENESIS
+gaussian null, so its betas are per-allele changes in MRD level, a linear trend over the four levels.
+`SAMPLE_SUBSET=study_group=REDIAL` (with a `RUN_LABEL`) restricts every trait to those rows
+(`--sample_subset`; accounting step `sample_subset`; `## sample_subset=` above every table); the
+launcher refuses it without a `RUN_LABEL`, with no row matching, and alongside `RUN_PRS` / `RUN_GXG`,
+which do not apply it.
 
 Every covariate must be a numeric phenotype column: the adapter stops, naming the column
 (`covariate PCX not found in ...`, `covariate sex is not numeric ...`), before it reads a Tractor
@@ -213,9 +240,13 @@ Each pair reports Wald and LRT p-values with Bonferroni over pairs and BH FDR.
 
 | Setting | Nextflow | SLURM | Notes |
 |---|---|---|---|
-| Traits | `phenotype_cols` | `TRAITS_LIST` (default `mrd,efs,os`) | phenotype columns; the launcher refuses a trait whose column(s) the phenotype file lacks |
-| Binary traits | `binary_traits` | everything not in `SURVIVAL_TRAITS` | 0/1 |
+| Traits | `phenotype_cols` | `TRAITS_LIST` (default `mrd,mrd_level,efs,os`) | phenotype columns; the launcher refuses a trait whose column(s) the phenotype file lacks |
+| Binary traits | `binary_traits` | everything not in `SURVIVAL_TRAITS` or `QUANTITATIVE_TRAITS` | 0/1 |
+| Quantitative traits | in neither `binary_traits` nor `survival_traits` | `QUANTITATIVE_TRAITS` (default `mrd_level`) | GENESIS gaussian null; a trait in both model lists is refused |
 | Time-to-event traits | `survival_traits` (+ `survival_time_cols`, `survival_event_cols`) | `SURVIVAL_TRAITS` (default `efs,os`); `TIME_COL_<trait>`, `EVENT_COL_<trait>` override one trait | columns `<trait>_time`, `<trait>_event`, as the handoff contract names them; each trait has its own |
+| Survival clock | (not passed yet: diagnosis) | `TIME_ORIGIN` (`eoi` default, or `diagnosis`) | `eoi`: time − `eoi_day`, children at or before it left out and counted; needs an `eoi_day` column (the launcher refuses without one) |
+| MRD in the Cox model | (not passed yet) | `COX_STRATA` (default `mrd_level`; empty = none), `COX_EXTRA_COVARIATES` (default empty) | stratified (default) or adjusted (`COX_STRATA= COX_EXTRA_COVARIATES=mrd_level` with a `RUN_LABEL`); never both on one column (refused); survival traits only |
+| Sub-cohort | (not passed yet) | `SAMPLE_SUBSET` (default empty), e.g. `study_group=REDIAL` | needs a `RUN_LABEL`; refused with `RUN_PRS` / `RUN_GXG` and when no row matches |
 | PC scale | (none) | `PC_SCALE` (`stratum` default, or `cohort`) | which PCs a stratum's GWAS adjusts for; POOLED always uses the cohort PCs |
 | MIX stratum | (none) | `MIX_RETAIN` (`true` default, or `false`) | `false` leaves the bundle's MIX stratum out of the default strata |
 | Run label | (none) | `RUN_LABEL` (empty default) | a sensitivity arm's results go under `results/<RUN_LABEL>/` |
@@ -407,7 +438,8 @@ record; the ingest's refusal already stops the launch through the job dependency
 
 Sample-accounting rows, in order: structure step `phenotype_to_fam` (bundle) or
 `phenotype_to_genotype` and `sample_include` (comparator), `duplicates`, `stratum`, `pc_merge`; adapter
-`phenotype_input`, `stratum`, `tractor_join`, `grm_intersection`, `complete_cases`,
+`phenotype_input`, `stratum`, `tractor_join`, `sample_subset` (with `SAMPLE_SUBSET`), `grm_intersection`,
+`landmark_eoi` (survival, `TIME_ORIGIN=eoi`), `complete_cases`,
 `min_stratum_n`, `model_n`. A phenotype row of a sample that was never genotyped is dropped
 before the PC merge, and counted; a genotyped sample left without PCs is a `FAIL`, not a silent
 `NA` carried into the GWAS.
@@ -433,3 +465,30 @@ has no gates.
 
 In R: `qc <- read.delim("results/run_record/<run_id>/qc/qc_assertions.tsv")`,
 `acc <- read.delim("results/run_record/<run_id>/qc/sample_accounting.tsv", na.strings = "NA")`.
+
+## 11. Not done yet
+
+Recorded here so that what is missing is not mistaken for what is done. Each item says where it would go.
+
+- **Per study × ancestry GWAS units for MR-MEGA (decided 17 Nov 2026; not built).** The meta-analysis
+  is to combine **four study groups** — COG P9900s (`COG_P9900`), COG AALL0232 + AALL0331
+  (`COG_AALL0232_0331`), St. Jude Total XV (`SJ_TXV`) and REDIAL (`REDIAL`) — each split by ancestry
+  stratum, with **MR-MEGA primary and env-MR-MEGA as the sensitivity analysis**. Each unit adjusts for
+  sex, age at diagnosis, NCI risk group, cytogenetic risk (favorable / unfavorable / neutral-unknown, two
+  0/1 indicators with neutral-unknown the reference) and its within-stratum PCs (`PC_SCALE=stratum`, the
+  default). Today a unit is an ancestry stratum over all studies (`docs/ENV_MRMEGA.md`), and
+  `SAMPLE_SUBSET` can restrict a whole launch to one study, but nothing builds the study × stratum
+  units, their within-unit PCs, the 50-sample floor per unit, or the MR-MEGA input from them. It
+  belongs with **CP-29** (env-MR-MEGA): unit = (`study_group`, stratum), STEP 1 fanned out per unit,
+  STEP 2b reading one sumstats file per unit. The contract already carries `study_group`; the NCI risk
+  and cytogenetic indicator columns are not yet required by the checker.
+- **The Nextflow path** (`main.nf`, `modules/local/tractor_genesis_adapter`) does not pass
+  `--time_origin`, `--cox_strata` or `--sample_subset`: it runs EFS and OS from diagnosis, unstratified,
+  on the full cohort, and says so in every table (`## time_origin=diagnosis`). It does run `mrd_level`
+  as quantitative when it is listed in `phenotype_cols` and not in `binary_traits`.
+- **PRS validation and GxG** read survival times as shipped (from diagnosis) and do not stratify on
+  `COX_STRATA`; a launch with `RUN_PRS` / `RUN_GXG` and `TIME_ORIGIN=eoi` prints a NOTE and records
+  `DOWNSTREAM_TIME_ORIGIN` in `params.tsv`. `SAMPLE_SUBSET` with either is refused.
+- **Untested here**: the quantitative (`mrd_level`) null needs GENESIS and the stratified Cox null
+  with a GRM needs coxme; neither is installed in the test environment, so those two paths are covered
+  by the unit tests of `cox_ops` and by the dry runs, not by an end-to-end adapter run.

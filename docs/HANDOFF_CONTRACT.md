@@ -23,7 +23,7 @@ exactly as written; the chromosome placeholder `{N}` is 1–22 with no `chr` pre
 | `local_ancestry/flare_panels.txt` | provenance of the LAI reference | the exact FLARE `ref-panel=` sample map used: `sample<TAB>label` | Module 7 (copied from `params.flare_panel_file`) |
 | `local_ancestry/ancestry_labels.txt` | the cohort's ancestry labels; each stratum's own list, `data/tractor/<stratum>/ancestries.txt` (what the adapter is given as `--ancestries`), is the subset of these that the stratum's Tractor files carry | one label per line, **alphabetical** — the order the Tractor-GENESIS adapter reads and reports in, so a column is always identifiable by name | derived from the panel file |
 | `local_ancestry/flare_index_map.tsv` | the bridge from FLARE's numbering to those labels | header `anc_index label`; rows `0,1,2…` in the panel file's order of first appearance, which is how FLARE numbers `anc0…ancK-1`; the extraction step renames by this map so every downstream file is keyed by label | derived from the panel file |
-| `phenotypes/phenotypes.tsv` | the three GWAS outcomes, the null models, the Cox branch, covariates | tab-separated, header `FID IID sample_id mrd efs_time efs_event os_time os_event protocol <covariates…>`; `sample_id == IID` on every row (checked); `mrd` coded (0/1 or the agreed categories), `*_time` numeric, `*_event` 0/1, `NA` where unknown; `protocol` is a short code for the treatment protocol the participant was enrolled on (never free text; `NA` where unknown) — the study-level environmental covariate for env-MR-MEGA (`docs/ENV_MRMEGA.md`); **no free-text columns** (no `comments`, `cyto_text`, `death_cause`…, no `mrn`, no `dob` — derive age upstream) | the study, placed here by the harmonization run |
+| `phenotypes/phenotypes.tsv` | the four GWAS outcomes, the null models, the Cox branch, covariates | tab-separated, header `FID IID sample_id mrd mrd_level eoi_day efs_time efs_event os_time os_event protocol study_group <covariates…>` (any column order; the checker finds each by name); `sample_id == IID` on every row (checked); `mrd` 0/1 (end-of-induction MRD ≥ 0.01 %); `mrd_level` the end-of-induction MRD level, **1** < 0.01 %, **2** 0.01–0.099 %, **3** 0.1–0.99 %, **4** ≥ 1 %, `NA` where unknown (never 9; checked); `eoi_day` the end of induction in **days from diagnosis** (the child's own day where known, else the protocol day: 29 in COG and REDIAL, 46 at St. Jude), numeric ≥ 0 or `NA` (checked); `*_time` in **days from diagnosis**, numeric ≥ 0 (negative refused) — the GWAS moves the origin to `eoi_day` itself, so ship the times from diagnosis; `*_event` 0/1, `NA` where unknown; `study_group` the MR-MEGA study, one of `COG_P9900`, `COG_AALL0232_0331`, `SJ_TXV`, `REDIAL` (never blank; checked); categorical covariates ship as 0/1 indicator columns (e.g. `nci_high`, `cyto_fav`, `cyto_unfav`; neutral / unknown cytogenetics is the reference), never as text; `protocol` is a short code for the treatment protocol the participant was enrolled on (never free text; `NA` where unknown) — the study-level environmental covariate for env-MR-MEGA (`docs/ENV_MRMEGA.md`); **no free-text columns** (no `comments`, `cyto_text`, `death_cause`…, no `mrn`, no `dob` — derive age upstream) | the study, placed here by the harmonization run |
 | `phenotypes/covariates.txt` | what the model adjusts for | one column name per line, every name present in `phenotypes.tsv` | the study |
 | `qc/removed_duplicates.tsv` | answers "were duplicates removed upstream" | header `kept_iid removed_iid kinship reason`; header-only when nothing was removed (never a 0-byte file); consistent with `# duplicates_removed`. Downstream re-checks the shipped kinship either way (pairs > 0.3536; `docs/WORKFLOW.md` section 10) and fails if a listed sample is still in the `.fam` | Module 6 kinship step |
 | `qc/sample_accounting.tsv` | n at every join | header `step n_in n_out n_removed reason` from first intake to this bundle | every Module |
@@ -77,16 +77,32 @@ final data, and never redone.
    `Number=2` (every chromosome), and one whose HDS disagrees with DS on the first 200 records (first and
    last chromosome).
 
-## How the GWAS consumes it — three outcomes, in parallel
+## How the GWAS consumes it — four outcomes, in parallel
 
 The adapter is called per **trait × stratum × chromosome**, so the work fans out as SLURM arrays:
-`mrd` (binary), `efs` and `os` (time-to-event via `--time_col efs_time --event_col efs_event`, likewise
-`os_*`). Hard calls come from `maf01`; the dosage VCFs are restricted to the `maf01` site list (its `.bim`) before
+`mrd` (binary), `mrd_level` (quantitative: the four levels as a linear trend, GENESIS gaussian null),
+`efs` and `os` (time-to-event via `--time_col efs_time --event_col efs_event`, likewise `os_*`).
+
+**Survival from the end of induction (decided 17 Nov 2026).** EFS and OS are counted from the end of
+induction, a landmark: the GWAS uses `<trait>_time − eoi_day`. A child whose event or censoring is at or
+before `eoi_day` was not at risk at the landmark, and a child without `eoi_day` cannot be placed on that
+clock; both are left out of that trait, counted in `sample_accounting.tsv` (step `landmark_eoi`), and
+named in the sumstats header (`## time_origin=`). The checker's ACCEPTED line gives the same counts for
+the bundle as shipped. Counting from diagnosis instead (`TIME_ORIGIN=diagnosis`) would credit every child
+with the induction weeks it had to survive to have an end-of-induction MRD value. By default each MRD level
+gets its own baseline hazard (`COX_STRATA=mrd_level`); the MRD-adjusted arm uses
+`COX_STRATA= COX_EXTRA_COVARIATES=mrd_level` with a `RUN_LABEL`. `SAMPLE_SUBSET=study_group=REDIAL`
+(with a `RUN_LABEL`) runs the same GWAS on REDIAL alone.
+
+**Bundles made before 17 Nov 2026** lack `mrd_level`, `eoi_day` and `study_group` and are **refused** by
+the checker, naming the first missing column. No real bundle had been delivered by then, so refusing costs
+a re-export of a test bundle at most, while accepting one would run EFS and OS on the old clock without
+anyone choosing it. Hard calls come from `maf01`; the dosage VCFs are restricted to the `maf01` site list (its `.bim`) before
 extraction, so every test runs on one site set at cohort MAF ≥ 1 % with the per-stratum MAC gate on top (20 here;
 the downstream default `MAC_MIN` is 10, an open question). The stratum floor is 50 on both sides: upstream bundles
 groups below 50 (`strata_rule.txt`), and downstream skips a stratum with fewer than `MIN_STRATUM_N` = 50 analysable samples.
 Structure is shared — one GRM, one PC set per scale, from this bundle — so the only per-trait
-work is the null model (3 × K, in parallel) and the score tests (3 × K × 22, in parallel), bounded by the
+work is the null model (4 × K, in parallel) and the score tests (4 × K × 22, in parallel), bounded by the
 cluster's `MaxArraySize` and QOS recorded in `docs/HPC_SITE.md`.
 
 **Each stratum's ancestry list is written downstream, not shipped.** The Tractor extraction step

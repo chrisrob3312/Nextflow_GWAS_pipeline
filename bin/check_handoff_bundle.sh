@@ -104,19 +104,37 @@ NS=$(wc -l < genotypes/cohort.hardcall.maf01.fam); NV=$(wc -l < genotypes/cohort
 awk '{print $2}' genotypes/cohort.hardcall.maf01.fam > "$T/fam_order"
 LC_ALL=C sort "$T/fam_order" > "$T/fam_iid"
 H=$(head -1 phenotypes/phenotypes.tsv)
-for c in FID IID sample_id mrd efs_time efs_event os_time os_event protocol; do
-  grep -qP "(^|\t)${c}(\t|$)" <<<"$H" || fail "phenotypes.tsv lacks column '$c' (the GWAS runs MRD, EFS and OS; protocol is the env-MR-MEGA covariate)"; done
+for c in FID IID sample_id mrd mrd_level eoi_day efs_time efs_event os_time os_event protocol study_group; do
+  grep -qP "(^|\t)${c}(\t|$)" <<<"$H" || fail "phenotypes.tsv lacks column '$c' (the GWAS runs MRD, the MRD level, EFS and OS from the end of induction (eoi_day); protocol is the env-MR-MEGA covariate, study_group the MR-MEGA study; a bundle made before 17 Nov 2026 must be re-exported with mrd_level, eoi_day and study_group)"; done
 col() { awk -F'\t' -v n="$1" 'NR==1{for(i=1;i<=NF;i++) if($i==n) {print i; exit}}' phenotypes/phenotypes.tsv; }
 IC=$(col IID); SC=$(col sample_id); PC=$(col protocol)
 awk -F'\t' -v i="$IC" -v s="$SC" 'NR>1 && $i != $s {print $i; exit 1}' phenotypes/phenotypes.tsv > "$T/badrow" \
   || id_fail phenotypes.tsv "$NS" "a row where IID != sample_id (IID $(cat "$T/badrow")); the contract keys everything on one id"
 awk -F'\t' -v p="$PC" 'NR>1 && ($p == "" || $p ~ /^[[:space:]]+$/) {exit 1}' phenotypes/phenotypes.tsv \
   || fail "phenotypes.tsv has a blank protocol (use NA where unknown; the value is a short protocol code, never free text)"
+# mrd_level: 1 < 0.01 %, 2 0.01-0.099 %, 3 0.1-0.99 %, 4 >= 1 % (end of induction); unknown is NA, never 9
+LC=$(col mrd_level); EC=$(col eoi_day); GC=$(col study_group)
+awk -F'\t' -v c="$LC" 'NR>1 && $c == "9" {exit 1}' phenotypes/phenotypes.tsv \
+  || fail "phenotypes.tsv mrd_level has the value 9: code an unknown MRD level as NA"
+awk -F'\t' -v c="$LC" 'NR>1 && $c !~ /^([1-4]|NA)$/ {exit 1}' phenotypes/phenotypes.tsv \
+  || fail "phenotypes.tsv mrd_level has a value other than 1, 2, 3, 4 or NA"
+awk -F'\t' -v c="$EC" 'NR>1 && $c ~ /^-/ {exit 1}' phenotypes/phenotypes.tsv \
+  || fail "phenotypes.tsv eoi_day has a negative value (days from diagnosis to the end of induction)"
+awk -F'\t' -v c="$EC" 'NR>1 && $c !~ /^(NA|[0-9]+(\.[0-9]+)?)$/ {exit 1}' phenotypes/phenotypes.tsv \
+  || fail "phenotypes.tsv eoi_day has a non-numeric value"
+awk -F'\t' -v c="$GC" 'NR>1 && ($c == "" || $c ~ /^[[:space:]]+$/) {exit 1}' phenotypes/phenotypes.tsv \
+  || fail "phenotypes.tsv has a blank study_group (a short study code, e.g. COG_P9900, COG_AALL0232_0331, SJ_TXV, REDIAL)"
+LANDMARK=""
 for pair in efs os; do
   tc=$(col "${pair}_time"); ec=$(col "${pair}_event")
   awk -F'\t' -v e="$ec" 'NR>1 && $e !~ /^(0|1|NA)$/ {exit 1}' phenotypes/phenotypes.tsv || fail "phenotypes.tsv ${pair}_event has a value other than 0, 1 or NA"
+  awk -F'\t' -v t="$tc" 'NR>1 && $t ~ /^-/ {exit 1}' phenotypes/phenotypes.tsv \
+    || fail "phenotypes.tsv ${pair}_time has a negative value (times are days from diagnosis; the GWAS moves the origin to eoi_day itself)"
   awk -F'\t' -v t="$tc" 'NR>1 && $t !~ /^(NA|[0-9]+(\.[0-9]+)?)$/ {exit 1}' phenotypes/phenotypes.tsv || fail "phenotypes.tsv ${pair}_time has a non-numeric value"
+  # the end-of-induction landmark (TIME_ORIGIN=eoi) leaves out a child whose time is at or before eoi_day
+  LANDMARK+="${LANDMARK:+, }${pair} $(awk -F'\t' -v t="$tc" -v e="$ec" -v d="$EC" 'NR>1 && $t != "NA" && $e != "NA" && $d != "NA" && $t+0 <= $d+0 {k++} END {print k+0}' phenotypes/phenotypes.tsv)"
 done
+NO_EOI=$(awk -F'\t' -v d="$EC" 'NR>1 && $d == "NA" {k++} END {print k+0}' phenotypes/phenotypes.tsv)
 for bad in mrn dob comments cyto_text oth_features death_cause relapse_site_oth; do
   grep -qiP "(^|\t)${bad}(\t|$)" <<<"$H" && fail "phenotypes.tsv carries forbidden column '$bad'"; done
 awk -F'\t' -v c="$SC" 'NR>1{print $c}' phenotypes/phenotypes.tsv | LC_ALL=C sort > "$T/ph_id"
@@ -238,5 +256,6 @@ FAILS=$(awk -F'\t' 'NR>1 && $2=="FAIL" {print $1}' qc/qc_assertions.tsv | paste 
 [[ -z "$FAILS" ]] || fail "qc_assertions.tsv carries FAIL verdict(s): $FAILS — an upstream check failed; the bundle is not analysis-ready"
 awk -F'\t' 'NR>1 && $2 !~ /^(PASS|FAIL|INFO)$/ {exit 1}' qc/qc_assertions.tsv || fail "qc_assertions.tsv has a verdict other than PASS, FAIL or INFO"
 [[ "$(awk -F'\t' 'NR>1 && $2=="PASS"' qc/qc_assertions.tsv | wc -l)" -ge 1 ]] || fail "qc_assertions.tsv has no PASS verdict — 'did not run' is not 'passed'"
-NOTE=""; [[ ${#SKIPPED[@]} -eq 0 ]] || NOTE="; SKIPPED: $(IFS='; '; echo "${SKIPPED[*]}")"
+NOTE="; landmark: at or before eoi_day ${LANDMARK}, no eoi_day ${NO_EOI}"
+[[ ${#SKIPPED[@]} -eq 0 ]] || NOTE+="; SKIPPED: $(IFS='; '; echo "${SKIPPED[*]}")"
 echo "HANDOFF ACCEPTED: $B  ($NS samples, $NV GWAS-input variants at MAF >= 1 %, $NV_ALL unfiltered, chromosomes $CHROM_SPEC, server=$SERVER, duplicates_removed=$DUPS$NOTE)"

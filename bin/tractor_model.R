@@ -4,7 +4,8 @@
 # Sourced by tractor_genesis_adapter.R (from the same directory); also by tests/test_tractor_model.R,
 # which runs it without GENESIS. Needs Matrix (and survival for the Cox null, in the adapter).
 #   genesis_ops(nullmod, n)          P y and D'PD from a GENESIS null model (binary / quantitative)
-#   cox_ops(time, event, eta, Xc)    the same from a Cox null: martingale residuals, Breslow information
+#   cox_ops(time, event, eta, Xc, strata)  the same from a Cox null: martingale residuals, Breslow
+#                                    information (within each level of strata, when given)
 #   mac_minor(alt, n_hap)            minor allele count
 #   test_variant_tractor(...)        the conditional score test of one variant
 #   result_row(...)                  one output row
@@ -45,44 +46,59 @@ genesis_ops <- function(nm, n) {
     )
 }
 
-cox_ops <- function(time, event, eta, Xc) {
-    w <- exp(eta)
+# strata (optional): a Cox model stratified on a variable (e.g. the four end-of-induction MRD
+# levels) has a separate baseline hazard per level and one genotype effect. Its risk sets are
+# within a level, so the martingale residuals and the information are computed level by level
+# and the information summed over levels; with strata = NULL there is one level (the plain model).
+cox_ops <- function(time, event, eta, Xc, strata = NULL) {
+    w_all <- exp(eta)
     n <- length(time)
-    # Breslow baseline hazard and martingale residuals under the null
-    ord_asc <- order(time, -event)
-    t_a <- time[ord_asc]; w_a <- w[ord_asc]; e_a <- event[ord_asc]
-    S0_a <- rev(cumsum(rev(w_a)))                      # sum_{j: t_j >= t_i} w_j
-    S0_a <- S0_a[match(t_a, t_a)]                      # ties share one risk set
-    dL   <- ifelse(e_a == 1, 1 / S0_a, 0)
-    Lam  <- ave(cumsum(dL), t_a, FUN = max)            # Lambda0(t_i) incl. all events at t_i
-    mart <- numeric(n); mart[ord_asc] <- e_a - Lam * w_a
+    groups <- if (is.null(strata)) list(seq_len(n)) else unname(split(seq_len(n), as.character(strata), drop = TRUE))
+    mart <- numeric(n)
+    # One level's Breslow baseline, martingale residuals and risk-set bookkeeping
+    parts <- lapply(groups, function(idx) {
+        tg <- time[idx]; eg <- event[idx]; w <- w_all[idx]
+        ord_asc <- order(tg, -eg)
+        t_a <- tg[ord_asc]; w_a <- w[ord_asc]; e_a <- eg[ord_asc]
+        S0_a <- rev(cumsum(rev(w_a)))                      # sum_{j: t_j >= t_i} w_j
+        S0_a <- S0_a[match(t_a, t_a)]                      # ties share one risk set
+        dL   <- ifelse(e_a == 1, 1 / S0_a, 0)
+        Lam  <- ave(cumsum(dL), t_a, FUN = max)            # Lambda0(t_i) incl. all events at t_i
+        m <- numeric(length(idx)); m[ord_asc] <- e_a - Lam * w_a
+        # Risk-set machinery in DESCENDING time: risk set of t_k = positions 1..last(tie group)
+        ord_d <- order(-tg, eg)
+        t_d <- tg[ord_d]
+        list(idx = idx, mart = m, rows_d = idx[ord_d], w_d = w[ord_d],
+             last_idx = ave(seq_along(t_d), t_d, FUN = max), ev_pos = which(eg[ord_d] == 1))
+    })
+    for (pt in parts) mart[pt$idx] <- pt$mart
 
-    # Risk-set machinery in DESCENDING time: risk set of t_k = positions 1..last(tie group)
-    ord_d <- order(-time, event)
-    t_d <- time[ord_d]; w_d <- w[ord_d]; e_d <- event[ord_d]
-    last_idx <- ave(seq_along(t_d), t_d, FUN = max)
-    ev_pos <- which(e_d == 1)
-    Xc_d <- if (!is.null(Xc)) Xc[ord_d, , drop = FALSE] else NULL
-
-    # Observed information (Breslow) for full design A = [D | Xc], then project on Xc
-    info <- function(A_d) {
-        p <- ncol(A_d)
+    # Observed information (Breslow) of one level, for a design A (rows in the original order)
+    info_part <- function(A, pt) {
+        p <- ncol(A)
+        I <- matrix(0, p, p)
+        if (length(pt$ev_pos) == 0) return(I)              # a level with no event adds nothing
+        A_d <- A[pt$rows_d, , drop = FALSE]; w_d <- pt$w_d; last_idx <- pt$last_idx
         S0 <- cumsum(w_d)[last_idx]
-        S1 <- apply(w_d * A_d, 2, cumsum)[last_idx, , drop = FALSE]
-        I  <- matrix(0, p, p)
+        S1 <- apply(w_d * A_d, 2, cumsum)
+        if (!is.matrix(S1)) S1 <- matrix(S1, nrow = nrow(A_d))   # a one-person level: apply returns a vector
+        S1 <- S1[last_idx, , drop = FALSE]
         for (a in 1:p) for (b in a:p) {
             S2 <- cumsum(w_d * A_d[, a] * A_d[, b])[last_idx]
-            v  <- sum((S2 / S0 - (S1[, a] / S0) * (S1[, b] / S0))[ev_pos])
+            v  <- sum((S2 / S0 - (S1[, a] / S0) * (S1[, b] / S0))[pt$ev_pos])
             I[a, b] <- v; I[b, a] <- v
         }
         I
     }
-    q <- if (is.null(Xc_d)) 0 else ncol(Xc_d)
+    info <- function(A) Reduce(`+`, lapply(parts, function(pt) info_part(A, pt)))
+    q <- if (is.null(Xc)) 0 else ncol(Xc)
     list(
         type = "cox",
         PY = mart,
+        n_strata = length(groups),
+        # information for the full design A = [D | Xc], then projected on Xc
         proj_crossprod = function(D) {
-            A <- if (q > 0) cbind(D[ord_d, , drop = FALSE], Xc_d) else D[ord_d, , drop = FALSE]
+            A <- if (q > 0) cbind(D, Xc) else D
             I <- info(A)
             p <- ncol(D)
             if (q == 0) return(I)

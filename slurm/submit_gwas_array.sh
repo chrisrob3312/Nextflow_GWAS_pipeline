@@ -12,9 +12,11 @@
 # ============================================================================
 # ALL traits go through the same Tractor-GENESIS adapter so results are
 # comparable:
-#   mrd      -> binary      (GENESIS logistic mixed model null)
-#   efs      -> survival    (Cox null with kinship frailty, time-to-event)
-#   os       -> survival
+#   mrd       -> binary       (GENESIS logistic mixed model null; MRD >= 0.01% at end of induction)
+#   mrd_level -> quantitative (GENESIS linear mixed model null; the four end-of-induction MRD levels,
+#                              1 < 0.01%, 2 0.01-0.099%, 3 0.1-0.99%, 4 >= 1%, as a linear trend)
+#   efs       -> survival     (Cox null with kinship frailty, time-to-event)
+#   os        -> survival
 #
 # Usage (normally submitted by slurm/submit_full_pipeline.sh; by hand, from the repo root,
 # with the site arguments of docs/HPC_SITE.md "Submitting one script by hand"):
@@ -23,9 +25,15 @@
 #   sbatch <site args> slurm/submit_gwas_array.sh LAT1 os  survival
 #   sbatch <site args> slurm/submit_gwas_array.sh LAT1 efs survival
 #   sbatch <site args> slurm/submit_gwas_array.sh LAT1 mrd binary
+#   sbatch <site args> slurm/submit_gwas_array.sh LAT1 mrd_level quantitative
 #
 # A survival trait reads columns <trait>_time and <trait>_event (efs_time/efs_event, os_time/os_event,
 # as docs/HANDOFF_CONTRACT.md names them); TIME_COL_<trait> / EVENT_COL_<trait> override one trait.
+# Survival traits (decided 17 Nov 2026): TIME_ORIGIN (default eoi) counts time from the end of
+# induction (time - eoi_day; a child with its event or censoring at or before eoi_day is left out);
+# COX_STRATA (default mrd_level) gives each MRD level its own baseline hazard; COX_EXTRA_COVARIATES
+# (default none) adds covariates for the survival traits only (the MRD-adjusted arm). SAMPLE_SUBSET
+# (column=value[,value...], default none) restricts every trait to a sub-cohort, e.g. study_group=REDIAL.
 # The adapter checks every sample in the stratum's Tractor files against STRATA_FILE
 # (default $HANDOFF_DIR/ancestry/strata.tsv) when it exists, and
 # skips the stratum (exit 0, no results) below MIN_STRATUM_N analysable samples; the run
@@ -60,7 +68,7 @@ if [[ "${DRY_RUN}" != 1 ]]; then
 fi
 
 STRATUM="${1:?stratum required (EUR, AAC, LAT1, LAT2, EAS, SAS, OTHER, POOLED)}"
-TRAIT="${2:?trait required (mrd, efs, os)}"
+TRAIT="${2:?trait required (mrd, mrd_level, efs, os)}"
 MODEL="${3:-survival}"
 CHR="${SLURM_ARRAY_TASK_ID:-}"
 if [[ -z "${CHR}" ]]; then
@@ -140,7 +148,15 @@ CMD=(Rscript "${SCRIPT_DIR}/bin/tractor_genesis_adapter.R"
     --model "${MODEL}")
 if [[ "${MODEL}" == "survival" ]]; then
     CMD+=(--time_col "$(trait_time_col "${TRAIT}")" --event_col "$(trait_event_col "${TRAIT}")")
+    CMD+=(--time_origin "${TIME_ORIGIN:-$(rr_default TIME_ORIGIN)}")
+    # set-but-empty means none (e.g. COX_STRATA= for the MRD-adjusted arm), so '-', not ':-'
+    COX_STRATA="${COX_STRATA-$(rr_default COX_STRATA)}"
+    [[ -n "${COX_STRATA}" ]] && CMD+=(--cox_strata "${COX_STRATA}")
+    COX_EXTRA_COVARIATES="${COX_EXTRA_COVARIATES-$(rr_default COX_EXTRA_COVARIATES)}"
+    [[ -n "${COX_EXTRA_COVARIATES}" ]] && COVARIATES="${COVARIATES},${COX_EXTRA_COVARIATES}"
 fi
+SAMPLE_SUBSET="${SAMPLE_SUBSET-$(rr_default SAMPLE_SUBSET)}"
+[[ -n "${SAMPLE_SUBSET}" ]] && CMD+=(--sample_subset "${SAMPLE_SUBSET}")
 # The stratum's members (step 0 writes them from strata.tsv): the adapter analyses only these (CP-17)
 SAMPLE_INCLUDE=""
 if [[ "${STRATUM}" != POOLED && -s "${SCRIPT_DIR}/results/strata/${STRATUM}.samples.txt" ]]; then

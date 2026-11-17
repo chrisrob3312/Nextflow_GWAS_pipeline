@@ -90,6 +90,24 @@ b=$(fresh no_protocol); awk -F'\t' 'BEGIN{OFS="\t"} {$9=""; print}' "$b/phenotyp
                                                            expect_refuse "phenotypes without a protocol column" "$b" "lacks column 'protocol'"
 b=$(fresh blank_protocol); awk -F'\t' 'BEGIN{OFS="\t"} NR==3{$9=""} {print}' "$b/phenotypes/phenotypes.tsv" > "$b/p.tmp" && mv "$b/p.tmp" "$b/phenotypes/phenotypes.tsv"; remanifest "$b"
                                                            expect_refuse "blank protocol value" "$b" "blank protocol"
+# 17 Nov 2026: mrd_level (1-4, NA), eoi_day (days from diagnosis), study_group; the landmark counts in the ACCEPTED line
+pheno_set() { # bundle, row, column, value: one phenotype cell
+  awk -F'\t' -v r="$2" -v c="$3" -v v="$4" 'BEGIN{OFS="\t"} NR==r{$c=v} {print}' "$1/phenotypes/phenotypes.tsv" > "$1/p.tmp" && mv "$1/p.tmp" "$1/phenotypes/phenotypes.tsv"; }
+b=$(fresh pre_17nov); cut -f1-13 "$b/phenotypes/phenotypes.tsv" > "$b/p.tmp" && mv "$b/p.tmp" "$b/phenotypes/phenotypes.tsv"; remanifest "$b"
+                                                           expect_refuse "bundle made before 17 Nov (no mrd_level, eoi_day, study_group)" "$b" "lacks column 'mrd_level'"
+b=$(fresh mrd_level9); pheno_set "$b" 2 14 9; remanifest "$b"
+                                                           expect_refuse "mrd_level = 9" "$b" "code an unknown MRD level as NA"
+b=$(fresh mrd_level5); pheno_set "$b" 2 14 5; remanifest "$b"
+                                                           expect_refuse "mrd_level = 5" "$b" "mrd_level has a value other than 1, 2, 3, 4 or NA"
+b=$(fresh eoi_negative); pheno_set "$b" 2 15 -3; remanifest "$b"
+                                                           expect_refuse "negative eoi_day" "$b" "eoi_day has a negative value"
+b=$(fresh os_negative); pheno_set "$b" 3 7 -12; remanifest "$b"
+                                                           expect_refuse "negative os_time" "$b" "os_time has a negative value"
+b=$(fresh blank_group); pheno_set "$b" 4 16 ""; remanifest "$b"
+                                                           expect_refuse "blank study_group" "$b" "blank study_group"
+b=$(fresh landmark_note); pheno_set "$b" 2 5 20; pheno_set "$b" 3 15 NA; remanifest "$b"
+out=$("$CHECK" "$b" "${TOOLS[@]}" 2>&1) && [[ "$out" == *"landmark: at or before eoi_day efs 1, os 0, no eoi_day 1"* ]] \
+  && ok "ACCEPTED line counts the children the landmark leaves out (efs_time 20 <= eoi_day 29; one eoi_day NA)" || bad "landmark note: $out"
 b=$(fresh iid_ne_sid); awk -F'\t' 'BEGIN{OFS="\t"} NR==2{$3="S002"} NR==3{$3="S001"} {print}' "$b/phenotypes/phenotypes.tsv" > "$b/p.tmp" && mv "$b/p.tmp" "$b/phenotypes/phenotypes.tsv"; remanifest "$b"
                                                            expect_refuse "IID differs from sample_id on a row" "$b" "IID != sample_id"
 b=$(fresh fail_verdict); printf 'M6_het\tFAIL\t8\tthree samples beyond 3 SD\n' >> "$b/qc/qc_assertions.tsv"; remanifest "$b"
