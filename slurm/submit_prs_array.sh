@@ -53,10 +53,15 @@ METHOD="${METHODS[$((SLURM_ARRAY_TASK_ID - 1))]}"
 
 TRAIT="${1:?trait required (mrd, efs, os)}"
 # A survival trait's validation uses its own columns (<trait>_time, <trait>_event)
+# and the GWAS's clock (TIME_ORIGIN, EOI_COL) and sub-cohort (SAMPLE_SUBSET), so the validation
+# analyses what the GWAS analysed
 SURV_ARGS=()
 if trait_is_survival "${TRAIT}"; then
-    SURV_ARGS=(--trait_type survival --time_col "$(trait_time_col "${TRAIT}")" --event_col "$(trait_event_col "${TRAIT}")")
+    SURV_ARGS=(--trait_type survival --time_col "$(trait_time_col "${TRAIT}")" --event_col "$(trait_event_col "${TRAIT}")"
+               --time_origin "${TIME_ORIGIN:-$(rr_default TIME_ORIGIN)}" --eoi_col "${EOI_COL:-$(rr_default EOI_COL)}")
 fi
+SAMPLE_SUBSET="${SAMPLE_SUBSET-$(rr_default SAMPLE_SUBSET)}"
+[[ -n "${SAMPLE_SUBSET}" ]] && SURV_ARGS+=(--sample_subset "${SAMPLE_SUBSET}")
 
 echo "=============================================="
 echo "Trait: ${TRAIT}"

@@ -106,6 +106,13 @@ option_list <- list(
                 help = "Time column for survival analysis"),
     make_option(c("--event_col"), type = "character", default = NULL,
                 help = "Event column for survival analysis"),
+    make_option(c("--time_origin"), type = "character", default = "diagnosis",
+                help = paste("Survival time origin in validation: diagnosis (the times as shipped) or eoi (time - --eoi_col;",
+                             "a sample with its event or censoring at or before it, or without it, is left out and counted), as in the GWAS")),
+    make_option(c("--eoi_col"), type = "character", default = "eoi_day",
+                help = "The landmark column for --time_origin eoi [default: eoi_day]"),
+    make_option(c("--sample_subset"), type = "character", default = NULL,
+                help = "column=value[,value...]: validate in these samples only, as the GWAS did (SAMPLE_SUBSET)"),
     make_option(c("--validate"), action = "store_true", default = FALSE,
                 help = "Run validation analysis"),
 
@@ -142,6 +149,8 @@ option_list <- list(
     if (length(f) > 0) dirname(normalizePath(f[1])) else "."
 })
 source(file.path(.prs_dir, "tractor_io.R"))
+source(file.path(.prs_dir, "landmark.R"))      # landmark_eoi (--time_origin eoi), parse_sample_subset, as in the GWAS
+source(file.path(.prs_dir, "qc_assert.R"))     # qc_account (sample accounting)
 
 opt <- parse_args(OptionParser(
     option_list = option_list,
@@ -800,6 +809,17 @@ if (opt$validate && !is.null(opt$phenotype) && !is.null(opt$trait)) {
 
     # Load phenotype
     pheno <- fread(opt$phenotype)
+    validation_info <- list(trait = opt$trait)
+    # The GWAS's sub-cohort (SAMPLE_SUBSET), counted
+    if (!is.null(opt$sample_subset)) {
+        ss <- parse_sample_subset(opt$sample_subset)
+        if (!ss$column %in% names(pheno)) stop("--sample_subset: column '", ss$column, "' is not in ", opt$phenotype)
+        n0 <- nrow(pheno)
+        pheno <- pheno[as.character(get(ss$column)) %in% ss$values]
+        qc_account("prs_validation_sample_subset", n0, nrow(pheno), paste0("PRS validation ", opt$trait, ": ", ss$column, " in {", paste(ss$values, collapse = ","), "}"))
+        cat("Sample subset ", opt$sample_subset, ": ", n0, " -> ", nrow(pheno), " samples\n", sep = "")
+        validation_info$sample_subset <- opt$sample_subset
+    }
 
     # Find ID column
     id_cols <- c("IID", "sample_id", "FID", "ID")
@@ -809,8 +829,8 @@ if (opt$validate && !is.null(opt$phenotype) && !is.null(opt$trait)) {
         stop("No ID column found in phenotype file")
     }
 
-    # Get trait column
-    if (!opt$trait %in% names(pheno)) {
+    # Get trait column (a survival trait is its time and event columns, e.g. efs_time / efs_event)
+    if (!opt$trait %in% names(pheno) && is.null(opt$time_col)) {
         stop("Trait '", opt$trait, "' not found in phenotype file")
     }
 
@@ -848,6 +868,27 @@ if (opt$validate && !is.null(opt$phenotype) && !is.null(opt$trait)) {
     }
     is_survival <- length(time_col) > 0 && length(event_col) > 0
     if (identical(opt$trait_type, "survival") && !is_survival) stop("--trait_type survival needs --time_col and --event_col")
+    # The GWAS's clock (--time_origin eoi): time - the landmark; a sample whose event or censoring is
+    # at or before it, or without it, is left out of the validation and counted (bin/landmark.R)
+    if (is_survival) {
+        validation_info$time_origin <- "diagnosis"
+        if (opt$time_origin == "eoi") {
+            tc <- time_col[1]; ec <- event_col[1]
+            if (!opt$eoi_col %in% names(pheno)) stop("--time_origin eoi: column '", opt$eoi_col, "' is not in ", opt$phenotype)
+            has_y <- !is.na(pheno[[tc]]) & !is.na(pheno[[ec]])
+            lm <- landmark_eoi(pheno[[tc]], pheno[[ec]], pheno[[opt$eoi_col]])
+            n_before <- sum(lm$excluded & has_y & !is.na(pheno[[opt$eoi_col]]))
+            n_no_eoi <- sum(lm$excluded & has_y & is.na(pheno[[opt$eoi_col]]))
+            note <- sprintf("%d with %s at or before %s, %d without %s", n_before, tc, opt$eoi_col, n_no_eoi, opt$eoi_col)
+            qc_account("prs_validation_landmark_eoi", sum(has_y), sum(has_y & !lm$excluded),
+                       paste0("PRS validation ", opt$trait, ": time origin = end of induction (", tc, " - ", opt$eoi_col, "); left out: ", note))
+            cat("Time origin: end of induction (", tc, " - ", opt$eoi_col, "); left out ", note, "\n", sep = "")
+            pheno[[tc]] <- lm$time
+            pheno <- pheno[!lm$excluded]
+            validation_info$time_origin <- paste0("end_of_induction (", tc, " - ", opt$eoi_col, "; left out: ", note, ")")
+        } else if (opt$time_origin != "diagnosis") stop("--time_origin must be diagnosis or eoi")
+    }
+    validation_info$n_phenotype_rows <- nrow(pheno)
 
     # Determine trait type
     trait_values <- pheno[[opt$trait]]
@@ -1097,6 +1138,9 @@ if (opt$validate && !is.null(opt$phenotype) && !is.null(opt$trait)) {
                sep = "\t")
 
         cat("\nValidation results saved to:", paste0(opt$output_prefix, ".validation.tsv"), "\n")
+        # the samples and the clock behind it (the GWAS writes the same as '##' lines above its tables)
+        fwrite(data.frame(key = names(validation_info), value = vapply(validation_info, function(x) as.character(x)[1], "")),
+               paste0(opt$output_prefix, ".validation_analysis.tsv"), sep = "\t")
 
         # ================================================================
         # BEST METHOD SELECTION (considering ancestry equity)

@@ -7,12 +7,31 @@ has to show. The implementation is Track B task CP-29 (bash + SLURM, in the `mrm
 
 Decision (17 Nov 2026): the meta-analysis combines **four study groups** — COG P9900s (`COG_P9900`),
 COG AALL0232 + AALL0331 (`COG_AALL0232_0331`), St. Jude Total XV (`SJ_TXV`) and REDIAL (`REDIAL`),
-shipped as the `study_group` column of `phenotypes.tsv` — with **MR-MEGA primary and env-MR-MEGA the
-sensitivity analysis**. Each per-study GWAS adjusts for sex, age at diagnosis, NCI risk group,
-cytogenetic risk (favorable / unfavorable / neutral-unknown) and its within-stratum PCs. The unit that
-decision implies is study group × ancestry stratum; those units are **not built yet** (`docs/WORKFLOW.md`
-section 11), so the unit below is still the ancestry stratum, and CP-29 is where the study × stratum
-units go.
+shipped as the `study_group` column of `phenotypes.tsv` — with **MR-MEGA primary**. Each per-study GWAS
+adjusts for sex, age at diagnosis, log10 WBC at diagnosis, cytogenetic risk (`cyto_risk`, categorical,
+reference neutral-unknown) and its within-stratum PCs. The unit that decision implies is study group ×
+ancestry stratum; those units are **not built yet** (`docs/WORKFLOW.md` section 11), so the unit below is
+still the ancestry stratum, and CP-29 is where the study × stratum units go.
+
+**env-MR-MEGA is now optional, not the planned sensitivity (decided 17 Nov 2026).** The planned
+sensitivity is the **study-cohort refit**: the MR-MEGA lead SNPs refitted in the whole cohort with
+`study_group` as a categorical covariate, a proxy for genotyping chip and treatment era
+(`ARM=study_cohort`; `docs/WORKFLOW.md` section 5). Why env-MR-MEGA stepped back:
+
+- **Four study groups are too few to regress on.** env-MR-MEGA fits the MR-MEGA axes plus the
+  environmental covariate across the units; with four studies (or four studies × a few strata, most of
+  them small) the meta-regression has almost no residual degrees of freedom, and one study's effect is
+  confounded with its protocol, chip and era at once.
+- **There is no reliable era number to put in it.** A study's treatment era would be its enrollment
+  midpoint, but enrollment was not shown to be uniform over each trial's window, so the midpoint is not
+  the median enrollment date and could place a study in the wrong era; the protocol code alone carries
+  no ordering.
+- The refit adjusts for the same study differences directly, on individual-level data, where the
+  degrees of freedom are the children, not the studies.
+
+The rest of this file is kept for running env-MR-MEGA as an optional analysis (for the whole cohort,
+when it is wanted); nothing runs it by default and `protocol` stays in the contract
+(`REQUIRED_COLUMNS` in `config/gwas_settings.txt`) so it can.
 
 ## The model
 

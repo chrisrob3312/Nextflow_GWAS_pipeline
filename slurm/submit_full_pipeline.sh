@@ -31,6 +31,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The settings file (config/gwas_settings.txt unless SETTINGS_FILE names another; bin/gwas_settings.sh):
+# a relative SETTINGS_FILE is read from the directory you launch from, so it is made absolute here,
+# before the cd below, and exported so every job reads the same file
+if [[ -n "${SETTINGS_FILE:-}" && "${SETTINGS_FILE}" != none && "${SETTINGS_FILE}" != /* ]]; then SETTINGS_FILE="${PWD}/${SETTINGS_FILE}"; fi
+[[ -z "${SETTINGS_FILE+x}" ]] || export SETTINGS_FILE
 # Work from the repo root whatever directory this was launched from. sbatch records the
 # directory it was called from as each job's SLURM_SUBMIT_DIR and starting directory.
 cd "${SCRIPT_DIR}/.."
@@ -56,29 +61,31 @@ export LOG_DIR
 [[ $DRY_RUN == 1 ]] || mkdir -p "${LOG_DIR}"
 
 # ---------------------------------------------------------------------------
-# Customisable via environment variables (defaults for the leukemia cohort). The defaults of
-# every number-changing switch live in one table, RR_SWITCHES in bin/run_record.sh;
-# rr_resolve_switches fills in the unset ones and exports them, so every job sees the value
-# that params.tsv records.
+# Settings: config/gwas_settings.txt (or SETTINGS_FILE), one 'name = value' per line, this study's
+# values; an environment variable of the same name beats it, and the built-in defaults of
+# RR_SWITCHES (bin/run_record.sh) fill in what neither sets. rr_resolve_switches resolves and
+# exports every switch, so every job sees the value that params.tsv records (with where it came
+# from: default / settings / arm:<label> / environment). Nothing study-specific is built in.
+# Customisable via the settings file or environment variables:
+#   ARM=mrd_pos                             one arm.<label> of the settings file (e.g. the MRD-positive
+#                                           EFS/OS GWAS); RUN_LABEL defaults to the label; ARM=all
+#                                           runs the whole cohort, then every arm, one launch each
 #   STRATA_LIST="EUR,AFR"                   strata analysed; default: every stratum in the bundle's
 #                                           ancestry/strata.tsv (strata are assigned upstream)
-#   TRAITS_LIST="mrd,mrd_level,efs,os"     phenotype columns, as the handoff contract names them
-#   SURVIVAL_TRAITS="efs,os"                traits run as time-to-event, each with its own columns
-#                                           <trait>_time and <trait>_event (TIME_COL_<trait> /
-#                                           EVENT_COL_<trait> override one trait)
-#   QUANTITATIVE_TRAITS="mrd_level"         traits run with the linear (gaussian) null; the rest are binary
-#   TIME_ORIGIN=eoi|diagnosis               survival clock: eoi (default) = from the end of induction,
-#                                           <trait>_time - eoi_day, leaving out (and counting) a child
-#                                           whose event or censoring is at or before eoi_day
-#   COX_STRATA=mrd_level                    survival only: each level gets its own baseline hazard;
-#                                           empty = none (decided 17 Nov 2026)
-#   COX_EXTRA_COVARIATES=                   survival only: covariates added to COVARIATES, e.g. the
-#                                           MRD-adjusted arm: COX_STRATA= COX_EXTRA_COVARIATES=mrd_level
-#                                           RUN_LABEL=mrd_adjusted
-#   SAMPLE_SUBSET=study_group=REDIAL        restrict every GWAS to the rows whose column has one of
-#                                           the values (e.g. the REDIAL-only GWAS); needs a RUN_LABEL
-#   COVARIATES="sex,age_at_diagnosis,PC1"  numeric phenotype columns, used by GWAS and GxG; default:
-#                                           the bundle's phenotypes/covariates.txt, then PC1..PC5
+#   TRAITS_LIST="efs,os"                    traits run (default: every trait.<name> of the settings file)
+#   SURVIVAL_TRAITS / QUANTITATIVE_TRAITS   the models (default: the trait.<name> lines); a survival
+#                                           trait reads <trait>_time and <trait>_event (TIME_COL_<trait> /
+#                                           EVENT_COL_<trait> override one trait); the rest are binary
+#   TIME_ORIGIN=eoi|diagnosis               survival clock: eoi = from the landmark in EOI_COL,
+#                                           <trait>_time - EOI_COL, leaving out (and counting) a sample
+#                                           whose event or censoring is at or before it
+#   COX_STRATA=<column>                     survival only: each level gets its own baseline hazard
+#   COX_EXTRA_COVARIATES=mrd_level          survival only: covariates added to COVARIATES
+#   FACTOR_COVARIATES=cyto_risk:neutral_unknown   categorical covariates, column:reference level
+#   SAMPLE_SUBSET=study_group=REDIAL        restrict the GWAS, PRS validation and GxG to the rows whose
+#                                           column has one of the values; needs a RUN_LABEL
+#   COVARIATES="sex,age_at_diagnosis,PC1"  phenotype columns, used by GWAS and GxG; default: the
+#                                           bundle's phenotypes/covariates.txt, then PC1..PC<N_PCS_MODEL>
 #   GXG_CUSTOM_VARIANTS=/path/list.txt      optional GRCh38 variant list for GxG
 #   GXG_USE_DEFAULT_LOCI=true|false         include the default known-leukemia-loci table
 #   LOG_DIR=/abs/path                       where every job log goes (default <repo>/logs)
@@ -88,10 +95,39 @@ export LOG_DIR
 #                                           handoff contract says 20, the code default is still 10
 # ---------------------------------------------------------------------------
 source "${REPO}/bin/slurm_utils.sh"    # helpers, and bin/run_record.sh (the switch table, rr_*)
+gs_load || exit 2                      # the settings file: every line checked, refusals name the line
+# ARM=all: the whole cohort, then the arms ARM_ALL names (default: every arm.<label> of the settings
+# file, in file order), one launch (and one run record, under results/<label>/) each. Every one is
+# dry-run first, so a refusal in the last stops the launch before the first is queued.
+_arm_req="${GS_VALUE[ARM]:-}"; [[ -z "${ARM+x}" ]] || _arm_req="${ARM}"      # the environment beats the settings file
+if [[ "${_arm_req}" == all ]]; then
+    [[ -z "${RUN_LABEL:-}" ]] || { echo "REFUSED: ARM=all gives each arm its label as RUN_LABEL; unset RUN_LABEL" >&2; exit 2; }
+    [[ ${#GS_ARMS[@]} -gt 0 ]] || { echo "REFUSED: ARM=all, but ${GS_FILE:-no settings file is read, so there} is no arm.<label> line" >&2; exit 2; }
+    _all="${GS_VALUE[ARM_ALL]:-}"; [[ -z "${ARM_ALL+x}" ]] || _all="${ARM_ALL}"
+    [[ -n "${_all}" ]] || _all="$(IFS=,; echo "${GS_ARMS[*]}")"
+    IFS=',' read -ra _arms <<< "${_all}"
+    for a in "${_arms[@]}"; do
+        [[ -n "${GS_ARM[$a]+x}" ]] || { echo "REFUSED: ARM_ALL names ${a}, which no arm.${a} line of ${GS_FILE} defines (arms: ${GS_ARMS[*]})" >&2; exit 2; }
+    done
+    if [[ $DRY_RUN == 0 ]]; then
+        for a in "" "${_arms[@]}"; do
+            ARM="$a" "${SCRIPT_DIR}/submit_full_pipeline.sh" --dry-run > /dev/null 2> "${LOG_DIR}/.arm_check.$$" \
+                || { echo "REFUSED: ARM=all: the ${a:-whole-cohort} launch would be refused; nothing was queued:" >&2; cat "${LOG_DIR}/.arm_check.$$" >&2; rm -f "${LOG_DIR}/.arm_check.$$"; exit 2; }
+        done
+        rm -f "${LOG_DIR}/.arm_check.$$"
+    fi
+    for a in "" "${_arms[@]}"; do
+        echo "=== ARM=${a:-(none): the whole cohort} ==="
+        ARM="$a" "${SCRIPT_DIR}/submit_full_pipeline.sh" "$@" || exit $?
+    done
+    exit 0
+fi
 rr_refuse_unknown_switches || exit 2
-rr_resolve_switches
+rr_resolve_switches || exit 2
 # Every switch inside its domain (B-05; RR_SWITCHES in bin/run_record.sh), before anything else
 rr_check_domains || exit 2
+# An arm's results go under results/<label>/ unless RUN_LABEL says otherwise
+if [[ -n "${ARM}" && -z "${RUN_LABEL+x}" ]]; then RUN_LABEL="${ARM}"; fi
 # RUN_LABEL (B-05): a labelled run (a sensitivity arm) writes its results under results/<RUN_LABEL>/
 if [[ -n "${RUN_LABEL:-}" ]]; then
     [[ "${RUN_LABEL}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || { echo "REFUSED: RUN_LABEL=${RUN_LABEL}; use letters, digits, _ . - (one folder name)" >&2; exit 2; }
@@ -115,29 +151,47 @@ if [[ "${RR_SET_BY[STRATA_LIST]}" == job ]]; then
 fi
 rr_check_domains STRATA_LIST || exit 2
 IFS=',' read -ra STRATA <<< "${STRATA_LIST}"
+# POOLED: the whole cohort in one fit (cohort PCs, data/tractor/cohort/ Tractor files); alone, since a
+# stratum inside it would be counted twice when the strata are pooled
+if [[ ",${STRATA_LIST}," == *,POOLED,* && "${STRATA_LIST}" != POOLED ]]; then
+    echo "REFUSED: STRATA_LIST=${STRATA_LIST}: POOLED is the whole cohort; list it alone (STRATA_LIST=POOLED)" >&2; exit 2
+fi
 for stratum in "${STRATA[@]}"; do
-    [[ ",${BUNDLE_STRATA}," == *",${stratum},"* ]] \
-        || { echo "REFUSED: stratum ${stratum} (STRATA_LIST) is not in ${STRATA_TSV} (it has: ${BUNDLE_STRATA})" >&2; exit 2; }
+    [[ ",${BUNDLE_STRATA}," == *",${stratum},"* || "${stratum}" == POOLED ]] \
+        || { echo "REFUSED: stratum ${stratum} (STRATA_LIST) is not in ${STRATA_TSV} (it has: ${BUNDLE_STRATA}; or POOLED, the whole cohort)" >&2; exit 2; }
     [[ "${MIX_RETAIN}" == false && "${stratum}" == MIX ]] \
         && { echo "REFUSED: STRATA_LIST names MIX, but MIX_RETAIN=false" >&2; exit 2; }
 done
 IFS=',' read -ra TRAITS <<< "${TRAITS_LIST}"
-# A trait is one model: survival, quantitative, or (neither list) binary
+[[ ${#TRAITS[@]} -gt 0 ]] \
+    || { echo "REFUSED: no traits: declare them with trait.<name> lines in the settings file (${GS_FILE:-none is read; SETTINGS_FILE}), or set TRAITS_LIST" >&2; exit 2; }
+# A trait is one model: survival, quantitative, or (neither list) binary; with trait.<name> lines in
+# the settings file, every trait run must be declared there
 for trait in "${TRAITS[@]}"; do
+    if [[ ${#GS_TRAITS[@]} -gt 0 && " ${GS_TRAITS[*]} " != *" ${trait} "* ]]; then
+        echo "REFUSED: trait ${trait} (TRAITS_LIST) is not declared in ${GS_FILE} (add trait.${trait} = binary | quantitative | survival)" >&2; exit 2
+    fi
     if trait_is_survival "$trait" && trait_is_quantitative "$trait"; then
         echo "REFUSED: trait ${trait} is in both SURVIVAL_TRAITS and QUANTITATIVE_TRAITS" >&2; exit 2
     fi
 done
-# SAMPLE_SUBSET (decided 17 Nov 2026): a sub-cohort GWAS (e.g. study_group=REDIAL) must not overwrite
-# the full-cohort results, so it needs its own RUN_LABEL. PRS and GxG do not apply the subset, so
-# they are refused alongside it rather than run on the full cohort under the subset's label.
+# SAMPLE_SUBSET (decided 17 Nov 2026): a sub-cohort analysis (e.g. study_group=REDIAL, or an MRD arm)
+# must not overwrite the full-cohort results, so it needs its own RUN_LABEL (an ARM gives its label).
+# The GWAS, PRS validation and GxG all apply it. A column that says what the subset selects on (the
+# subset column, SUBSET_LINKED_COLUMNS) cannot be a trait inside it: checked here; nor a covariate:
+# checked once COVARIATES is resolved, below.
+SUBSET_LINKED=""
 if [[ -n "${SAMPLE_SUBSET}" ]]; then
     [[ "${SAMPLE_SUBSET}" =~ ^[A-Za-z][A-Za-z0-9_.]*=[^=]+$ ]] \
         || { echo "REFUSED: SAMPLE_SUBSET=${SAMPLE_SUBSET}; expected column=value[,value...] (e.g. study_group=REDIAL)" >&2; exit 2; }
     [[ -n "${RUN_LABEL:-}" ]] \
         || { echo "REFUSED: SAMPLE_SUBSET=${SAMPLE_SUBSET} needs a RUN_LABEL (e.g. RUN_LABEL=redial_only), so the full-cohort results are not overwritten" >&2; exit 2; }
-    [[ "${RUN_PRS}" == true || "${RUN_GXG}" == true ]] \
-        && { echo "REFUSED: SAMPLE_SUBSET is applied by the GWAS only; PRS and GxG would run on the full cohort (set RUN_PRS=false RUN_GXG=false)" >&2; exit 2; }
+    # the subset column, and with it every SUBSET_LINKED_COLUMNS column when it is one of them
+    SUBSET_LINKED=",${SAMPLE_SUBSET%%=*},"; _linked_desc="${SUBSET_LINKED_COLUMNS}"; [[ -n "${_linked_desc}" ]] || _linked_desc=none
+    [[ ",${SUBSET_LINKED_COLUMNS}," == *"${SUBSET_LINKED}"* ]] && SUBSET_LINKED=",${SUBSET_LINKED_COLUMNS},"
+    _bad=(); _keep=()
+    for t in "${TRAITS[@]}"; do if [[ "${SUBSET_LINKED}" == *",${t},"* ]]; then _bad+=("$t"); else _keep+=("$t"); fi; done
+    [[ ${#_bad[@]} -eq 0 ]] || { echo "REFUSED: SAMPLE_SUBSET=${SAMPLE_SUBSET} selects on ${SAMPLE_SUBSET%%=*} (linked columns: ${_linked_desc}), so ${_bad[*]} cannot be a trait inside it (set TRAITS_LIST=$(IFS=,; echo "${_keep[*]:-}"))" >&2; exit 2; }
 fi
 # COX_EXTRA_COVARIATES must not repeat the stratifying column (or, below, a covariate in COVARIATES)
 if [[ -n "${COX_EXTRA_COVARIATES}" ]]; then
@@ -165,7 +219,9 @@ if [[ "${RUN_TRACTOR_PREP}" == true ]]; then
     [[ -s "${HANDOFF_DIR}/local_ancestry/flare_index_map.tsv" ]] || MISSING_ANC+=("${HANDOFF_DIR}/local_ancestry/flare_index_map.tsv")
 else
     for stratum in "${STRATA[@]}"; do
-        [[ -s "${REPO}/data/tractor/${stratum}/ancestries.txt" ]] || MISSING_ANC+=("${REPO}/data/tractor/${stratum}/ancestries.txt")
+        anc_f="${REPO}/data/tractor/${stratum}/ancestries.txt"
+        [[ "${stratum}" == POOLED ]] && anc_f="${REPO}/data/tractor/ancestries.txt"   # the cohort's list
+        [[ -s "${anc_f}" ]] || MISSING_ANC+=("${anc_f}")
     done
 fi
 # PRS, and GxG's pooled task when there are Tractor files, read the cohort-wide list instead
@@ -196,7 +252,7 @@ for trait in "${TRAITS[@]}"; do
     if trait_is_survival "$trait"; then
         need=("$(trait_time_col "$trait")" "$(trait_event_col "$trait")")
         SURV_COLS+=("${trait}:${need[0]}/${need[1]}")
-        [[ "${TIME_ORIGIN}" == eoi ]] && need+=(eoi_day)
+        [[ "${TIME_ORIGIN}" == eoi ]] && need+=("${EOI_COL}")
         [[ -n "${COX_STRATA}" ]] && need+=("${COX_STRATA}")
         [[ -n "${COX_EXTRA_COVARIATES}" ]] && { IFS=',' read -ra _cx <<< "${COX_EXTRA_COVARIATES}"; need+=("${_cx[@]}"); }
     else
@@ -209,6 +265,12 @@ for trait in "${TRAITS[@]}"; do
     fi
 done
 [[ -s "${PHENO_SOURCE}" ]] || PHENO_PROBLEMS+=("phenotype file ${PHENO_SOURCE} is missing or empty")
+# VARIANT_INCLUDE (relative: from the repo root) must list something before 22 x strata tasks read it
+if [[ -n "${VARIANT_INCLUDE}" ]]; then
+    VI="${VARIANT_INCLUDE}"; [[ "$VI" == /* ]] || VI="${REPO}/${VI}"
+    [[ -n "$(grep -v '^#' "$VI" 2>/dev/null | tr -d '[:space:]')" ]] \
+        || PHENO_PROBLEMS+=("VARIANT_INCLUDE=${VARIANT_INCLUDE}: ${VI} is missing or lists no variant (bin/mrmega_lead_snps.sh writes it)")
+fi
 if [[ -n "${SAMPLE_SUBSET}" && -s "${PHENO_SOURCE}" ]]; then
     SUBSET_COL="${SAMPLE_SUBSET%%=*}"
     if grep -qxF -- "${SUBSET_COL}" <<< "${PHENO_HEADER}"; then
@@ -256,6 +318,18 @@ if [[ -n "${COX_EXTRA_COVARIATES}" ]]; then
         [[ ",${COVARIATES}," == *",${c},"* ]] && { echo "REFUSED: ${c} is in both COVARIATES and COX_EXTRA_COVARIATES" >&2; exit 2; }
     done
 fi
+# FACTOR_COVARIATES' columns are in the model too (the adapter adds the ones COVARIATES does not name)
+FACTOR_COLS=""
+if [[ -n "${FACTOR_COVARIATES}" ]]; then FACTOR_COLS="$(tr ',' '\n' <<< "${FACTOR_COVARIATES}" | cut -d: -f1 | paste -sd, -)"; fi
+# Inside a subset no covariate may be a column the subset selects on (e.g. no MRD covariate inside an
+# MRD arm); the refusal says what to set instead
+if [[ -n "${SUBSET_LINKED}" ]]; then
+    for sw in COVARIATES COX_EXTRA_COVARIATES COX_STRATA FACTOR_COVARIATES; do
+        IFS=',' read -ra _v <<< "${!sw}"; _bad=(); _keep=()
+        for c in ${_v[@]+"${_v[@]}"}; do if [[ "${SUBSET_LINKED}" == *",${c%%:*},"* ]]; then _bad+=("${c%%:*}"); else _keep+=("$c"); fi; done
+        [[ ${#_bad[@]} -eq 0 ]] || { echo "REFUSED: SAMPLE_SUBSET=${SAMPLE_SUBSET} selects on ${SAMPLE_SUBSET%%=*} (linked columns: ${_linked_desc}), so ${_bad[*]} cannot be a covariate inside it (set ${sw}=$(IFS=,; echo "${_keep[*]:-}"))" >&2; exit 2; }
+    done
+fi
 COV_PROBLEMS=()
 [[ -n "${COVARIATES}" ]] || COV_PROBLEMS+=("no covariates: COVARIATES is not set and ${HANDOFF_DIR}/phenotypes/covariates.txt is missing")
 PC_FILES=()        # the files whose PC columns the tasks will use, where they exist already
@@ -267,7 +341,7 @@ for S in "${PC_SETS[@]}"; do
     else continue; fi
     [[ -s "$f" ]] && PC_FILES+=("$f")
 done
-IFS=',' read -ra COV_NAMES <<< "${COVARIATES}"
+IFS=',' read -ra COV_NAMES <<< "${COVARIATES}${FACTOR_COLS:+,${FACTOR_COLS}}"
 for c in "${COV_NAMES[@]}"; do
     if [[ "$c" =~ ^PC([0-9]+)$ ]]; then
         if [[ "${STRUCTURE_SOURCE}" == compute && "${SKIP_PCAIR}" != true ]]; then
@@ -284,15 +358,11 @@ if [[ ${#COV_PROBLEMS[@]} -gt 0 ]]; then
     if [[ $DRY_RUN == 1 ]]; then printf 'WARNING: %s (a launch would refuse)\n' "${COV_PROBLEMS[@]}"
     else printf 'REFUSED: %s\n' "${COV_PROBLEMS[@]}" >&2; exit 2; fi
 fi
-RR_EXTRA_PARAMS="$(printf 'SURVIVAL_COLUMNS\t%s\tderived\nHANDOFF_DIR\t%s\tderived' "$(IFS=,; echo "${SURV_COLS[*]:-none}")" "${HANDOFF_DIR}")"
-# The landmark's column, and what downstream steps do with the clock: PRS validation and GxG read
-# the times as shipped (from diagnosis) and do not stratify on COX_STRATA yet (docs/WORKFLOW.md, not done)
+RR_EXTRA_PARAMS="$(printf 'SURVIVAL_COLUMNS\t%s\tderived\nHANDOFF_DIR\t%s\tderived\nSETTINGS_FILE\t%s\tderived' \
+    "$(IFS=,; echo "${SURV_COLS[*]:-none}")" "${HANDOFF_DIR}" "${GS_FILE:-none}")"
+# The landmark's column (TIME_ORIGIN=eoi): the GWAS, PRS validation and GxG all count from it
 if [[ ${#SURV_COLS[@]} -gt 0 && "${TIME_ORIGIN}" == eoi ]]; then
-    RR_EXTRA_PARAMS+="$(printf '\nEOI_COLUMN\teoi_day\tderived')"
-    if [[ "${RUN_PRS}" == true || "${RUN_GXG}" == true ]]; then
-        echo "NOTE: TIME_ORIGIN=eoi applies to the GWAS; PRS validation and GxG still count survival time from diagnosis"
-        RR_EXTRA_PARAMS+="$(printf '\nDOWNSTREAM_TIME_ORIGIN\tdiagnosis (PRS validation and GxG do not apply the landmark yet)\tderived')"
-    fi
+    RR_EXTRA_PARAMS+="$(printf '\nEOI_COLUMN\t%s\tderived' "${EOI_COL}")"
 fi
 
 DEFERRED=()
@@ -334,6 +404,7 @@ echo "Partition: ${SLURM_PARTITION}"
 echo "Account:   ${SLURM_ACCOUNT}"
 echo "Logs:      ${LOG_DIR}"
 echo "Results:   ${GWAS_RESULTS}${RUN_LABEL:+ (RUN_LABEL=${RUN_LABEL})}"
+echo "Settings:  ${GS_FILE:-none (built-in defaults; SETTINGS_FILE)}${ARM:+ (ARM=${ARM})}"
 if [[ $DRY_RUN == 1 ]]; then
     echo "Record:    ${GWAS_RUN_DIR} (dry run: not created)"
     # what params.tsv would hold, so two dry runs can be compared row by row
@@ -494,16 +565,18 @@ join() { local IFS=,; echo "$*"; }          # join a b c -> a,b,c
 #    writes each stratum's members from the bundle's strata.tsv). awk names the first shared sample.
 SAMPLE_FILES=()
 for stratum in "${STRATA[@]}"; do
+    [[ "${stratum}" == POOLED ]] && continue      # STRATA_LIST=POOLED: the whole cohort, nothing to be disjoint from
     f="${SCRIPT_DIR}/results/strata/${stratum}.samples.txt"
     [[ -s "$f" ]] || { echo "ERROR: ${f} is missing (step 0 writes each stratum's members from ${STRATA_TSV})" >&2; exit 1; }
     SAMPLE_FILES+=("$f")
 done
-overlap="$(awk 'FNR == 1 {s = FILENAME; sub(/.*\//, "", s); sub(/\.samples\.txt$/, "", s)}
+[[ ${#SAMPLE_FILES[@]} -gt 0 ]] && overlap="$(awk 'FNR == 1 {s = FILENAME; sub(/.*\//, "", s); sub(/\.samples\.txt$/, "", s)}
                ($1 in seen) && seen[$1] != s {n++; if (!ex) ex = seen[$1] " and " s " share " $1; next}
                {seen[$1] = s}
                END {if (n) print n " sample(s); e.g. " ex}' "${SAMPLE_FILES[@]}")"
-[[ -z "$overlap" ]] || { echo "ERROR: strata not disjoint: ${overlap} (results/strata/<S>.samples.txt)" >&2; exit 1; }
-echo "Strata disjoint: $(join "${STRATA[@]}") ($(cat "${SAMPLE_FILES[@]}" | wc -l) samples)"
+[[ -z "${overlap:-}" ]] || { echo "ERROR: strata not disjoint: ${overlap} (results/strata/<S>.samples.txt)" >&2; exit 1; }
+if [[ ${#SAMPLE_FILES[@]} -gt 0 ]]; then echo "Strata disjoint: $(join "${STRATA[@]}") ($(cat "${SAMPLE_FILES[@]}" | wc -l) samples)"
+else echo "Stratum POOLED: the whole cohort"; fi
 
 # 2. Each stratum has all 22 chromosomes' results, or was skipped below MIN_STRATUM_N on every
 #    chromosome (each task's chr<N>.run_counts.tsv says which). Anything else stops the job,

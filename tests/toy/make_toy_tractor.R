@@ -8,10 +8,12 @@
 #   <prefix>.hapcount.<ANC>.txt.gz   CHROM POS ID REF ALT <sample...>   haplotypes of ANC (0-2)
 #   <prefix>.dosage.<ANC>.txt.gz     same columns                        ALT alleles on them (0-2)
 #   <prefix>.phenotypes.tsv          FID IID sample_id mrd efs_time efs_event os_time os_event protocol
-#                                    sex age_at_diagnosis cd19_pos_pct storage_days PC1 PC2
+#                                    sex age_at_diagnosis wbc_dx_log10 cyto_risk PC1 PC2
 #                                    mrd_level eoi_day study_group (no extra random draws: mrd_level
 #                                    from mrd and the variant-10 dosage, eoi_day = eoi, study_group
-#                                    alternating REDIAL / COG)
+#                                    alternating REDIAL / COG; wbc_dx_log10 and cyto_risk take the random
+#                                    draws of the retired cd19_pos_pct / storage_days, so the other
+#                                    columns are unchanged)
 #   <prefix>.samples.txt             the sample IDs, one per line
 # usage: Rscript tests/toy/make_toy_tractor.R <prefix> [n_samples=120] [n_variants=200] [ancestries=AFR,EUR]
 #        [chrom=22] [seed=1] [na_rows=K] [id_prefix=T] [eoi=0]
@@ -71,8 +73,8 @@ ph <- data.frame(FID = ids, IID = ids, sample_id = ids,
                  mrd = rbinom(n, 1, plogis(-0.5 + 0.5 * g)),
                  efs_time = round(rexp(n, 0.08), 2), efs_event = rbinom(n, 1, 0.5),
                  os_time = os_time, os_event = os_event, protocol = sample(c("P1", "P2"), n, TRUE),
-                 sex = sex, age_at_diagnosis = age, cd19_pos_pct = round(runif(n, 50, 99), 1),
-                 storage_days = sample(100:3000, n, TRUE), PC1 = round(rnorm(n), 4), PC2 = round(rnorm(n), 4))
+                 sex = sex, age_at_diagnosis = age, wbc_dx_log10 = round(runif(n, 0.5, 2.5), 2),
+                 cyto_risk = c("favorable", "unfavorable", "neutral_unknown")[sample(100:3000, n, TRUE) %% 3 + 1], PC1 = round(rnorm(n), 4), PC2 = round(rnorm(n), 4))
 if (na_rows > 0) { ph$mrd[seq_len(na_rows)] <- NA; ph$os_time[seq_len(na_rows)] <- NA }
 ph$mrd_level <- ifelse(ph$mrd == 0, 1L, 2L + pmin(2L, as.integer(floor(g))))
 ph$eoi_day <- as.numeric(opt("eoi", "0"))

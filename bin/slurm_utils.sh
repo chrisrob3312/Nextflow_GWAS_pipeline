@@ -145,18 +145,19 @@ should_run_stratum() {
 # <trait>_event (efs_time/efs_event, os_time/os_event: docs/HANDOFF_CONTRACT.md); TIME_COL_<trait>
 # and EVENT_COL_<trait> (e.g. TIME_COL_efs) override one trait's names. There is no setting that
 # applies to every trait at once.
-trait_time_col()  { local v="TIME_COL_$1";  printf '%s' "${!v:-$1_time}"; }
-trait_event_col() { local v="EVENT_COL_$1"; printf '%s' "${!v:-$1_event}"; }
+trait_time_col()  { local v="TIME_COL_$1";  printf '%s' "${!v:-$(gs_value "$v" || printf '%s' "$1_time")}"; }
+trait_event_col() { local v="EVENT_COL_$1"; printf '%s' "${!v:-$(gs_value "$v" || printf '%s' "$1_event")}"; }
 # Is a trait time-to-event? (SURVIVAL_TRAITS, comma-separated)
 # default_covariates: the model's covariates when COVARIATES is not set. The study's list,
 # HANDOFF_DIR/phenotypes/covariates.txt (one column name per line; docs/HANDOFF_CONTRACT.md), then
-# the first five PCs the structure step writes (within-stratum PCs for a stratum, cohort PCs for
-# POOLED). Fails, naming the file, if the list is missing.
+# the first N_PCS_MODEL PCs the structure step writes (within-stratum PCs for a stratum, cohort PCs
+# for POOLED). Fails, naming the file, if the list is missing.
 default_covariates() {
-    local f="${HANDOFF_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/data/handoff}/phenotypes/covariates.txt" names
+    local f="${HANDOFF_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/data/handoff}/phenotypes/covariates.txt" names k
     [[ -s "$f" ]] || { echo "ERROR: COVARIATES is not set and ${f} (the study's covariate list) is missing" >&2; return 1; }
     names="$(tr -d '\r' < "$f" | awk 'NF {print $1}' | paste -sd, -)"
-    printf '%s%sPC1,PC2,PC3,PC4,PC5' "$names" "${names:+,}"
+    k="${N_PCS_MODEL:-$(rr_default N_PCS_MODEL)}"
+    printf '%s%s%s' "$names" "${names:+,}" "$(seq -f 'PC%g' 1 "$k" | paste -sd, -)"
 }
 
 # bundle_strata: the strata of the handoff bundle (HANDOFF_DIR/ancestry/strata.tsv), comma-joined,

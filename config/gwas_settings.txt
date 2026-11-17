@@ -1,0 +1,190 @@
+# ============================================================================
+#  GWAS SETTINGS -- this study: childhood B-ALL; MRD, MRD level, EFS and OS
+#  (REDIAL, COG P9900 / AALL0232-0331, St. Jude Total XV). Decided 17 Nov 2026.
+# ============================================================================
+#
+#  slurm/submit_full_pipeline.sh reads this file when it exists. Another file:
+#      SETTINGS_FILE=/path/to/my_settings.txt slurm/submit_full_pipeline.sh
+#  (SETTINGS_FILE=none reads no file: the built-in defaults only.) Another study starts from
+#  config/gwas_settings.example_generic.txt; README.md, "Using the pipeline for another study".
+#
+#  FORMAT
+#    one  name = value  per line;  '#' starts a comment;  blank lines ignored.
+#    An empty value sets the switch to empty (COX_STRATA = means no stratification).
+#    Leave a line out, or comment it, to get the built-in default (bin/run_record.sh, RR_SWITCHES).
+#
+#  RULES
+#    * An unknown or misspelled name, a name given twice, or a value outside what the setting
+#      allows STOPS the launch, naming the line. Nothing here is ever silently ignored.
+#    * PRECEDENCE: built-in default < this file < arm.<label> (when ARM=<label>) < an environment
+#      variable of the same name, so a one-off override needs no edit:
+#          TIME_ORIGIN=diagnosis RUN_LABEL=from_dx slurm/submit_full_pipeline.sh
+#    * The run record's params.tsv says, per switch, where its value came from:
+#      default / settings / arm:<label> / environment (and bundle / job for the derived ones).
+#    * Site settings (SLURM_PARTITION, SLURM_ACCOUNT, LOG_DIR) stay in the environment
+#      (docs/HPC_SITE.md); RUN_LABEL too.
+#    * The phenotype columns these settings name are the ones the handoff bundle must carry
+#      (docs/HANDOFF_CONTRACT.md, "Columns that follow from the settings").
+# ============================================================================
+
+## Traits ---------------------------------------------------------------------
+# trait.<name> = binary | quantitative | survival[:<time column>:<event column>]
+#   <name> is the phenotype column (binary 0/1, quantitative numeric). A survival trait reads
+#   <name>_time and <name>_event unless the columns are given. TRAITS_LIST defaults to every
+#   trait declared here, in this order; set TRAITS_LIST (here or in the environment) to run fewer.
+trait.mrd       = binary          # end-of-induction MRD >= 0.01 % (0/1)
+trait.mrd_level = quantitative    # end-of-induction MRD level 1-4, tested as one linear trend
+trait.efs       = survival        # efs_time / efs_event, days from diagnosis
+trait.os        = survival        # os_time / os_event, days from diagnosis
+
+## Time origin of the survival traits -----------------------------------------
+# TIME_ORIGIN: eoi = count time from the landmark in EOI_COL (time - EOI_COL; a sample whose event
+#   or censoring is at or before it, or without it, is left out of that trait and counted);
+#   diagnosis = the times as shipped. Applies to the GWAS, PRS validation and GxG.  [eoi | diagnosis]
+TIME_ORIGIN = eoi
+# EOI_COL: the landmark column, days from diagnosis to the end of induction.  [a column name]
+EOI_COL = eoi_day
+
+## Covariates -----------------------------------------------------------------
+# COVARIATES: the model covariates. Unset = the bundle's phenotypes/covariates.txt (this study:
+#   sex, age_at_diagnosis, wbc_dx_log10, cyto_risk), then PC1..PC<N_PCS_MODEL>.  [column names]
+# COVARIATES = sex,age_at_diagnosis,wbc_dx_log10,cyto_risk,PC1,PC2,PC3,PC4,PC5
+# N_PCS_MODEL: PCs in the default covariates; 5-8 for this cohort: choose from the PC-AiR scree plot
+#   and the genomic-control lambda of a first run (docs/WORKFLOW.md, "How many PCs").  [whole number >= 1]
+N_PCS_MODEL = 5
+# FACTOR_COVARIATES: categorical covariates, column:reference_level; each enters the model as 0/1
+#   indicators for its other levels (added to COVARIATES if not named there).  [column:level,...]
+FACTOR_COVARIATES = cyto_risk:neutral_unknown
+# COX_EXTRA_COVARIATES: covariates for the survival traits only. mrd_level as ONE linear trend term,
+#   in the whole-cohort analysis; the MRD arms below set it empty.  [column names, may be empty]
+COX_EXTRA_COVARIATES = mrd_level
+# COX_STRATA: a column whose levels each get their own Cox baseline hazard; empty = none.  [column name or empty]
+COX_STRATA =
+# REF_ANCESTRY: reference ancestry of the Tractor local-ancestry terms.  [an ancestry label]
+REF_ANCESTRY = EUR
+
+## Strata and filters ---------------------------------------------------------
+# MIN_STRATUM_N: smallest stratum analysed (decided 10 Nov 2026).  [whole number >= 1]
+MIN_STRATUM_N = 50
+# MAC_MIN: minor allele count an ancestry's dose term needs to be tested (open: the contract says 20).  [whole number >= 1]
+MAC_MIN = 10
+# PC_SCALE: the PCs a stratum's GWAS adjusts for; POOLED always uses the cohort PCs.  [stratum | cohort]
+PC_SCALE = stratum
+# MIX_RETAIN: analyse the bundle's MIX stratum.  [true | false]
+MIX_RETAIN = true
+
+## Subset arms (overall, MRD-positive, MRD-negative) ----------------------------
+# The whole-cohort run (no ARM) adjusts EFS and OS for mrd_level. Each MRD arm runs EFS and OS
+# only, in one MRD group, without an MRD covariate:
+#     slurm/submit_full_pipeline.sh                  # whole cohort, every ancestry stratum
+#     ARM=mrd_pos slurm/submit_full_pipeline.sh      # results/mrd_pos/
+#     ARM=mrd_neg slurm/submit_full_pipeline.sh      # results/mrd_neg/
+#     ARM=all slurm/submit_full_pipeline.sh          # the three above (ARM_ALL), one launch each
+# arm.<label> = SWITCH=value ...: the switches an arm sets (they beat this file, lose to the environment).
+arm.mrd_pos = SAMPLE_SUBSET=mrd=1 TRAITS_LIST=efs,os COX_EXTRA_COVARIATES=
+arm.mrd_neg = SAMPLE_SUBSET=mrd=0 TRAITS_LIST=efs,os COX_EXTRA_COVARIATES=
+# ARM_ALL: the arms ARM=all runs after the whole cohort, in order (empty: every arm below).  [arm labels]
+ARM_ALL = mrd_pos,mrd_neg
+# SUBSET_LINKED_COLUMNS: columns that say what an MRD subset selects on; inside a subset on one of them, none
+#   (nor the subset column itself) may be a trait or a covariate, so a launch that would is refused.  [column names]
+SUBSET_LINKED_COLUMNS = mrd,mrd_level
+# Study-cohort sensitivity (replaces env-MR-MEGA as the planned sensitivity, 17 Nov 2026): the MR-MEGA
+# lead SNPs refitted in the whole cohort (POOLED: cohort PCs) with study_group as a categorical
+# covariate (reference REDIAL), a proxy for genotyping chip and treatment era; the other covariates
+# as in the main model. Write the SNP list first (docs/WORKFLOW.md, "Study-cohort sensitivity"):
+#     bin/mrmega_lead_snps.sh --output results/mrmega/lead_snps.txt results/mrmega/efs/efs.mrmega.result results/mrmega/os/os.mrmega.result
+#     ARM=study_cohort slurm/submit_full_pipeline.sh
+arm.study_cohort = STRATA_LIST=POOLED VARIANT_INCLUDE=results/mrmega/lead_snps.txt FACTOR_COVARIATES=cyto_risk:neutral_unknown,study_group:REDIAL
+# LEAD_SNP_P: MR-MEGA association P below which bin/mrmega_lead_snps.sh lists a variant.  [a number > 0]
+LEAD_SNP_P = 5e-8
+
+## The bundle checker (bin/check_handoff_bundle.sh) ----------------------------
+# STUDY_GROUP_COL: the column naming each sample's study (the MR-MEGA study).  [a column name]
+STUDY_GROUP_COL = study_group
+# EOI_PROTOCOL_DAY: group:day -- every sample of these study groups must have this day in EOI_COL
+#   (COG and St. Jude: the protocol day). Groups not listed (REDIAL) keep each child's own day,
+#   which must be >= 0 or NA.  [group:number,...]
+EOI_PROTOCOL_DAY = COG_P9900:29,COG_AALL0232_0331:29,SJ_TXV:46
+# COLUMN_LEVELS: column:value/value/... -- the only values (besides NA) a column may hold.  [column:values,...]
+COLUMN_LEVELS = mrd_level:1/2/3/4,cyto_risk:favorable/unfavorable/neutral_unknown,study_group:COG_P9900/COG_AALL0232_0331/SJ_TXV/REDIAL
+# REQUIRED_COLUMNS: further columns the bundle must carry (never blank; NA allowed): protocol is
+#   env-MR-MEGA's covariate (optional analysis, docs/ENV_MRMEGA.md).  [column names]
+REQUIRED_COLUMNS = protocol,study_group
+
+## Steps after the GWAS ---------------------------------------------------------
+# RUN_MRMEGA / RUN_PRS / RUN_COLOC / RUN_VALIDATION / RUN_GXG: optional steps.  [true | false]
+RUN_MRMEGA = false
+RUN_PRS = false
+RUN_COLOC = false
+RUN_VALIDATION = false
+RUN_GXG = false
+# PRS_ANCESTRY_PROPS: global ancestry shares weighting the combined PRS; labels as in
+#   data/tractor/ancestries.txt.  [LABEL:share,...]
+PRS_ANCESTRY_PROPS = EUR:0.35,AFR:0.15,AMR:0.50
+
+## Every other switch: its built-in default, commented out (uncomment a line to change it) -----
+# TRAITS_LIST, SURVIVAL_TRAITS and QUANTITATIVE_TRAITS come from the trait.<name> lines above; set
+# TRAITS_LIST to run fewer of them. SAMPLE_SUBSET, VARIANT_INCLUDE and ARM are normally set by an arm
+# or for one launch in the environment.
+# STRATA_LIST: strata analysed; default: every stratum in HANDOFF_DIR/ancestry/strata.tsv (set_by bundle), MIX left out with MIX_RETAIN=false  [comma-separated names]
+# STRATA_LIST =
+# TRAITS_LIST: traits analysed (phenotype columns); default: every trait.<name> line of the settings file, in file order  [comma-separated names, may be empty]
+# TRAITS_LIST =
+# SAMPLE_SUBSET: restrict every GWAS, PRS validation and GxG to the samples whose phenotype column has one of these values, column=value[,value...] (e.g. study_group=REDIAL); needs a RUN_LABEL  [a path or value]
+# SAMPLE_SUBSET =
+# ARM: one subset arm, an arm.<label> line of the settings file: its switches beat the settings file and lose to the environment, RUN_LABEL defaults to the label; all = the whole cohort, then every arm, one launch each  [a path or value]
+# ARM =
+# VARIANT_INCLUDE: file of variant IDs (chr:pos:ref:alt), one per line: the GWAS tests only these (the study-cohort sensitivity arm; bin/mrmega_lead_snps.sh writes one)  [a path or value]
+# VARIANT_INCLUDE =
+# RUN_TRACTOR_PREP: steps 0b-0d: FLARE -> Tractor files (slurm/submit_la_extract.sh), each stratum's ancestries and files (slurm/submit_tractor_layout.sh) before the GWAS  [true | false]
+# RUN_TRACTOR_PREP = false
+# LA_MIN_SHARE: share of a stratum's haplotypes an ancestry needs to be modelled in it (data/tractor/<S>/ancestries.txt, written when absent)  [a number > 0]
+# LA_MIN_SHARE = 0.01
+# MRMEGA_PCS: most MR-MEGA axes of genetic variation; each trait uses min(K-2, MRMEGA_PCS) for its K strata with sumstats  [whole number >= 1]
+# MRMEGA_PCS = 3
+# STRUCTURE_SOURCE: step 0: ingest the bundle's PCs and GRM (bundle), or compute them (compute, the comparator)  [bundle | compute]
+# STRUCTURE_SOURCE = bundle
+# SKIP_PCAIR: skip step 0 and reuse the structure already in results/pcair  [true | false]
+# SKIP_PCAIR = false
+# QC_GATE_OVERRIDE: assertion ids a QC gate lets through although failed or missing (bin/qc_gate.sh); each use is recorded in qc/qc_assertions.tsv  [comma-separated names, may be empty]
+# QC_GATE_OVERRIDE =
+# N_PCS: PC-AiR PCs written by the comparator (STRUCTURE_SOURCE=compute)  [whole number >= 1]
+# N_PCS = 10
+# N_PCS_PCRELATE: PCs used inside PC-Relate  [whole number >= 1]
+# N_PCS_PCRELATE = 5
+# KIN_THRESH: kinship threshold for the PC-AiR unrelated set  [a number > 0]
+# KIN_THRESH = 0.0442
+# LD_R2: LD pruning r2 for PC-AiR / PC-Relate  [a number > 0]
+# LD_R2 = 0.1
+# PCAIR_ITER: PC-AiR / PC-Relate iterations  [whole number >= 1]
+# PCAIR_ITER = 2
+# GXG_P_THRESHOLD: GWAS P below which a hit enters GxG  [a number > 0]
+# GXG_P_THRESHOLD = 1e-5
+# GXG_MAX_HITS: cap on GxG hits  [whole number >= 1]
+# GXG_MAX_HITS = 200
+# GXG_PRUNE_MODE: how LD-correlated GxG hits are selected  [conditional | variant | pair]
+# GXG_PRUNE_MODE = conditional
+# GXG_COND_P: conditional P that keeps an LD-correlated GxG hit  [a number > 0]
+# GXG_COND_P = 1e-4
+# GXG_USE_DEFAULT_LOCI: include the known-leukemia-loci table in GxG  [true | false]
+# GXG_USE_DEFAULT_LOCI = true
+# GXG_CUSTOM_VARIANTS: extra GRCh38 variant list for GxG  [a path or value]
+# GXG_CUSTOM_VARIANTS =
+# ANCESTRY_COL: phenotype column holding the ancestry label (GxG)  [comma-separated names]
+# ANCESTRY_COL = GRAF_ANC
+# PHENO: phenotype file (default: the structure step's <stratum>.phenotypes.with_pcs.tsv)  [a path or value]
+# PHENO =
+# KINSHIP: GRM (default: the structure step's cohort.pcrelate.grm.rds)  [a path or value]
+# KINSHIP =
+# HANDOFF_DIR: the handoff bundle directory (default <repo>/data/handoff)  [a path or value]
+# HANDOFF_DIR =
+# GENO: PLINK prefix for STRUCTURE_SOURCE=compute (default HANDOFF_DIR/genotypes/cohort.hardcall.maf01)  [a path or value]
+# GENO =
+# PHENO_IN: the phenotype file (default HANDOFF_DIR/phenotypes/phenotypes.tsv)  [a path or value]
+# PHENO_IN =
+# KNOWN_LOCI: known-loci table for GxG (default assets/known_leukemia_risk_loci.tsv)  [a path or value]
+# KNOWN_LOCI =
+# STRATA_FILE: sample_id/stratum table the adapter checks --stratum against (default HANDOFF_DIR/ancestry/strata.tsv)  [a path or value]
+# STRATA_FILE =
+# ANC_INDEX_MAP: anc_index/label map for numbered Tractor files (default HANDOFF_DIR/local_ancestry/flare_index_map.tsv)  [a path or value]
+# ANC_INDEX_MAP =

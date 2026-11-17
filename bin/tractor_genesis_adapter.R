@@ -88,7 +88,13 @@ option_list <- list(
 
     # Covariates
     make_option(c("-c", "--covariates"), type = "character", default = NULL,
-                help = "Comma-separated covariate column names; each must be a numeric phenotype column (checked before anything is read or fitted). The list used is written as '## covariates=' above every results table"),
+                help = "Comma-separated covariate column names; each must be a numeric phenotype column, or declared with --factor_covariates (checked before anything is read or fitted). The list used is written as '## covariates=' above every results table"),
+    make_option(c("--factor_covariates"), type = "character", default = NULL,
+                help = paste("column:reference[,column:reference...]: categorical covariates (e.g. cyto_risk:neutral_unknown).",
+                             "Each is in the model (added to --covariates when not named there) as one 0/1 indicator per",
+                             "level other than the reference, among the analysed samples; the expansion is written as",
+                             "'## factor_covariates=' above every results table and recorded, with the count per level, as the",
+                             "sample-accounting step factor_covariates")),
     make_option(c("--global_ancestry_prefix"), type = "character", default = NULL,
                 help = "Prefix for global ancestry columns (e.g., 'prop_' expects prop_EUR, prop_AFR, etc.)"),
 
@@ -139,6 +145,10 @@ option_list <- list(
     make_option(c("--sample_subset"), type = "character", default = NULL,
                 help = paste("column=value[,value...]: analyse only the samples whose phenotype column has one of",
                              "these values (e.g. study_group=REDIAL for a REDIAL-only GWAS); counted in sample accounting")),
+    make_option(c("--variant_include"), type = "character", default = NULL,
+                help = paste("File of variant IDs, one per line (the Tractor ID chr:pos:ref:alt; e.g. the MR-MEGA lead",
+                             "SNPs bin/mrmega_lead_snps.sh writes): only these are tested. A chromosome with none of them",
+                             "writes header-only tables. Written as '## variant_include=' above every results table")),
     make_option(c("--min_stratum_n"), type = "integer", default = 50,
                 help = paste("Fewer analysable samples than this: the stratum is skipped (exit 0, no results,",
                              "status skipped_below_min_stratum_n in <output_prefix>.run_counts.tsv) [default: 50]")),
@@ -304,7 +314,23 @@ cat("  Loaded", n_samples, "samples\n")
 # anything else is read or fitted, so a misspelt or text column stops the task with its name
 # instead of failing inside a model (or, as before, being coerced to NA without a word)
 covariates_requested <- if (!is.null(opt$covariates)) trimws(strsplit(opt$covariates, ",")[[1]]) else character()
-check_covariates(pheno, covariates_requested, opt$phenotype)
+# Categorical covariates (--factor_covariates column:reference): in the model whether or not
+# --covariates names them; expanded to 0/1 indicators once the analysed samples are known (below)
+factor_spec <- parse_factor_covariates(opt$factor_covariates)
+covariates_requested <- union(covariates_requested, names(factor_spec))
+check_covariates(pheno, covariates_requested, opt$phenotype, factors = names(factor_spec))
+for (cv in names(factor_spec)) {     # a blank category is missing (dropped as an incomplete case), never a level
+    if (is.character(pheno[[cv]])) set(pheno, i = which(!nzchar(trimws(pheno[[cv]]))), j = cv, value = NA_character_)
+}
+# Variants to test (--variant_include): the others are read and passed over, never tested
+variant_keep <- NULL
+if (!is.null(opt$variant_include)) {
+    if (!file.exists(opt$variant_include)) stop("--variant_include: ", opt$variant_include, " does not exist")
+    variant_keep <- unique(trimws(readLines(opt$variant_include, warn = FALSE)))
+    variant_keep <- variant_keep[nzchar(variant_keep) & !startsWith(variant_keep, "#")]
+    if (length(variant_keep) == 0) stop("--variant_include: ", opt$variant_include, " lists no variant")
+    cat("  Variant include:", length(variant_keep), "variant ID(s) listed in", opt$variant_include, "\n")
+}
 
 # Trait info
 if (opt$model == "binary") {
@@ -471,6 +497,21 @@ pheno <- pheno[sample_id %in% common_samples]
 pheno <- pheno[match(common_samples, sample_id)]
 n_samples <- length(common_samples)
 
+# Categorical covariates: one 0/1 indicator per level other than the reference, among the analysed
+# samples (bin/qc_assert.R, expand_factor_covariates). The expansion goes above every results table
+# ('## factor_covariates=') and into the run record's sample accounting (step factor_covariates, with
+# the count per level; an accounting row, not a verdict: no gate requires it, as it exists only when asked for).
+factor_header <- NULL
+if (length(factor_spec) > 0) {
+    fx <- expand_factor_covariates(pheno, factor_spec, opt$phenotype)
+    pheno <- fx$data
+    covariates <- unlist(lapply(covariates, function(cv) if (cv %in% names(factor_spec)) fx$indicators[[cv]] else cv), use.names = FALSE)
+    if (length(covariates) == 0) covariates <- NULL
+    factor_header <- fx$header
+    acct("factor_covariates", n_samples, n_samples, paste("0/1 indicators:", fx$note))
+    cat("  Factor covariates:", fx$note, "\n")
+}
+
 # The Tractor matrices (M-02, bin/tractor_io.R): streamed chunk by chunk during the tests (default),
 # or read whole here with --read_mode full. Either way the sample columns are common_samples, in order.
 tractor_data <- NULL
@@ -528,7 +569,8 @@ null_key <- list(samples = common_samples, trait = opt$trait, model = opt$model,
                  kinship = if (!is.null(opt$kinship)) unname(tools::md5sum(opt$kinship)) else NA_character_,
                  allow_unrelated_cox = isTRUE(opt$allow_unrelated_cox),
                  time_origin = if (opt$model == "survival") c(opt$time_origin, if (opt$time_origin == "eoi") opt$eoi_col) else NA_character_,
-                 cox_strata = opt$cox_strata %||% NA_character_)
+                 cox_strata = opt$cox_strata %||% NA_character_,
+                 factor_covariates = if (length(factor_spec)) paste(names(factor_spec), factor_spec, sep = ":") else character())
 null_ops <- NULL; nullmod <- NULL; null_source <- "fitted"
 if (!is.null(opt$null_model_rds) && file.exists(opt$null_model_rds)) {
     cached <- tryCatch(readRDS(opt$null_model_rds), error = function(e) NULL)
@@ -637,7 +679,9 @@ sumstats_header <- c(stratum = opt$stratum %||% "none", trait = opt$trait, model
                      if (opt$model == "survival") c(time_origin = if (opt$time_origin == "eoi")
                          paste0("end_of_induction (", opt$time_col, " - ", opt$eoi_col, "; left out: ", landmark_note, ")") else "diagnosis"),
                      if (!is.null(opt$sample_subset)) c(sample_subset = opt$sample_subset),
-                     sumstats_header)
+                     if (!is.null(variant_keep)) c(variant_include = paste0(basename(opt$variant_include), " (", length(variant_keep), " listed)")),
+                     sumstats_header,
+                     if (!is.null(factor_header)) c(factor_covariates = factor_header))
 
 # Samples the null model was fitted on: must be the complete cases counted above, or the score
 # test would pair residuals with the wrong genotype rows
@@ -667,9 +711,21 @@ par_apply <- function(x, f) {
     if (any(bad)) stop("a worker failed on a chunk: ", as.character(r[[which(bad)[1]]]))
     r
 }
-run_chunk <- function(ch) test_chunk(ch, null_ops, ancestries, ref_anc, opt$mac_min, opt$stratum)
+chunk_ids <- function(vi) if (!is.null(vi$ID)) as.character(vi$ID) else paste0(vi$CHR, ":", vi$POS)
+run_chunk <- function(ch) {
+    if (!is.null(variant_keep)) {     # --variant_include: test only the listed variants of this chunk
+        keep <- which(chunk_ids(ch$variant_info) %in% variant_keep)
+        if (length(keep) == 0) return(list(dt = data.table(), status = character(), ids = character()))
+        ch <- slice_chunk(ch, keep)
+    }
+    r <- test_chunk(ch, null_ops, ancestries, ref_anc, opt$mac_min, opt$stratum)
+    r$ids <- chunk_ids(ch$variant_info)
+    r
+}
+first_variant <- NULL      # with --variant_include: one variant, for the column layout of a header-only table
 if (opt$read_mode == "full") {
     n_v <- nrow(tractor_data$variant_info)
+    if (n_v > 0) first_variant <- slice_chunk(tractor_data, 1L)
     chunks <- split(seq_len(n_v), ceiling(seq_len(n_v) / opt$chunk_size))
     cat("  Chunks:", length(chunks), "| threads:", opt$threads, "\n")
     out <- par_apply(chunks, function(idx) run_chunk(slice_chunk(tractor_data, idx)))
@@ -682,6 +738,7 @@ if (opt$read_mode == "full") {
         for (b in seq_len(max(1L, opt$threads))) {
             ch <- tractor_stream_next(streams, opt$chunk_size)
             if (is.null(ch)) break
+            if (is.null(first_variant) && nrow(ch$variant_info) > 0) first_variant <- slice_chunk(ch, 1L)
             batch[[length(batch) + 1]] <- ch
         }
         if (length(batch) == 0) break
@@ -694,6 +751,15 @@ if (opt$read_mode == "full") {
 }
 results <- rbindlist(lapply(out, `[[`, "dt"))       # STRATUM (with --stratum) is the first column (result_row)
 st <- unlist(lapply(out, `[[`, "status"), use.names = FALSE)
+if (!is.null(variant_keep)) {
+    n_found <- length(unique(unlist(lapply(out, `[[`, "ids"), use.names = FALSE)))
+    run_counts$variant_include_listed <- length(variant_keep)     # in <output_prefix>.run_counts.tsv
+    run_counts$variant_include_found  <- n_found
+    cat(sprintf("  Variant include: %d of the %d listed variant(s) are on this chromosome\n", n_found, length(variant_keep)))
+    # none here: header-only tables, with the columns a tested variant would have
+    if (nrow(results) == 0 && !is.null(first_variant))
+        results <- test_chunk(first_variant, null_ops, ancestries, ref_anc, opt$mac_min, opt$stratum)$dt[0]
+}
 n_status <- c(ok = sum(st == "ok"), mac = sum(st == "mac"), error = sum(st == "error"))
 n_variants <- length(st)
 cat(sprintf("  Tested %d variants in %.1f s (%d ok, %d below the MAC gate, %d failed)\n", n_variants,
@@ -731,12 +797,12 @@ cat("  Genomic order (for LD/fine-mapping):", genomic_file, "\n")
 # Top hits file (top 1000 by P_JOINT)
 n_top <- min(1000, nrow(results_pval))
 top_file <- paste0(opt$output_prefix, ".tractor_genesis.top_hits.tsv")
-fwrite_sumstats(results_pval[1:n_top], top_file, sumstats_header)
+fwrite_sumstats(results_pval[seq_len(n_top)], top_file, sumstats_header)
 cat("  Top", n_top, "hits:", top_file, "\n")
 
 # Significant hits (P_JOINT < 1e-5 OR any P_{anc} < 1e-5) - sorted by P_JOINT
 sig_cols <- c("P_JOINT", paste0("P_", ancestries))
-is_sig <- apply(results_pval[, ..sig_cols], 1, function(x) any(x < 1e-5, na.rm = TRUE))
+is_sig <- if (nrow(results_pval) > 0) apply(results_pval[, ..sig_cols], 1, function(x) any(x < 1e-5, na.rm = TRUE)) else logical(0)
 if (sum(is_sig) > 0) {
     sig_results <- results_pval[is_sig]
     setorder(sig_results, P_JOINT, na.last = TRUE)

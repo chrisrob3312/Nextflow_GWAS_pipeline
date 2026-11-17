@@ -270,22 +270,30 @@ out="$(cd /tmp && env "${SITE[@]}" RUN_PRS=yes "$L" --dry-run 2>&1)"; rc=$?
 out="$(cd /tmp && env "${SITE[@]}" STRATUM_MIN_N=50 "$L" --dry-run 2>&1)"; rc=$?
 [[ $rc -ne 0 ]] && has "$out" "the scripts read MIN_STRATUM_N" && ok "STRATUM_MIN_N (read by no script): refused" || bad "STRATUM_MIN_N: rc=$rc"
 
-section "Traits and survival columns follow the handoff contract (mrd; mrd_level; efs, os with <trait>_time / <trait>_event)"
-check "defaults: TRAITS_LIST mrd,mrd_level,efs,os, SURVIVAL_TRAITS efs,os, QUANTITATIVE_TRAITS mrd_level" bash -c "grep -q '\"TRAITS_LIST|mrd,mrd_level,efs,os|' '$REPO/bin/run_record.sh' && grep -q '\"SURVIVAL_TRAITS|efs,os|' '$REPO/bin/run_record.sh' && grep -q '\"QUANTITATIVE_TRAITS|mrd_level|' '$REPO/bin/run_record.sh'"
-check "defaults (17 Nov 2026): TIME_ORIGIN eoi, COX_STRATA mrd_level, COX_EXTRA_COVARIATES and SAMPLE_SUBSET empty" bash -c "grep -q '\"TIME_ORIGIN|eoi|' '$REPO/bin/run_record.sh' && grep -q '\"COX_STRATA|mrd_level|' '$REPO/bin/run_record.sh' && grep -q '\"COX_EXTRA_COVARIATES||' '$REPO/bin/run_record.sh' && grep -q '\"SAMPLE_SUBSET||' '$REPO/bin/run_record.sh'"
+section "Traits and survival columns follow the settings file (this study: mrd; mrd_level; efs, os with <trait>_time / <trait>_event)"
+check "built-in defaults carry nothing study-specific: TRAITS_LIST, SURVIVAL_TRAITS, QUANTITATIVE_TRAITS, COX_STRATA, COX_EXTRA_COVARIATES, FACTOR_COVARIATES, SUBSET_LINKED_COLUMNS, EOI_PROTOCOL_DAY, PRS_ANCESTRY_PROPS empty; TIME_ORIGIN diagnosis" \
+    bash -c "for n in TRAITS_LIST SURVIVAL_TRAITS QUANTITATIVE_TRAITS COX_STRATA COX_EXTRA_COVARIATES FACTOR_COVARIATES SUBSET_LINKED_COLUMNS EOI_PROTOCOL_DAY COLUMN_LEVELS PRS_ANCESTRY_PROPS; do grep -q \"\\\"\$n||\" '$REPO/bin/run_record.sh' || exit 1; done; grep -q '\"TIME_ORIGIN|diagnosis|' '$REPO/bin/run_record.sh'"
+out="$(bash -c 'source "$1/bin/run_record.sh"; for n in TRAITS_LIST SURVIVAL_TRAITS QUANTITATIVE_TRAITS TIME_ORIGIN COX_STRATA COX_EXTRA_COVARIATES FACTOR_COVARIATES; do printf "%s=%s;" "$n" "$(rr_default $n)"; done' _ "$C")"
+[[ "$out" == "TRAITS_LIST=mrd,mrd_level,efs,os;SURVIVAL_TRAITS=efs,os;QUANTITATIVE_TRAITS=mrd_level;TIME_ORIGIN=eoi;COX_STRATA=;COX_EXTRA_COVARIATES=mrd_level;FACTOR_COVARIATES=cyto_risk:neutral_unknown;" ]] \
+    && ok "config/gwas_settings.txt (17 Nov 2026): trait.<name> lines give mrd binary, mrd_level quantitative, efs/os survival; eoi; no Cox strata; mrd_level one trend term; cyto_risk factor (reference neutral_unknown)" || bad "settings values: $out"
+out="$(SETTINGS_FILE=none bash -c 'source "$1/bin/run_record.sh"; printf "[%s][%s]" "$(rr_default TRAITS_LIST)" "$(rr_default TIME_ORIGIN)"' _ "$C")"
+[[ "$out" == "[][diagnosis]" ]] && ok "SETTINGS_FILE=none: the built-in defaults only (no traits, TIME_ORIGIN diagnosis)" || bad "none: $out"
 out="$(cd /tmp && env "${SITE[@]}" "$L" --dry-run 2>&1)"
 grep -q 'GWAS mrd (binary) / EUR' <<< "$out" && grep -q 'GWAS mrd_level (quantitative) / EUR' <<< "$out" && grep -q 'GWAS efs (survival) / EUR' <<< "$out" && grep -q 'GWAS os (survival) / EUR' <<< "$out" \
     && ok "dry run: mrd binary, mrd_level quantitative, efs and os survival" || bad "trait models: $(grep 'GWAS ' <<< "$out" | head -4)"
 ! has "$out" "WARNING" && ok "default dry run on the stub bundle: no warning (eoi_day, mrd_level, study_group present)" || bad "warnings: $(grep WARNING <<< "$out")"
-# the survival clock and the Cox strata reach the survival tasks only; the subset reaches every task
+# the survival clock and the MRD trend term reach the survival tasks only; the subset reaches every task
+COVS_B="sex,age_at_diagnosis,wbc_dx_log10,cyto_risk,PC1,PC2,PC3,PC4,PC5"
 out="$(cd /tmp && DRY_RUN=1 bash "$G" EUR efs survival 2>&1)"
-grep -q -- '--time_origin eoi --cox_strata mrd_level ' <<< "$out" && ok "survival task: --time_origin eoi --cox_strata mrd_level (the defaults)" || bad "survival flags: $(tail -1 <<< "$out")"
+grep -q -- '--time_origin eoi --eoi_col eoi_day ' <<< "$out" && ! grep -q -- '--cox_strata' <<< "$out" && grep -q -- "--factor_covariates cyto_risk:neutral_unknown " <<< "$out" \
+    && grep -q -- "--covariates ${COVS_B},mrd_level " <<< "$out" \
+    && ok "survival task (settings file): --time_origin eoi --eoi_col eoi_day, mrd_level one covariate (no Cox strata), cyto_risk a factor" || bad "survival flags: $(tail -1 <<< "$out")"
 out="$(cd /tmp && DRY_RUN=1 bash "$G" EUR mrd_level quantitative 2>&1)"
 grep -q -- '--trait mrd_level --model quantitative ' <<< "$out" && ! grep -q -- '--time_origin\|--cox_strata' <<< "$out" \
     && ok "quantitative task (mrd_level): --model quantitative, no survival flags" || bad "quantitative: $(tail -1 <<< "$out")"
-out="$(cd /tmp && DRY_RUN=1 COX_STRATA= COX_EXTRA_COVARIATES=mrd_level COVARIATES=sex,age_at_diagnosis bash "$G" EUR os survival 2>&1)"
-grep -q -- '--covariates sex,age_at_diagnosis,mrd_level ' <<< "$out" && ! grep -q -- '--cox_strata' <<< "$out" \
-    && ok "MRD-adjusted arm (COX_STRATA= COX_EXTRA_COVARIATES=mrd_level): mrd_level a covariate, no strata" || bad "adjusted arm: $(tail -1 <<< "$out")"
+out="$(cd /tmp && DRY_RUN=1 COX_STRATA=mrd_level COX_EXTRA_COVARIATES= COVARIATES=sex,age_at_diagnosis bash "$G" EUR os survival 2>&1)"
+grep -q -- '--covariates sex,age_at_diagnosis ' <<< "$out" && grep -q -- '--cox_strata mrd_level' <<< "$out" \
+    && ok "the stratified option stays (COX_STRATA=mrd_level COX_EXTRA_COVARIATES=): one baseline per MRD level, no MRD covariate" || bad "stratified option: $(tail -1 <<< "$out")"
 out="$(cd /tmp && DRY_RUN=1 COX_EXTRA_COVARIATES=mrd_level COVARIATES=sex,age_at_diagnosis bash "$G" EUR mrd binary 2>&1)"
 grep -q -- '--covariates sex,age_at_diagnosis ' <<< "$out" && ! grep -q -- '--time_origin' <<< "$out" \
     && ok "COX_EXTRA_COVARIATES and TIME_ORIGIN leave a binary task alone" || bad "binary with Cox extras: $(tail -1 <<< "$out")"
@@ -297,11 +305,29 @@ out="$(cd /tmp && env "${SITE[@]}" SAMPLE_SUBSET=study_group=REDIAL RUN_LABEL=re
 [[ $rc -eq 0 ]] && ! has "$out" "WARNING" && has "$out" "results/redial_only" && ok "SAMPLE_SUBSET=study_group=REDIAL RUN_LABEL=redial_only: accepted, results under results/redial_only" || bad "subset with label: rc=$rc $(grep -i 'warn\|refused' <<< "$out")"
 out="$(cd /tmp && env "${SITE[@]}" SAMPLE_SUBSET=study_group=NOPE RUN_LABEL=nope "$L" 2>&1)"; rc=$?
 [[ $rc -ne 0 ]] && has "$out" "no row of" && ok "SAMPLE_SUBSET matching no row: a launch refuses" || bad "subset no match: rc=$rc $(tail -2 <<< "$out")"
-out="$(cd /tmp && env "${SITE[@]}" SAMPLE_SUBSET=study_group=REDIAL RUN_LABEL=redial_only RUN_GXG=true "$L" --dry-run 2>&1)"; rc=$?
-[[ $rc -ne 0 ]] && has "$out" "PRS and GxG would run on the full cohort" && ok "SAMPLE_SUBSET with RUN_GXG=true: refused (GxG does not apply the subset)" || bad "subset + gxg: rc=$rc"
+out="$(cd /tmp && env "${SITE[@]}" SAMPLE_SUBSET=study_group=REDIAL RUN_LABEL=redial_only RUN_GXG=true RUN_PRS=true "$L" --dry-run 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && has "$out" "GxG" && ok "SAMPLE_SUBSET with RUN_GXG / RUN_PRS: accepted (GxG and PRS validation apply the subset now)" || bad "subset + gxg: rc=$rc $(grep REFUSED <<< "$out")"
+grep -q -- '--sample_subset ${SAMPLE_SUBSET}' "${C}/slurm/submit_gxg_array.sh" && grep -q -- '--time_origin ${TIME_ORIGIN:-$(rr_default TIME_ORIGIN)} --eoi_col' "${C}/slurm/submit_gxg_array.sh" \
+    && grep -q -- '--sample_subset "${SAMPLE_SUBSET}"' "${C}/slurm/submit_prs_array.sh" && grep -q -- '--time_origin "${TIME_ORIGIN:-$(rr_default TIME_ORIGIN)}" --eoi_col' "${C}/slurm/submit_prs_array.sh" \
+    && ok "GxG and PRS validation get TIME_ORIGIN / EOI_COL / SAMPLE_SUBSET (and GxG FACTOR_COVARIATES, COX_EXTRA_COVARIATES)" || bad "downstream args"
+! grep -q 'DOWNSTREAM_TIME_ORIGIN' "${C}/slurm/submit_full_pipeline.sh" && ok "the 'PRS validation and GxG still count from diagnosis' note is gone" || bad "downstream note still there"
+# MRD arms (decided 17 Nov 2026): the whole cohort with mrd_level as a trend term, then MRD+ and MRD-
+out="$(cd /tmp && env "${SITE[@]}" SAMPLE_SUBSET=mrd=1 RUN_LABEL=x "$L" --dry-run 2>&1)"; rc=$?
+[[ $rc -ne 0 ]] && has "$out" "so mrd mrd_level cannot be a trait inside it (set TRAITS_LIST=efs,os)" && ok "an MRD subset with the MRD traits: refused, saying TRAITS_LIST=efs,os" || bad "mrd trait in subset: rc=$rc $(grep REFUSED <<< "$out")"
+out="$(cd /tmp && env "${SITE[@]}" SAMPLE_SUBSET=mrd=0 RUN_LABEL=x TRAITS_LIST=efs,os "$L" --dry-run 2>&1)"; rc=$?
+[[ $rc -ne 0 ]] && has "$out" "so mrd_level cannot be a covariate inside it (set COX_EXTRA_COVARIATES=)" && ok "an MRD subset with the MRD trend covariate: refused, saying COX_EXTRA_COVARIATES=" || bad "mrd covariate in subset: rc=$rc $(grep REFUSED <<< "$out")"
+out="$(cd /tmp && env "${SITE[@]}" ARM=mrd_pos "$L" --dry-run 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && ! has "$out" "WARNING" && has "$out" "Traits:    efs os" && has "$out" "results/mrd_pos (RUN_LABEL=mrd_pos)" \
+    && grep -qP '^  SAMPLE_SUBSET\tmrd=1\tarm:mrd_pos$' <<< "$out" && grep -qP '^  COX_EXTRA_COVARIATES\t\tarm:mrd_pos$' <<< "$out" \
+    && ok "ARM=mrd_pos: EFS and OS in mrd=1, no MRD covariate, results/mrd_pos; params.tsv says arm:mrd_pos" || bad "arm: rc=$rc $(grep -i 'warn\|refused\|traits' <<< "$out")"
+out="$(cd /tmp && env "${SITE[@]}" ARM=all "$L" --dry-run 2>&1)"; rc=$?
+[[ $rc -eq 0 && "$(grep -c '^=== ARM=' <<< "$out")" -eq 3 ]] && has "$out" "=== ARM=mrd_neg ===" && has "$out" "results/mrd_neg (RUN_LABEL=mrd_neg)" \
+    && ok "ARM=all: the whole cohort, mrd_pos and mrd_neg (ARM_ALL), one launch each" || bad "arm all: rc=$rc $(grep '^===\|REFUSED' <<< "$out")"
+out="$(cd /tmp && env "${SITE[@]}" ARM=nope "$L" --dry-run 2>&1)"; rc=$?
+[[ $rc -ne 0 ]] && has "$out" "ARM=nope: no arm.nope line in" && has "$out" "(arms: mrd_pos mrd_neg study_cohort)" && ok "ARM naming no arm.<label>: refused, listing the arms" || bad "arm nope: rc=$rc"
 out="$(cd /tmp && env "${SITE[@]}" QUANTITATIVE_TRAITS=mrd_level,efs "$L" --dry-run 2>&1)"; rc=$?
 [[ $rc -ne 0 ]] && has "$out" "efs is in both SURVIVAL_TRAITS and QUANTITATIVE_TRAITS" && ok "a trait in both model lists: refused" || bad "both lists: rc=$rc"
-out="$(cd /tmp && env "${SITE[@]}" COX_EXTRA_COVARIATES=mrd_level "$L" --dry-run 2>&1)"; rc=$?
+out="$(cd /tmp && env "${SITE[@]}" COX_STRATA=mrd_level "$L" --dry-run 2>&1)"; rc=$?
 [[ $rc -ne 0 ]] && has "$out" "mrd_level is both COX_STRATA and in COX_EXTRA_COVARIATES" && ok "stratified on and adjusted for mrd_level at once: refused" || bad "strata + extra: rc=$rc"
 out="$(cd /tmp && env "${SITE[@]}" COX_STRATA= COX_EXTRA_COVARIATES=sex "$L" --dry-run 2>&1)"; rc=$?
 [[ $rc -ne 0 ]] && has "$out" "sex is in both COVARIATES and COX_EXTRA_COVARIATES" && ok "COX_EXTRA_COVARIATES repeating a default covariate (sex, from the bundle's covariates.txt): refused" || bad "extra repeats covariate: rc=$rc"
@@ -314,23 +340,63 @@ out="$(cd /tmp && env "${SITE[@]}" PHENO_IN="${W}/no_eoi_day.tsv" "$L" 2>&1)"; r
 out="$(cd /tmp && env "${SITE[@]}" PHENO_IN="${W}/no_eoi_day.tsv" TIME_ORIGIN=diagnosis "$L" --dry-run 2>&1)"
 ! has "$out" "column eoi_day" && ok "TIME_ORIGIN=diagnosis: eoi_day not needed" || bad "diagnosis: $(grep 'column eoi_day' <<< "$out")"
 out="$(cd /tmp && env "${SITE[@]}" PHENO_IN="${W}/no_mrd_level.tsv" TIME_ORIGIN=diagnosis "$L" --dry-run 2>&1)"
-has "$out" "efs: column mrd_level is not in" && has "$out" "mrd_level: column mrd_level is not in" && ok "no mrd_level column: the quantitative trait and the default COX_STRATA both name it" || bad "no mrd_level: $(grep -i warn <<< "$out")"
+has "$out" "efs: column mrd_level is not in" && has "$out" "mrd_level: column mrd_level is not in" && ok "no mrd_level column: the quantitative trait and the survival traits' COX_EXTRA_COVARIATES both name it" || bad "no mrd_level: $(grep -i warn <<< "$out")"
 out="$(cd /tmp && DRY_RUN=1 bash "$G" EUR efs survival 2>&1)"
 grep -q -- '--time_col efs_time --event_col efs_event ' <<< "$out" && ok "efs reads efs_time / efs_event" || bad "efs columns: $(tail -1 <<< "$out")"
 out="$(cd /tmp && DRY_RUN=1 TIME_COL_efs=efs_days bash "$G" EUR efs survival 2>&1)"
 grep -q -- '--time_col efs_days --event_col efs_event ' <<< "$out" && ok "TIME_COL_efs overrides efs only" || bad "override: $(tail -1 <<< "$out")"
 out="$(cd /tmp && env "${SITE[@]}" TIME_COL=x "$L" --dry-run 2>&1)"; rc=$?
 [[ $rc -ne 0 ]] && has "$out" "set TIME_COL_<trait>" && ok "a global TIME_COL is refused (each trait has its own)" || bad "TIME_COL: rc=$rc"
-out="$(cd /tmp && env "${SITE[@]}" TRAITS_LIST=mrd,dfs SURVIVAL_TRAITS=dfs "$L" 2>&1)"; rc=$?
+out="$(cd /tmp && env "${SITE[@]}" SETTINGS_FILE=none TRAITS_LIST=mrd,dfs SURVIVAL_TRAITS=dfs "$L" 2>&1)"; rc=$?
 [[ $rc -ne 0 ]] && has "$out" "dfs: column dfs_time is not in" && ok "a launch refuses a trait whose columns the phenotype file lacks" || bad "missing columns: rc=$rc $(tail -2 <<< "$out")"
+out="$(cd /tmp && env "${SITE[@]}" TRAITS_LIST=mrd,dfs "$L" --dry-run 2>&1)"; rc=$?
+[[ $rc -ne 0 ]] && has "$out" "trait dfs (TRAITS_LIST) is not declared in ${C}/config/gwas_settings.txt (add trait.dfs = binary | quantitative | survival)" && ok "a trait the settings file does not declare: refused" || bad "undeclared: rc=$rc $(grep REFUSED <<< "$out")"
 rm -rf "${C:?}/results" "${C:?}/logs"
 out="$(cd /tmp && env "${SITE[@]}" STRATA_LIST=EUR "$L" 2>&1)"
 RD="$(ls -d "${C}"/results/run_record/*/ | head -1)"
 grep -qP '^SURVIVAL_COLUMNS\tefs:efs_time/efs_event,os:os_time/os_event\tderived$' "${RD%/}/params.tsv" && ok "params.tsv records each survival trait's columns" || bad "params: $(tail -2 "${RD%/}/params.tsv")"
-grep -qP '^TIME_ORIGIN\teoi\tdefault$' "${RD%/}/params.tsv" && grep -qP '^COX_STRATA\tmrd_level\tdefault$' "${RD%/}/params.tsv" && grep -qP '^EOI_COLUMN\teoi_day\tderived$' "${RD%/}/params.tsv" \
-    && grep -qP '^QUANTITATIVE_TRAITS\tmrd_level\tdefault$' "${RD%/}/params.tsv" \
-    && ok "params.tsv records the clock (TIME_ORIGIN eoi, EOI_COLUMN eoi_day), COX_STRATA and QUANTITATIVE_TRAITS" || bad "params 17 Nov: $(grep -P 'TIME_ORIGIN|COX_|EOI|QUANT' "${RD%/}/params.tsv")"
+grep -qP '^TIME_ORIGIN\teoi\tsettings$' "${RD%/}/params.tsv" && grep -qP '^COX_STRATA\t\tsettings$' "${RD%/}/params.tsv" && grep -qP '^EOI_COLUMN\teoi_day\tderived$' "${RD%/}/params.tsv" \
+    && grep -qP '^QUANTITATIVE_TRAITS\tmrd_level\tsettings$' "${RD%/}/params.tsv" && grep -qP '^COX_EXTRA_COVARIATES\tmrd_level\tsettings$' "${RD%/}/params.tsv" \
+    && grep -qP "^SETTINGS_FILE\t${C}/config/gwas_settings.txt\tderived$" "${RD%/}/params.tsv" && grep -qP '^MAC_MIN\t10\tsettings$' "${RD%/}/params.tsv" \
+    && ok "params.tsv records each value's source (settings), the clock (EOI_COLUMN eoi_day), the MRD trend term and the settings file read" || bad "params 17 Nov: $(grep -P 'TIME_ORIGIN|COX_|EOI|QUANT|SETTINGS' "${RD%/}/params.tsv")"
 rm -rf "${C:?}/results" "${C:?}/logs"
+
+section "F: the settings file (config/gwas_settings.txt; SETTINGS_FILE): read, overridden, checked line by line"
+out="$(cd /tmp && env "${SITE[@]}" TIME_ORIGIN=diagnosis MAC_MIN=20 "$L" --dry-run 2>&1)"
+grep -qP '^  TIME_ORIGIN\tdiagnosis\tenvironment$' <<< "$out" && grep -qP '^  MAC_MIN\t20\tenvironment$' <<< "$out" && grep -qP '^  MIN_STRATUM_N\t50\tsettings$' <<< "$out" \
+    && ok "an environment variable beats the settings file (TIME_ORIGIN, MAC_MIN: environment), the rest stay settings" || bad "env override: $(grep -P 'TIME_ORIGIN|MAC_MIN|MIN_STRATUM_N' <<< "$out")"
+printf '# a comment\nMAC_MIN = 20\n\nNOT_A_SETTING = 3\n' > "${W}/bad_key.txt"
+out="$(cd /tmp && env "${SITE[@]}" SETTINGS_FILE="${W}/bad_key.txt" "$L" --dry-run 2>&1)"; rc=$?
+[[ $rc -eq 2 ]] && has "$out" "REFUSED: ${W}/bad_key.txt line 4: unknown setting 'NOT_A_SETTING'" && ok "an unknown setting: refused, naming file and line" || bad "unknown key: rc=$rc $out"
+printf 'trait.mrd = binary\nMIN_STRATUM_N = fifty\nTIME_ORIGIN = landmark\n' > "${W}/bad_value.txt"
+out="$(cd /tmp && env "${SITE[@]}" SETTINGS_FILE="${W}/bad_value.txt" "$L" --dry-run 2>&1)"; rc=$?
+[[ $rc -eq 2 ]] && has "$out" "line 2: MIN_STRATUM_N = fifty; use a whole number >= 1" && has "$out" "line 3: TIME_ORIGIN = landmark; use eoi or diagnosis" \
+    && ok "values outside their domain: refused, naming each line" || bad "bad value: rc=$rc $out"
+printf 'MAC_MIN = 20\nMAC_MIN = 30\n' > "${W}/dup.txt"
+out="$(cd /tmp && env "${SITE[@]}" SETTINGS_FILE="${W}/dup.txt" "$L" --dry-run 2>&1)"; rc=$?
+[[ $rc -eq 2 ]] && has "$out" "line 2: MAC_MIN is already set on line 1" && ok "a setting given twice: refused" || bad "dup: rc=$rc $out"
+awk -F'\t' 'BEGIN {OFS = "\t"} {print $0, (NR == 1 ? "case_status\tbmi" : (NR % 2) "\t" 20 + NR)}' "${C}/data/handoff/phenotypes/phenotypes.tsv" > "${W}/generic.tsv"
+out="$(cd "${C}/config" && env "${SITE[@]}" SETTINGS_FILE=gwas_settings.example_generic.txt PHENO_IN="${W}/generic.tsv" "$L" --dry-run 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && ! has "$out" "WARNING" && has "$out" "GWAS case_status (binary) / EUR" && has "$out" "GWAS bmi (quantitative) / EUR" && ! has "$out" "(survival)" \
+    && grep -qP '^  COVARIATES\tsex,age_at_diagnosis,wbc_dx_log10,cyto_risk,PC1,PC2,PC3,PC4\tbundle$' <<< "$out" && grep -qP '^  TIME_ORIGIN\tdiagnosis\tsettings$' <<< "$out" \
+    && ok "config/gwas_settings.example_generic.txt (a relative SETTINGS_FILE): one binary and one quantitative trait, 4 PCs, no survival: dry-runs clean" || bad "generic: rc=$rc $(grep -i 'warn\|refused\|GWAS ' <<< "$out" | head -5)"
+out="$("${C}/bin/check_handoff_bundle.sh" "${C}/data/handoff" --no-sha --allow-missing-tools --settings "${C}/config/gwas_settings.example_generic.txt" 2>&1)"; rc=$?
+[[ $rc -ne 0 ]] && has "$out" "lacks column 'case_status' (needed by trait case_status" && ok "the bundle checker reads the same settings: the generic example needs case_status" || bad "checker generic: rc=$rc $out"
+# POOLED (the whole cohort) and the study-cohort sensitivity arm (E)
+out="$(cd /tmp && env "${SITE[@]}" STRATA_LIST=POOLED,EUR "$L" --dry-run 2>&1)"; rc=$?
+[[ $rc -ne 0 ]] && has "$out" "POOLED is the whole cohort; list it alone" && ok "STRATA_LIST=POOLED,EUR: refused (the cohort would be counted twice)" || bad "pooled+eur: rc=$rc"
+out="$(cd /tmp && DRY_RUN=1 VARIANT_INCLUDE=results/mrmega/lead_snps.txt FACTOR_COVARIATES=cyto_risk:neutral_unknown,study_group:REDIAL bash "$G" POOLED efs survival 2>&1)"
+grep -q -- "--tractor_prefix ${C}/data/tractor/cohort/chr1 " <<< "$out" && grep -q -- "--variant_include ${C}/results/mrmega/lead_snps.txt" <<< "$out" \
+    && grep -q -- '--factor_covariates cyto_risk:neutral_unknown,study_group:REDIAL' <<< "$out" && grep -q -- "--phenotype ${C}/results/pcair/cohort.phenotypes.with_pcs.tsv" <<< "$out" \
+    && ok "POOLED task: data/tractor/cohort/ files, cohort PCs, VARIANT_INCLUDE and study_group a factor (reference REDIAL)" || bad "pooled task: $(tail -1 <<< "$out")"
+out="$(cd /tmp && env "${SITE[@]}" ARM=study_cohort "$L" 2>&1)"; rc=$?
+[[ $rc -ne 0 ]] && has "$out" "VARIANT_INCLUDE=results/mrmega/lead_snps.txt: ${C}/results/mrmega/lead_snps.txt is missing or lists no variant" && ok "ARM=study_cohort before the lead-SNP list exists: a launch refuses" || bad "study arm: rc=$rc $(tail -2 <<< "$out")"
+printf 'MarkerName\tChromosome\tPosition\tEA\tNEA\tNcohort\tP-value_association\n1:100:A:G\t1\t100\tG\tA\t3\t1e-9\n1:200000:A:G\t1\t200000\tG\tA\t3\t1e-10\n1:900000:A:G\t1\t900000\tG\tA\t3\t1e-8\n2:5:A:G\t2\t5\tG\tA\t3\t0.5\n' > "${W}/m.result"
+out="$("${C}/bin/mrmega_lead_snps.sh" --output "${W}/lead.txt" "${W}/m.result" 2>&1)"; rc=$?
+[[ $rc -eq 0 && "$(grep -v '^#' "${W}/lead.txt" | paste -sd, -)" == "1:200000:A:G,1:900000:A:G" ]] && has "$out" "3 variant(s) below P = 5e-8" \
+    && ok "mrmega_lead_snps.sh: below LEAD_SNP_P (5e-8, the settings file), one lead per 500 kb (1:100 sits within 500 kb of the stronger 1:200000)" || bad "lead snps: rc=$rc $out $(cat "${W}/lead.txt")"
+"${C}/bin/mrmega_lead_snps.sh" --p 1e-12 --output "${W}/lead0.txt" "${W}/m.result" >/dev/null 2>&1; rc=$?
+[[ $rc -eq 1 && ! -e "${W}/lead0.txt" ]] && ok "mrmega_lead_snps.sh: nothing below P: exit 1, no file (no arm on an empty list)" || bad "lead none: rc=$rc"
 
 # ============================================================================
 section "CP-28: submit_gwas_array.sh reads data/tractor/<stratum>/ancestries.txt"
@@ -385,7 +451,7 @@ out="$(cd /tmp && env "${SITE[@]}" "$L" 2>&1)"; rc=$?
 RUN1="$(ls -d "${C}"/results/run_record/*/ 2>/dev/null | head -1)"; RUN1="${RUN1%/}"
 [[ -n "$RUN1" && "$(basename "$RUN1")" =~ ^[0-9]{8}-[0-9]{4}_[0-9a-z]+_1$ ]] && ok "run directory $(basename "$RUN1") (date-minute, git sha, suffix)" || bad "run dir: '$RUN1'"
 for f in params.tsv run_info.tsv jobs.tsv; do check "${f} written at launch" test -s "${RUN1}/${f}"; done
-check "params.tsv: MIN_STRATUM_N 50 (default)" grep -qP '^MIN_STRATUM_N\t50\tdefault$' "${RUN1}/params.tsv"
+check "params.tsv: MIN_STRATUM_N 50 (settings: config/gwas_settings.txt)" grep -qP '^MIN_STRATUM_N\t50\tsettings$' "${RUN1}/params.tsv"
 n_sb="$(wc -l < "${FAKE_SLURM_DIR}/sbatch.log")"
 [[ "$(tail -n +2 "${RUN1}/jobs.tsv" | wc -l)" -eq $((n_sb - 1)) ]] && ok "jobs.tsv lists the $((n_sb - 1)) jobs finalise reports on" || bad "jobs.tsv rows"
 grep -qP "^finalise_job\\t$(tail -1 "${FAKE_SLURM_DIR}/sbatch.log" | sed 's/^id=\([0-9]*\).*/\1/')\$" "${RUN1}/run_info.tsv" && ok "run_info.tsv names the finalise job" || bad "finalise_job in run_info"
@@ -411,8 +477,8 @@ out="$(cd /tmp && env "${SITE[@]}" MAC_MIN=30 "$L" 2>&1)"; rc=$?
 RUN2="$(ls -d "${C}"/results/run_record/*/ | sort | tail -1)"; RUN2="${RUN2%/}"
 [[ $rc -eq 0 && "$RUN2" != "$RUN1" ]] && ok "new run directory $(basename "$RUN2")" || bad "second launch: rc=$rc $RUN2"
 d="$(diff "${RUN1}/params.tsv" "${RUN2}/params.tsv" | grep '^[<>]')"
-[[ "$(wc -l <<< "$d")" -eq 2 ]] && has "$d" $'< MAC_MIN\t10\tdefault' && has "$d" $'> MAC_MIN\t30\tenvironment' \
-    && ok "params.tsv differs in exactly one row: MAC_MIN 10 (default) -> 30 (environment)" || bad "params diff: $d"
+[[ "$(wc -l <<< "$d")" -eq 2 ]] && has "$d" $'< MAC_MIN\t10\tsettings' && has "$d" $'> MAC_MIN\t30\tenvironment' \
+    && ok "params.tsv differs in exactly one row: MAC_MIN 10 (settings) -> 30 (environment)" || bad "params diff: $d"
 after="$(cd "$RUN1" && find . -type f -exec md5sum {} + | sort)"
 [[ "$before" == "$after" ]] && ok "the first run directory is untouched" || bad "first run directory changed"
 has "$out" "Switches you set: MAC_MIN=30" && ok "the launch log names the switch you set" || bad "launch log switches"
@@ -512,7 +578,7 @@ grep -q 'anc_code' "$A" && bad "adapter still derives a file number from the pos
 grep -q 'source(file.path(.adapter_dir, "tractor_io.R"))' "$A" && ok "adapter sources bin/tractor_io.R" || bad "adapter does not source tractor_io.R"
 grep -q 'check_stratum_membership(opt$stratum, tractor_ids, opt$strata_file, pheno)' "$A" && ok "adapter: --stratum checked against the Tractor files' samples" || bad "adapter: no stratum check"
 grep -q 'if (n_null < opt$min_stratum_n)' "$A" && grep -q 'quit(save = "no", status = 0)' "$A" && ok "adapter: below --min_stratum_n, skip with exit 0" || bad "adapter: no min_stratum_n gate"
-grep -q 'run_chunk <- function(ch) test_chunk(ch, null_ops, ancestries, ref_anc, opt$mac_min, opt$stratum)' "$A" && grep -q 'if (!is.null(stratum)) row$STRATUM <- stratum' "${A%/*}/tractor_model.R" \
+grep -q 'r <- test_chunk(ch, null_ops, ancestries, ref_anc, opt$mac_min, opt$stratum)' "$A" && grep -q 'if (!is.null(stratum)) row$STRATUM <- stratum' "${A%/*}/tractor_model.R" \
     && ok "adapter: outputs labelled with a STRATUM column (the first; result_row in bin/tractor_model.R)" || bad "adapter: no STRATUM label"
 grep -q 'write_run_counts(opt$output_prefix, run_counts)' "$A" && ok "adapter: writes <output_prefix>.run_counts.tsv" || bad "adapter: no counts file"
 grep -q '".ancdose.", k' "$REPO/bin/calculate_prs_admixed.R" && bad "PRS still reads Tractor files by position" || ok "PRS LA partial: no file number from the position either"
@@ -740,11 +806,11 @@ grep -q "/^##/ && !h {next} !h {h = 1; next}" "${C}/modules/local/enhanced_annot
 rm -rf "${FAKE_SLURM_DIR:?}"/* "${C:?}/results" "${C:?}/logs"
 out="$(cd /tmp && env "${SITE[@]}" STRATA_LIST=EUR TRAITS_LIST=os FAKE_SBATCH_RUN=1 RR_SACCT_WAIT=0 "$L" 2>&1)"
 RD="$(ls -d "${C}"/results/run_record/*/ | head -1)"; RD="${RD%/}"
-COVS="sex,age_at_diagnosis,cd19_pos_pct,storage_days,PC1,PC2,PC3,PC4,PC5"
-grep -q $'^COVARIATES\t'"${COVS}"$'\tbundle$' "${RD}/params.tsv" && grep -q -- "--covariates ${COVS} " "${C}"/logs/gwas_os_EUR_*_1.out \
-    && ok "COVARIATES unset: the bundle's covariates.txt + PC1..PC5, recorded in params.tsv (set_by bundle) and passed to the adapter" || bad "default covariates: $(grep COVARIATES "${RD}/params.tsv")"
+COVS="sex,age_at_diagnosis,wbc_dx_log10,cyto_risk,PC1,PC2,PC3,PC4,PC5"
+grep -q $'^COVARIATES\t'"${COVS}"$'\tbundle$' "${RD}/params.tsv" && grep -q -- "--covariates ${COVS},mrd_level " "${C}"/logs/gwas_os_EUR_*_1.out \
+    && ok "COVARIATES unset: the bundle's covariates.txt + PC1..PC<N_PCS_MODEL=5>, recorded in params.tsv (set_by bundle) and passed to the adapter (os: + mrd_level, the trend term)" || bad "default covariates: $(grep COVARIATES "${RD}/params.tsv")"
 S="${C}/results/gwas/os/EUR.sumstats.gz"
-[[ "$(zcat "$S" | head -1)" == "## covariates=${COVS}" && "$(zcat "$S" | grep -c '^## ')" -eq 1 && "$(zcat "$S" | grep -c '^CHR')" -eq 1 && "$(zcat "$S" | wc -l)" -eq 24 ]] \
+[[ "$(zcat "$S" | head -1)" == "## covariates=${COVS},mrd_level" && "$(zcat "$S" | grep -c '^## ')" -eq 1 && "$(zcat "$S" | grep -c '^CHR')" -eq 1 && "$(zcat "$S" | wc -l)" -eq 24 ]] \
     && ok "combine: '## covariates=' kept once, then one header and the 22 chromosomes' rows" || bad "combined: $(zcat "$S" 2>&1 | head -4)"
 [[ "$(zcat "$S" | awk -F'\t' '!/^##/ && NR > 2 {print $1}' | paste -sd, -)" == "$(seq 1 22 | paste -sd, -)" ]] \
     && ok "combine: chromosomes in genomic order 1..22, not text order (1, 10, 11, ..., 2)" || bad "chromosome order: $(zcat "$S" | awk -F'\t' '!/^##/ && NR > 2 {print $1}' | paste -sd, -)"
@@ -873,7 +939,7 @@ grep -q 'path("${prefix}.loci.tsv"),        emit: loci' "${C}/modules/local/gwas
 
 section "CP-22: STEP 2 reads the bundle's strata, checks them disjoint and complete, writes POOLED.ivw_descriptive"
 out="$(cd /tmp && env "${SITE[@]}" STRATA_LIST=EUR,AAC "$L" --dry-run 2>&1)"; rc=$?
-[[ $rc -eq 2 ]] && has "$out" "REFUSED: stratum AAC (STRATA_LIST) is not in ${C}/data/handoff/ancestry/strata.tsv (it has: AFR,AMR,EUR,MIX)" \
+[[ $rc -eq 2 ]] && has "$out" "REFUSED: stratum AAC (STRATA_LIST) is not in ${C}/data/handoff/ancestry/strata.tsv (it has: AFR,AMR,EUR,MIX; or POOLED, the whole cohort)" \
     && ok "a stratum the bundle's strata.tsv does not have: refused" || bad "unknown stratum: rc=$rc $(tail -2 <<< "$out")"
 if [[ -n "${REAL_RSCRIPT}" ]] && "${REAL_RSCRIPT}" -e 'quit(status = !all(sapply(c("data.table", "optparse"), requireNamespace, quietly = TRUE)))' >/dev/null 2>&1 \
    && ! grep -q "placeholder rds" "${C}/data/handoff/structure/cohort.pcrelate.grm.rds"; then
@@ -886,7 +952,7 @@ if [[ -n "${REAL_RSCRIPT}" ]] && "${REAL_RSCRIPT}" -e 'quit(status = !all(sapply
     grep -q $'^STRATA_LIST\tAFR,AMR,EUR,MIX\tbundle$' "${RD}/params.tsv" && ok "STRATA_LIST unset: the bundle's strata (AFR,AMR,EUR,MIX), set_by bundle in params.tsv" || bad "default strata: $(grep STRATA_LIST "${RD}/params.tsv")"
     P="${C}/results/gwas/os/POOLED.ivw_descriptive.sumstats.gz"
     [[ "$CX" == 0 ]] && has "$CL" "Strata disjoint: AFR,AMR,EUR,MIX (8 samples)" && [[ -s "$P" && ! -e "${C}/results/gwas/os/POOLED.sumstats.gz" ]] \
-        && [[ "$(zcat "$P" | grep '^## \(strata\|strata_skipped\|backgrounds\|covariates\)=' | paste -sd'|' -)" == "## strata=AFR,AMR,EUR,MIX|## strata_skipped=none|## backgrounds=EUR|## covariates=sex,age_at_diagnosis,cd19_pos_pct,storage_days,PC1,PC2,PC3,PC4,PC5" ]] \
+        && [[ "$(zcat "$P" | grep '^## \(strata\|strata_skipped\|backgrounds\|covariates\)=' | paste -sd'|' -)" == "## strata=AFR,AMR,EUR,MIX|## strata_skipped=none|## backgrounds=EUR|## covariates=sex,age_at_diagnosis,wbc_dx_log10,cyto_risk,PC1,PC2,PC3,PC4,PC5,mrd_level" ]] \
         && ok "four strata: disjoint, all 22 chromosomes each, pooled into POOLED.ivw_descriptive.sumstats.gz with ## strata= / strata_skipped= / backgrounds= / covariates=" || bad "pooled: CX=$CX $(zcat "$P" 2>&1 | head -5) $CL"
     e2e STRATA_LIST=EUR,AFR,AMR FAKE_SKIP_STRATUM=AFR
     [[ "$CX" == 0 ]] && has "$CL" "Stratum AFR: skipped on every chromosome (below MIN_STRATUM_N); not pooled" && zcat "$P" | grep -qx '## strata=EUR,AMR' && zcat "$P" | grep -qx '## strata_skipped=AFR' \
@@ -1015,6 +1081,44 @@ if [[ -n "${REAL_RSCRIPT}" ]] && "${REAL_RSCRIPT}" -e 'quit(status = !all(sapply
         && grep -qx '## sample_subset=study_group=REDIAL' <<< "$(zcat "${TD}/outss/chr22.tractor_genesis.genomic_order.tsv.gz" | head -10)" \
         && grep -qP '^sample_subset\tTOY\tos\t22\t120\t60\t' "${TD}"/qc/accounting.d/*.tsv \
         && ok "--sample_subset study_group=REDIAL: 120 -> 60 joined, 57 complete cases; accounting row and '## sample_subset'" || bad "subset: rc=$rc $(tail -3 <<< "$out")"
+    # 17 Nov 2026 (A): a categorical covariate (cyto_risk, text) is refused unless declared; declared, it
+    # is 0/1 indicators against the reference level, written above the table and filed in qc/
+    out="$(ad --covariates sex,age_at_diagnosis,cyto_risk --output_prefix outfx0/chr22)"; rc=$?
+    [[ $rc -ne 0 ]] && has "$out" "covariate cyto_risk is not numeric" && has "$out" "FACTOR_COVARIATES=cyto_risk:<reference level>" \
+        && ok "an undeclared text covariate (cyto_risk): refused, naming FACTOR_COVARIATES" || bad "undeclared factor: rc=$rc $(tail -2 <<< "$out")"
+    out="$(ad --factor_covariates cyto_risk:neutral_unknown --output_prefix outfx/chr22)"; rc=$?
+    H="$(zcat "${TD}/outfx/chr22.tractor_genesis.genomic_order.tsv.gz" | grep '^##')"
+    [[ $rc -eq 0 ]] && grep -qx '## covariates=sex,age_at_diagnosis,cyto_risk_favorable,cyto_risk_unfavorable' <<< "$H" \
+        && grep -qx '## factor_covariates=cyto_risk:neutral_unknown -> cyto_risk_favorable,cyto_risk_unfavorable' <<< "$H" \
+        && grep -qP '^factor_covariates\tTOY\tos\t22\t115\t115\t0\t0/1 indicators: cyto_risk \(reference neutral_unknown, n=\d+\): cyto_risk_favorable n=\d+, cyto_risk_unfavorable n=\d+' "${TD}"/qc/accounting.d/*.tsv \
+        && ok "--factor_covariates cyto_risk:neutral_unknown: two indicators (favorable, unfavorable), '## factor_covariates=' and a sample-accounting row with the counts" || bad "factor: rc=$rc $H"
+    out="$(ad --factor_covariates cyto_risk:none --output_prefix outfx2/chr22)"; rc=$?
+    [[ $rc -ne 0 ]] && has "$out" "reference level 'none' is not a value of cyto_risk" && ok "a reference level absent from the analysed samples: refused" || bad "bad ref: rc=$rc"
+    # E: --variant_include tests only the listed variants; a chromosome with none writes header-only tables
+    zcat "${TD}/out/chr22.tractor_genesis.genomic_order.tsv.gz" | grep -v '^##' | awk -F'\t' 'NR == 4 || NR == 9 {print $4}' > "${TD}/inc.txt"; echo "9:1:A:G" >> "${TD}/inc.txt"
+    out="$(ad --variant_include inc.txt --output_prefix outvi/chr22)"; rc=$?
+    V="${TD}/outvi/chr22.tractor_genesis.genomic_order.tsv.gz"
+    [[ $rc -eq 0 && "$(zcat "$V" | grep -v '^##' | tail -n +2 | cut -f4 | paste -sd, -)" == "$(head -2 "${TD}/inc.txt" | paste -sd, -)" ]] && has "$out" "2 of the 3 listed variant(s) are on this chromosome" \
+        && grep -qx $'variant_include_found\t2' "${TD}/outvi/chr22.run_counts.tsv" \
+        && zcat "$V" | grep -qx '## variant_include=inc.txt (3 listed)' && ok "--variant_include: only the 2 listed variants on this chromosome tested; '## variant_include='" || bad "variant include: rc=$rc $(zcat "$V" 2>&1 | head -12)"
+    echo "1:5:A:G" > "${TD}/inc0.txt"
+    out="$(ad --variant_include inc0.txt --output_prefix outvi0/chr22)"; rc=$?
+    V="${TD}/outvi0/chr22.tractor_genesis.genomic_order.tsv.gz"
+    [[ $rc -eq 0 && "$(zcat "$V" | grep -v '^##' | wc -l)" -eq 1 ]] && [[ "$(zcat "$V" | grep -v '^##' | cut -f1-4)" == $'STRATUM\tCHR\tPOS\tID' ]] && grep -qx $'status\tok' "${TD}/outvi0/chr22.run_counts.tsv" \
+        && ok "--variant_include with none on this chromosome: status ok, a header-only table (the combine step still finds 22)" || bad "variant include none: rc=$rc $(zcat "$V" 2>&1 | head -3)"
+    # D: GxG counts survival from the landmark, in the subset, with the factor covariates (as the GWAS)
+    GX="${W}/gxg"; rm -rf "${GX:?}"; mkdir -p "${GX}/out"
+    "${REAL_RSCRIPT}" "${C}/tests/toy/make_toy_plink.R" "${GX}/toy" 60 40 >/dev/null 2>&1
+    awk -F'\t' 'BEGIN {OFS = "\t"} NR == 1 {print $0, "eoi_day"; next} {print $0, (NR % 7 == 0 ? "NA" : 0.5)}' "${GX}/toy.phenotypes.tsv" > "${GX}/ph.tsv"
+    { printf 'CHR\tPOS\tID\tP\n'; awk 'NR <= 4 {printf "%s\t%s\t%s\t1e-6\n", $1, $4, $2}' "${GX}/toy.bim"; } > "${GX}/ss.tsv"
+    out="$(cd "$GX" && GWAS_QC_DIR="${GX}/qc" "${REAL_RSCRIPT}" "${C}/bin/run_gxg_interaction.R" --sumstats ss.tsv --no_default_loci --geno toy --phenotype ph.tsv \
+           --trait os --model survival --time_col os_time --event_col os_event --time_origin eoi --eoi_col eoi_day --sample_subset protocol=P1 \
+           --covariates sex,age_at_diagnosis --factor_covariates cyto_risk:neutral_unknown --min_stratum_n 5 --output_prefix out/os --threads 1 2>&1)"; rc=$?
+    NS="$(awk -F'\t' 'NR > 1 && $9 == "P1"' "${GX}/ph.tsv" | wc -l)"
+    [[ $rc -eq 0 ]] && has "$out" "Sample subset protocol=P1: 63 -> ${NS} samples" && has "$out" "Time origin: end of induction (os_time - eoi_day); left out 0 with os_time at or before eoi_day," \
+        && grep -qP '^time_origin\tend_of_induction \(os_time - eoi_day; left out: ' "${GX}/out/os.gxg.analysis.tsv" && grep -qP '^covariates\tsex,age_at_diagnosis,cyto_risk_favorable,cyto_risk_unfavorable$' "${GX}/out/os.gxg.analysis.tsv" \
+        && grep -qP '^gxg_landmark_eoi\t' "${GX}"/qc/accounting.d/*.tsv \
+        && ok "run_gxg_interaction.R --time_origin eoi --sample_subset --factor_covariates: subset counted, landmark applied and counted, os.gxg.analysis.tsv says so" || bad "gxg landmark: rc=$rc $(tail -4 <<< "$out")"
 else
     echo "  (real R with data.table, optparse, survival and Matrix not available: CP-17 adapter checks skipped)"
 fi

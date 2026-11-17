@@ -74,10 +74,18 @@ if [[ ${#SUMSTATS_MISSING[@]} -gt 0 ]]; then
 fi
 SUMSTATS="$(IFS=,; echo "${SUMSTATS_FILES[*]}")"
 
+# The GWAS's clock (TIME_ORIGIN, EOI_COL), sub-cohort (SAMPLE_SUBSET) and categorical covariates
+# (FACTOR_COVARIATES), so GxG analyses what the GWAS analysed (values contain no spaces: domain-checked)
 SURV_ARGS=""
 if [[ "${MODEL}" == "survival" ]]; then
     SURV_ARGS="--time_col $(trait_time_col "${TRAIT}") --event_col $(trait_event_col "${TRAIT}")"
+    SURV_ARGS+=" --time_origin ${TIME_ORIGIN:-$(rr_default TIME_ORIGIN)} --eoi_col ${EOI_COL:-$(rr_default EOI_COL)}"
+    COX_EXTRA_COVARIATES="${COX_EXTRA_COVARIATES-$(rr_default COX_EXTRA_COVARIATES)}"
 fi
+SAMPLE_SUBSET="${SAMPLE_SUBSET-$(rr_default SAMPLE_SUBSET)}"
+FACTOR_COVARIATES="${FACTOR_COVARIATES-$(rr_default FACTOR_COVARIATES)}"
+[[ -n "${SAMPLE_SUBSET}" ]] && SURV_ARGS+=" --sample_subset ${SAMPLE_SUBSET}"
+[[ -n "${FACTOR_COVARIATES}" ]] && SURV_ARGS+=" --factor_covariates ${FACTOR_COVARIATES}"
 
 # Optional: Tractor dosages for local-ancestry-aware epistasis (pooled task only). The ancestry list
 # sits next to the Tractor files it describes: data/tractor/ancestries.txt for data/tractor/all_chr.*
@@ -90,6 +98,8 @@ fi
 # ---- customisable (env vars) ----------------------------------------------
 # numeric phenotype columns; default the study's list (HANDOFF_DIR/phenotypes/covariates.txt) + PC1..PC5
 COVARIATES="${COVARIATES:-$(default_covariates)}" || exit 1
+# survival traits: plus COX_EXTRA_COVARIATES, as in the GWAS (this study: mrd_level, one trend term)
+[[ "${MODEL}" == survival && -n "${COX_EXTRA_COVARIATES:-}" ]] && COVARIATES="${COVARIATES},${COX_EXTRA_COVARIATES}"
 ANCESTRY_COL="${ANCESTRY_COL:-$(rr_default ANCESTRY_COL)}"
 KNOWN_LOCI="${KNOWN_LOCI:-${SCRIPT_DIR}/assets/known_leukemia_risk_loci.tsv}"
 LOCI_ARGS="--known_loci ${KNOWN_LOCI}"

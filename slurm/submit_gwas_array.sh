@@ -29,11 +29,15 @@
 #
 # A survival trait reads columns <trait>_time and <trait>_event (efs_time/efs_event, os_time/os_event,
 # as docs/HANDOFF_CONTRACT.md names them); TIME_COL_<trait> / EVENT_COL_<trait> override one trait.
-# Survival traits (decided 17 Nov 2026): TIME_ORIGIN (default eoi) counts time from the end of
-# induction (time - eoi_day; a child with its event or censoring at or before eoi_day is left out);
-# COX_STRATA (default mrd_level) gives each MRD level its own baseline hazard; COX_EXTRA_COVARIATES
-# (default none) adds covariates for the survival traits only (the MRD-adjusted arm). SAMPLE_SUBSET
-# (column=value[,value...], default none) restricts every trait to a sub-cohort, e.g. study_group=REDIAL.
+# Survival traits: TIME_ORIGIN=eoi counts time from the landmark in EOI_COL (time - EOI_COL; a
+# sample with its event or censoring at or before it is left out); COX_STRATA gives each level of a
+# column its own baseline hazard; COX_EXTRA_COVARIATES adds covariates for the survival traits only
+# (this study: mrd_level, one trend term, whole cohort). FACTOR_COVARIATES (column:reference) are
+# categorical covariates; SAMPLE_SUBSET (column=value[,value...]) restricts every trait to a
+# sub-cohort; VARIANT_INCLUDE tests only the listed variants. Values: the settings file
+# (config/gwas_settings.txt), else the environment the launcher exported (bin/run_record.sh).
+# STRATUM=POOLED is the whole cohort: the cohort PCs, data/tractor/cohort/chr<N> and
+# data/tractor/ancestries.txt.
 # The adapter checks every sample in the stratum's Tractor files against STRATA_FILE
 # (default $HANDOFF_DIR/ancestry/strata.tsv) when it exists, and
 # skips the stratum (exit 0, no results) below MIN_STRATUM_N analysable samples; the run
@@ -125,20 +129,27 @@ if [[ -z "${KINSHIP:-}" ]]; then
 fi
 echo "Phenotype: ${PHENO}"; echo "GRM: ${KINSHIP}"
 TRACTOR_PREFIX="${DATA_DIR}/tractor/${STRATUM}/chr${CHR}"
+ANC_FILE="${DATA_DIR}/tractor/${STRATUM}/ancestries.txt"
+if [[ "${STRATUM}" == POOLED ]]; then     # the whole cohort: step 0b's files and the cohort's list
+    TRACTOR_PREFIX="${DATA_DIR}/tractor/cohort/chr${CHR}"
+    ANC_FILE="${DATA_DIR}/tractor/ancestries.txt"
+fi
 
 # Ancestral populations for the Tractor decomposition: this stratum's own list, written next to
 # its Tractor files by the extraction step (docs/HANDOFF_CONTRACT.md). No default: a stratum
 # without the file stops here, naming the path.
-ANC_FILE="${DATA_DIR}/tractor/${STRATUM}/ancestries.txt"
 STRATUM_ANCESTRIES="$(read_stratum_ancestries "${ANC_FILE}")" || exit 1
-REF_ANCESTRY="EUR"      # the adapter's reference for the LA terms; it must be in the list
+REF_ANCESTRY="${REF_ANCESTRY:-$(rr_default REF_ANCESTRY)}"      # the adapter's reference for the LA terms; it must be in the list
 if [[ ",${STRATUM_ANCESTRIES}," != *",${REF_ANCESTRY},"* ]]; then
     echo "ERROR: ${ANC_FILE} lists ${STRATUM_ANCESTRIES}, without the reference ancestry ${REF_ANCESTRY}" >&2
     exit 1
 fi
 
-# Covariates: COVARIATES, else the study's list (HANDOFF_DIR/phenotypes/covariates.txt) + PC1..PC5
+# Covariates: COVARIATES, else the study's list (HANDOFF_DIR/phenotypes/covariates.txt) + PC1..PC<N_PCS_MODEL>
 COVARIATES="${COVARIATES:-$(HANDOFF_DIR="${HANDOFF_DIR}" default_covariates)}" || exit 1
+FACTOR_COVARIATES="${FACTOR_COVARIATES-$(rr_default FACTOR_COVARIATES)}"
+VARIANT_INCLUDE="${VARIANT_INCLUDE-$(rr_default VARIANT_INCLUDE)}"
+[[ -z "${VARIANT_INCLUDE}" || "${VARIANT_INCLUDE}" == /* ]] || VARIANT_INCLUDE="${SCRIPT_DIR}/${VARIANT_INCLUDE}"   # relative: from the repo root
 
 # The command as an array: one element per argument, so nothing is split or globbed by accident
 CMD=(Rscript "${SCRIPT_DIR}/bin/tractor_genesis_adapter.R"
@@ -148,7 +159,7 @@ CMD=(Rscript "${SCRIPT_DIR}/bin/tractor_genesis_adapter.R"
     --model "${MODEL}")
 if [[ "${MODEL}" == "survival" ]]; then
     CMD+=(--time_col "$(trait_time_col "${TRAIT}")" --event_col "$(trait_event_col "${TRAIT}")")
-    CMD+=(--time_origin "${TIME_ORIGIN:-$(rr_default TIME_ORIGIN)}")
+    CMD+=(--time_origin "${TIME_ORIGIN:-$(rr_default TIME_ORIGIN)}" --eoi_col "${EOI_COL:-$(rr_default EOI_COL)}")
     # set-but-empty means none (e.g. COX_STRATA= for the MRD-adjusted arm), so '-', not ':-'
     COX_STRATA="${COX_STRATA-$(rr_default COX_STRATA)}"
     [[ -n "${COX_STRATA}" ]] && CMD+=(--cox_strata "${COX_STRATA}")
@@ -157,6 +168,8 @@ if [[ "${MODEL}" == "survival" ]]; then
 fi
 SAMPLE_SUBSET="${SAMPLE_SUBSET-$(rr_default SAMPLE_SUBSET)}"
 [[ -n "${SAMPLE_SUBSET}" ]] && CMD+=(--sample_subset "${SAMPLE_SUBSET}")
+[[ -n "${FACTOR_COVARIATES}" ]] && CMD+=(--factor_covariates "${FACTOR_COVARIATES}")
+[[ -n "${VARIANT_INCLUDE}" ]] && CMD+=(--variant_include "${VARIANT_INCLUDE}")
 # The stratum's members (step 0 writes them from strata.tsv): the adapter analyses only these (CP-17)
 SAMPLE_INCLUDE=""
 if [[ "${STRATUM}" != POOLED && -s "${SCRIPT_DIR}/results/strata/${STRATUM}.samples.txt" ]]; then
@@ -196,6 +209,7 @@ qc_gate_or_exit "${QC_REQUIRE_STRUCTURE}" "GWAS ${TRAIT} / ${STRATUM} chr${CHR}"
 # chromosome's Tractor files), and the adapter's counts file (read when the task ends)
 INPUTS=("${PHENO}" "${KINSHIP}" "${ANC_FILE}" "${STRATA_FILE}" "${TRACTOR_PREFIX}".*)
 [[ -n "${SAMPLE_INCLUDE}" ]] && INPUTS+=("${SAMPLE_INCLUDE}")
+[[ -n "${VARIANT_INCLUDE}" ]] && INPUTS+=("${VARIANT_INCLUDE}")
 [[ -f "${ANC_INDEX_MAP}" ]] && INPUTS+=("${ANC_INDEX_MAP}")
 rr_args "$(print_cmd "${CMD[@]}")" "${INPUTS[@]}"
 rr_sidecar "${RESULTS_DIR}/chr${CHR}.run_counts.tsv"

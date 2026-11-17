@@ -83,8 +83,16 @@ option_list <- list(
                 help = "binary, quantitative, survival [default: binary]"),
     make_option("--time_col", type = "character", default = "time"),
     make_option("--event_col", type = "character", default = "event"),
+    make_option("--time_origin", type = "character", default = "diagnosis",
+                help = "Survival time origin: diagnosis (the times as shipped) or eoi (time - --eoi_col; a sample with its event or censoring at or before it, or without it, is left out and counted), as in the GWAS"),
+    make_option("--eoi_col", type = "character", default = "eoi_day",
+                help = "The landmark column for --time_origin eoi [default: eoi_day]"),
+    make_option("--sample_subset", type = "character", default = NULL,
+                help = "column=value[,value...]: analyse only these samples, as the GWAS did (SAMPLE_SUBSET)"),
     make_option("--covariates", type = "character", default = NULL,
-                help = "Comma-separated covariates (e.g. sex,age_at_diagnosis,cd19_pos_pct,storage_days,PC1..PC5)"),
+                help = "Comma-separated covariates (e.g. sex,age_at_diagnosis,wbc_dx_log10,cyto_risk,PC1..PC5)"),
+    make_option("--factor_covariates", type = "character", default = NULL,
+                help = "column:reference[,...]: categorical covariates, as 0/1 indicators for the other levels (FACTOR_COVARIATES)"),
     make_option("--unrelated_ids", type = "character", default = NULL,
                 help = "Optional file of unrelated sample IDs (GLM/Cox assume independence)"),
 
@@ -355,9 +363,32 @@ if (!is.null(opt$unrelated_ids)) {
     cat("Restricted to", nrow(pheno), "unrelated samples\n")
 }
 
+# Shared with the GWAS adapter: the landmark and the subset (bin/landmark.R), categorical covariates
+# and sample accounting (bin/qc_assert.R), so GxG analyses the samples and the clock the GWAS did
+.gxg_dir <- local({
+    f <- sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)[1])
+    if (is.na(f)) "bin" else dirname(normalizePath(f))
+})
+source(file.path(.gxg_dir, "landmark.R"))
+source(file.path(.gxg_dir, "qc_assert.R"))
+gxg_where <- sprintf("GxG %s / %s", opt$trait, opt$stratum %||% "all")
+analysis_info <- list(trait = opt$trait, model = opt$model)
+if (!is.null(opt$sample_subset)) {
+    ss <- parse_sample_subset(opt$sample_subset)
+    if (!ss$column %in% names(pheno)) stop("--sample_subset: column '", ss$column, "' is not in ", opt$phenotype)
+    n0 <- nrow(pheno)
+    pheno <- pheno[as.character(get(ss$column)) %in% ss$values]
+    qc_account("gxg_sample_subset", n0, nrow(pheno), paste0(gxg_where, ": ", ss$column, " in {", paste(ss$values, collapse = ","), "}"))
+    cat("Sample subset ", opt$sample_subset, ": ", n0, " -> ", nrow(pheno), " samples\n", sep = "")
+    analysis_info$sample_subset <- opt$sample_subset
+}
+
 covs <- if (!is.null(opt$covariates)) strsplit(opt$covariates, ",")[[1]] else character(0)
+factor_spec <- parse_factor_covariates(opt$factor_covariates)
+covs <- union(covs, names(factor_spec))
 missing_covs <- setdiff(covs, names(pheno))
 if (length(missing_covs) > 0) stop("Covariates not in phenotype: ", paste(missing_covs, collapse = ","))
+check_covariates(pheno, covs, opt$phenotype, factors = names(factor_spec))
 
 # Ancestry → stratum
 if (opt$ancestry_col %in% names(pheno)) {
@@ -391,11 +422,38 @@ cat("Samples with genotype + phenotype:", length(common), "\n\n")
 if (opt$model == "survival") {
     if (!all(c(opt$time_col, opt$event_col) %in% names(pheno))) stop("Survival columns missing")
     keep <- !is.na(pheno[[opt$time_col]]) & !is.na(pheno[[opt$event_col]])
+    # The clock of the GWAS (--time_origin eoi): time - the landmark; a sample whose event or
+    # censoring is at or before it, or without it, is left out and counted (bin/landmark.R)
+    analysis_info$time_origin <- "diagnosis"
+    if (opt$time_origin == "eoi") {
+        if (!opt$eoi_col %in% names(pheno)) stop("--time_origin eoi: column '", opt$eoi_col, "' is not in ", opt$phenotype)
+        lm <- landmark_eoi(pheno[[opt$time_col]], pheno[[opt$event_col]], pheno[[opt$eoi_col]])
+        n_before <- sum(lm$excluded & keep & !is.na(pheno[[opt$eoi_col]]))
+        n_no_eoi <- sum(lm$excluded & keep & is.na(pheno[[opt$eoi_col]]))
+        note <- sprintf("%d with %s at or before %s, %d without %s", n_before, opt$time_col, opt$eoi_col, n_no_eoi, opt$eoi_col)
+        qc_account("gxg_landmark_eoi", sum(keep), sum(keep & !lm$excluded),
+                   paste0(gxg_where, ": time origin = end of induction (", opt$time_col, " - ", opt$eoi_col, "); left out: ", note))
+        cat("Time origin: end of induction (", opt$time_col, " - ", opt$eoi_col, "); left out ", note, "\n", sep = "")
+        pheno[[opt$time_col]] <- lm$time
+        keep <- keep & !lm$excluded
+        analysis_info$time_origin <- paste0("end_of_induction (", opt$time_col, " - ", opt$eoi_col, "; left out: ", note, ")")
+    } else if (opt$time_origin != "diagnosis") stop("--time_origin must be diagnosis or eoi")
 } else {
     if (!opt$trait %in% names(pheno)) stop("Trait '", opt$trait, "' not in phenotype")
     keep <- !is.na(pheno[[opt$trait]])
 }
 pheno <- pheno[keep]; G <- G[keep, , drop = FALSE]
+# Categorical covariates: 0/1 indicators for the levels other than the reference, among these samples
+if (length(factor_spec) > 0) {
+    for (cv in names(factor_spec)) if (is.character(pheno[[cv]])) set(pheno, i = which(!nzchar(trimws(pheno[[cv]]))), j = cv, value = NA_character_)
+    fx <- expand_factor_covariates(pheno, factor_spec, opt$phenotype)
+    pheno <- fx$data
+    covs <- unlist(lapply(covs, function(cv) if (cv %in% names(factor_spec)) fx$indicators[[cv]] else cv), use.names = FALSE)
+    cat("Factor covariates:", fx$note, "\n")
+    analysis_info$factor_covariates <- fx$header
+}
+analysis_info$covariates <- paste(covs, collapse = ",")
+analysis_info$n <- nrow(pheno)
 
 # ============================================================================
 # 3b. Independent-signal selection among hits: CONDITIONAL testing, not LD-drop
@@ -723,6 +781,10 @@ for (nm in names(all_results)) {
     f <- paste0(opt$output_prefix, ".gxg.", nm, suffix, ".tsv")
     fwrite(all_results[[nm]], f, sep = "\t"); out_files <- c(out_files, f)
 }
+# What these samples and this clock were (the GWAS writes the same as '##' lines above its tables)
+f <- paste0(opt$output_prefix, ".gxg.analysis", suffix, ".tsv")
+fwrite(data.frame(key = names(analysis_info), value = vapply(analysis_info, function(x) as.character(x)[1], "")), f, sep = "\t")   # data.frame: key is an argument of data.table()
+out_files <- c(out_files, f)
 combined <- rbindlist(all_results, fill = TRUE)
 if (nrow(combined) > 0) {
     f <- paste0(opt$output_prefix, ".gxg.all", suffix, ".tsv")

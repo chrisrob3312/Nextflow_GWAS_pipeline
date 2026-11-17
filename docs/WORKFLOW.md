@@ -23,13 +23,15 @@ one module to the next. The same steps exist as SLURM array scripts under
 Example phenotype file:
 
 ```
-FID   IID   sample_id   mrd   mrd_level  eoi_day  efs_time  efs_event  os_time  os_event  protocol  study_group  sex  age_at_diagnosis  cd19_pos_pct  storage_days  PC1 ... PC5
+FID   IID   sample_id   mrd   mrd_level  eoi_day  efs_time  efs_event  os_time  os_event  protocol  study_group  sex  age_at_diagnosis  wbc_dx_log10  cyto_risk  PC1 ... PC5
 ```
 (`mrd_level` 1–4 = < 0.01 %, 0.01–0.099 %, 0.1–0.99 %, ≥ 1 % at the end of induction; `eoi_day` and the
-`*_time` columns in days from diagnosis; `study_group` one of `COG_P9900`, `COG_AALL0232_0331`, `SJ_TXV`, `REDIAL`)
+`*_time` columns in days from diagnosis; `eoi_day` the protocol day in COG (29) and St. Jude (46), each child's own day in REDIAL;
+`study_group` one of `COG_P9900`, `COG_AALL0232_0331`, `SJ_TXV`, `REDIAL`; `cyto_risk` one of `favorable`, `unfavorable`, `neutral_unknown`)
 with `phenotype_cols = 'mrd,mrd_level,efs,os'`, `survival_traits = 'efs,os'`, `binary_traits = 'mrd'` (`mrd_level`,
 in neither list, runs as quantitative),
-`covariate_cols = 'sex,age_at_diagnosis,cd19_pos_pct,storage_days,PC1,PC2,PC3,PC4,PC5'` (the bundle's `phenotypes/covariates.txt`, then five PCs).
+`covariate_cols = 'sex,age_at_diagnosis,wbc_dx_log10,PC1,PC2,PC3,PC4,PC5'` on the Nextflow path (which has no categorical
+covariates yet: section 11). The SLURM path reads all of this from `config/gwas_settings.txt` (section 5).
 
 ## 1. End-to-end overview
 
@@ -240,17 +242,22 @@ Each pair reports Wald and LRT p-values with Bonferroni over pairs and BH FDR.
 
 | Setting | Nextflow | SLURM | Notes |
 |---|---|---|---|
-| Traits | `phenotype_cols` | `TRAITS_LIST` (default `mrd,mrd_level,efs,os`) | phenotype columns; the launcher refuses a trait whose column(s) the phenotype file lacks |
+| Settings file | (none: `nextflow.config` / `-params-file`) | `config/gwas_settings.txt`, or `SETTINGS_FILE=<path>` (`none`: built-in defaults only) | `name = value` lines; built-in default < settings file < `arm.<label>` (with `ARM`) < environment; an unknown name, a repeat or an out-of-domain value is refused, naming the line; `params.tsv` records where each value came from. Nothing study-specific is a built-in default |
+| Traits | `phenotype_cols` | `trait.<name> = binary \| quantitative \| survival[:time:event]` lines (this study: `mrd`, `mrd_level`, `efs`, `os`); `TRAITS_LIST` runs fewer | phenotype columns; the launcher refuses a trait whose column(s) the phenotype file lacks, or one the settings file does not declare |
 | Binary traits | `binary_traits` | everything not in `SURVIVAL_TRAITS` or `QUANTITATIVE_TRAITS` | 0/1 |
-| Quantitative traits | in neither `binary_traits` nor `survival_traits` | `QUANTITATIVE_TRAITS` (default `mrd_level`) | GENESIS gaussian null; a trait in both model lists is refused |
-| Time-to-event traits | `survival_traits` (+ `survival_time_cols`, `survival_event_cols`) | `SURVIVAL_TRAITS` (default `efs,os`); `TIME_COL_<trait>`, `EVENT_COL_<trait>` override one trait | columns `<trait>_time`, `<trait>_event`, as the handoff contract names them; each trait has its own |
-| Survival clock | (not passed yet: diagnosis) | `TIME_ORIGIN` (`eoi` default, or `diagnosis`) | `eoi`: time − `eoi_day`, children at or before it left out and counted; needs an `eoi_day` column (the launcher refuses without one) |
-| MRD in the Cox model | (not passed yet) | `COX_STRATA` (default `mrd_level`; empty = none), `COX_EXTRA_COVARIATES` (default empty) | stratified (default) or adjusted (`COX_STRATA= COX_EXTRA_COVARIATES=mrd_level` with a `RUN_LABEL`); never both on one column (refused); survival traits only |
-| Sub-cohort | (not passed yet) | `SAMPLE_SUBSET` (default empty), e.g. `study_group=REDIAL` | needs a `RUN_LABEL`; refused with `RUN_PRS` / `RUN_GXG` and when no row matches |
+| Quantitative traits | in neither `binary_traits` nor `survival_traits` | `trait.<name> = quantitative` (or `QUANTITATIVE_TRAITS`) | GENESIS gaussian null; a trait in both model lists is refused |
+| Time-to-event traits | `survival_traits` (+ `survival_time_cols`, `survival_event_cols`) | `trait.<name> = survival[:time:event]` (or `SURVIVAL_TRAITS`; `TIME_COL_<trait>`, `EVENT_COL_<trait>` override one trait) | columns `<trait>_time`, `<trait>_event` unless named; each trait has its own |
+| Survival clock | (not passed yet: diagnosis) | `TIME_ORIGIN` (built-in `diagnosis`; this study `eoi`), `EOI_COL` (`eoi_day`) | `eoi`: time − `EOI_COL`, samples at or before it left out and counted, in the GWAS, PRS validation and GxG alike; needs the column (the launcher refuses without one) |
+| MRD in the Cox model | (not passed yet) | `COX_EXTRA_COVARIATES` (this study: `mrd_level`, one linear trend term), `COX_STRATA` (empty; one baseline per level when set) | decided 17 Nov 2026: adjusted, one trend term, in the whole cohort; never both on one column (refused); survival traits only (GWAS and GxG) |
+| MRD arms | (not passed yet) | `arm.mrd_pos`, `arm.mrd_neg` in the settings file; `ARM=<label>`, `ARM=all` (the whole cohort, then `ARM_ALL`) | each arm: EFS and OS in one MRD group, no MRD covariate, results under `results/<label>/`; `SUBSET_LINKED_COLUMNS` (`mrd,mrd_level`) makes the launcher refuse an MRD trait or covariate inside an MRD subset, naming what to set |
+| Sub-cohort | (not passed yet) | `SAMPLE_SUBSET` (default empty), e.g. `study_group=REDIAL` | needs a `RUN_LABEL`; the GWAS, PRS validation and GxG all apply it; refused when no row matches |
 | PC scale | (none) | `PC_SCALE` (`stratum` default, or `cohort`) | which PCs a stratum's GWAS adjusts for; POOLED always uses the cohort PCs |
 | MIX stratum | (none) | `MIX_RETAIN` (`true` default, or `false`) | `false` leaves the bundle's MIX stratum out of the default strata |
 | Run label | (none) | `RUN_LABEL` (empty default) | a sensitivity arm's results go under `results/<RUN_LABEL>/` |
-| Covariates | `covariate_cols`, `gxg_covariates` | `COVARIATES` (default: the bundle's `phenotypes/covariates.txt`, then `PC1..PC5`) | numeric phenotype columns: the launcher refuses a name that is not a column, the adapter one that is not numeric; the list used is written as `## covariates=` above every results table |
+| Covariates | `covariate_cols`, `gxg_covariates` | `COVARIATES` (default: the bundle's `phenotypes/covariates.txt`, this study `sex, age_at_diagnosis, wbc_dx_log10, cyto_risk`, then `PC1..PC<N_PCS_MODEL>`) | the launcher refuses a name that is not a column, the adapter a non-numeric one that `FACTOR_COVARIATES` does not declare; the list used is written as `## covariates=` above every results table |
+| Categorical covariates | (none) | `FACTOR_COVARIATES` (this study `cyto_risk:neutral_unknown`) | `column:reference_level`; 0/1 indicators for the other levels among the analysed samples, added to the model if `COVARIATES` lacks the column; the expansion is written as `## factor_covariates=` and filed as `adapter_factor_covariates` (INFO, with the count per level) |
+| PCs in the model | (in `covariate_cols`) | `N_PCS_MODEL` (5) | how many to use: see "How many PCs" below |
+| Lead-SNP refit | (none) | `VARIANT_INCLUDE` (a file of variant IDs), `LEAD_SNP_P` (5e-8), `STRATA_LIST=POOLED` | the study-cohort sensitivity arm, below |
 | Ancestry column | `gxg_ancestry_col` | `ANCESTRY_COL` | GRAF-ANC codes or labels |
 | Strata rules | `min_stratum_n`, `bin/ancestry_config.R` | `STRATA_LIST` (default: every stratum of the bundle's `ancestry/strata.tsv`; a name it lacks is refused), `MIN_STRATUM_N`, `bin/ancestry_config.R` | `MIN_STRATUM_N` default 50 (decided 10 Nov 2026); a smaller stratum is skipped, and STEP 2 names it in the pooled file's `## strata_skipped=` |
 | Known loci | `gxg_known_loci`, `gxg_use_default_loci` | `KNOWN_LOCI`, `GXG_USE_DEFAULT_LOCI` | default table is a starting point; verify positions |
@@ -258,6 +265,42 @@ Each pair reports Wald and LRT p-values with Bonferroni over pairs and BH FDR.
 | Steps run | (no switch) | `RUN_PRS`, `RUN_COLOC`, `RUN_VALIDATION`, `RUN_GXG` (default `false`) | every SLURM launch prints the steps it deferred |
 | Hit selection among LD-correlated hits | `gxg_prune_mode`, `gxg_cond_p_threshold`, `gxg_max_pair_r2`, `gxg_min_distance_kb` | `GXG_PRUNE_MODE`, `GXG_COND_P` | conditional (default): LD-correlated hit tested conditional on kept hits, kept if cond P < 1e-4; precedence GWAS > custom > known |
 | Tractor | `tractor_aac_pops`, `tractor_lat_pops`, `tractor_ref_ancestry`, `tractor_mac_min` | `data/tractor/<stratum>/ancestries.txt`, one per stratum, read by `submit_gwas_array.sh`; `MAC_MIN` | no default list: a stratum without the file is refused. `MAC_MIN` default 10; open question: the handoff contract says 20 |
+
+**The three MRD launches (decided 17 Nov 2026).** One for the whole cohort, one per MRD group, each over
+every ancestry stratum (and pooled across them in STEP 2):
+
+```bash
+slurm/submit_full_pipeline.sh                  # MRD, MRD level, EFS, OS; EFS/OS adjusted for mrd_level (one trend term)
+ARM=mrd_pos slurm/submit_full_pipeline.sh      # EFS and OS in mrd = 1, no MRD covariate  -> results/mrd_pos/
+ARM=mrd_neg slurm/submit_full_pipeline.sh      # EFS and OS in mrd = 0, no MRD covariate  -> results/mrd_neg/
+ARM=all slurm/submit_full_pipeline.sh          # the three above, one launch and one run record each
+```
+
+`ARM=all` dry-runs every launch first, so a refusal in the last stops it before the first is queued.
+
+**How many PCs (`N_PCS_MODEL`, 5 to 8 for this cohort).** Start at 5. Look at the PC-AiR scree plot (the
+variance each PC explains, from the structure step) and the genomic-control lambda of each stratum's EFS
+and OS GWAS: add PCs while the scree still drops and lambda is above about 1.05, and stop once lambda
+stops falling, since every extra PC costs a degree of freedom in a stratum of a few hundred children. Set
+the chosen number in `config/gwas_settings.txt` (and record why in the run's notes); the PC files must
+carry that many PCs (the launcher checks).
+
+**Study-cohort sensitivity (decided 17 Nov 2026; replaces env-MR-MEGA as the planned sensitivity).** The
+lead SNPs of the MR-MEGA meta-analysis are refitted in the whole cohort in one model (`STRATA_LIST=POOLED`:
+the cohort PCs and `data/tractor/cohort/` Tractor files), with `study_group` as a categorical covariate
+(reference `REDIAL`) standing in for genotyping chip and treatment era, and the other covariates as in the
+main model:
+
+```bash
+RUN_MRMEGA=true slurm/submit_full_pipeline.sh            # main run: per-stratum GWAS, then MR-MEGA per trait
+bin/mrmega_lead_snps.sh --output results/mrmega/lead_snps.txt \
+    results/mrmega/efs/efs.mrmega.result results/mrmega/os/os.mrmega.result   # P < LEAD_SNP_P, one per 500 kb
+ARM=study_cohort slurm/submit_full_pipeline.sh           # -> results/study_cohort/gwas/<trait>/POOLED.sumstats.gz
+```
+
+`arm.study_cohort` sets `STRATA_LIST=POOLED`, `VARIANT_INCLUDE=results/mrmega/lead_snps.txt` and
+`FACTOR_COVARIATES=cyto_risk:neutral_unknown,study_group:REDIAL`. Each lead SNP's effect with and
+without the study adjustment is then compared by hand (no script compares them yet; section 11).
 
 ## 6. SLURM orchestration (`slurm/submit_full_pipeline.sh`)
 
@@ -473,22 +516,32 @@ Recorded here so that what is missing is not mistaken for what is done. Each ite
 - **Per study × ancestry GWAS units for MR-MEGA (decided 17 Nov 2026; not built).** The meta-analysis
   is to combine **four study groups** — COG P9900s (`COG_P9900`), COG AALL0232 + AALL0331
   (`COG_AALL0232_0331`), St. Jude Total XV (`SJ_TXV`) and REDIAL (`REDIAL`) — each split by ancestry
-  stratum, with **MR-MEGA primary and env-MR-MEGA as the sensitivity analysis**. Each unit adjusts for
-  sex, age at diagnosis, NCI risk group, cytogenetic risk (favorable / unfavorable / neutral-unknown, two
-  0/1 indicators with neutral-unknown the reference) and its within-stratum PCs (`PC_SCALE=stratum`, the
+  stratum, with **MR-MEGA primary**; the planned sensitivity is now the study-cohort refit of the lead
+  SNPs (section 5), env-MR-MEGA optional (`docs/ENV_MRMEGA.md`). Each unit adjusts for
+  sex, age at diagnosis, log10 WBC at diagnosis, cytogenetic risk (`cyto_risk`, a categorical covariate,
+  reference neutral-unknown) and its within-stratum PCs (`PC_SCALE=stratum`, the
   default). Today a unit is an ancestry stratum over all studies (`docs/ENV_MRMEGA.md`), and
   `SAMPLE_SUBSET` can restrict a whole launch to one study, but nothing builds the study × stratum
   units, their within-unit PCs, the 50-sample floor per unit, or the MR-MEGA input from them. It
   belongs with **CP-29** (env-MR-MEGA): unit = (`study_group`, stratum), STEP 1 fanned out per unit,
-  STEP 2b reading one sumstats file per unit. The contract already carries `study_group`; the NCI risk
-  and cytogenetic indicator columns are not yet required by the checker.
+  STEP 2b reading one sumstats file per unit. The contract carries `study_group` and the four covariates (17 Nov 2026).
 - **The Nextflow path** (`main.nf`, `modules/local/tractor_genesis_adapter`) does not pass
   `--time_origin`, `--cox_strata` or `--sample_subset`: it runs EFS and OS from diagnosis, unstratified,
   on the full cohort, and says so in every table (`## time_origin=diagnosis`). It does run `mrd_level`
   as quantitative when it is listed in `phenotype_cols` and not in `binary_traits`.
-- **PRS validation and GxG** read survival times as shipped (from diagnosis) and do not stratify on
-  `COX_STRATA`; a launch with `RUN_PRS` / `RUN_GXG` and `TIME_ORIGIN=eoi` prints a NOTE and records
-  `DOWNSTREAM_TIME_ORIGIN` in `params.tsv`. `SAMPLE_SUBSET` with either is refused.
+- **PRS validation and GxG** now count from the landmark, apply `SAMPLE_SUBSET` and (GxG) the factor
+  covariates and `COX_EXTRA_COVARIATES` (17 Nov 2026); neither stratifies on `COX_STRATA`, which is off by
+  default. GxG's own ancestry grouping (`PRIMARY_ANCESTRIES`, the GRAF-ANC code table) is still written in
+  `bin/run_gxg_interaction.R` / `bin/ancestry_config.R`, not in the settings file.
+- **The Nextflow path** has no categorical covariates (`FACTOR_COVARIATES`) and no settings file: it reads
+  `nextflow.config` / `-params-file`. `config/gwas_settings.txt` is the SLURM path's.
+- **Study-cohort sensitivity, the comparison.** `ARM=study_cohort` refits the lead SNPs; nothing yet sets
+  each SNP's adjusted estimate beside its unadjusted one (the main run has per-stratum estimates and the
+  MR-MEGA P, not a whole-cohort estimate). A whole-cohort run without the study covariate
+  (`STRATA_LIST=POOLED VARIANT_INCLUDE=... RUN_LABEL=pooled_unadjusted`) gives the reference; a script
+  joining the two belongs in STEP 2.
+- **`STRATA_LIST=POOLED` and the later steps**: POOLED must be listed alone; GxG and MR-MEGA are not meant
+  to run on such a launch (GxG's task list would name POOLED twice) and are not refused yet.
 - **Untested here**: the quantitative (`mrd_level`) null needs GENESIS and the stratified Cox null
   with a GRM needs coxme; neither is installed in the test environment, so those two paths are covered
   by the unit tests of `cox_ops` and by the dry runs, not by an end-to-end adapter run.

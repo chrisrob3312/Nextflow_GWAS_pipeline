@@ -23,7 +23,7 @@ exactly as written; the chromosome placeholder `{N}` is 1–22 with no `chr` pre
 | `local_ancestry/flare_panels.txt` | provenance of the LAI reference | the exact FLARE `ref-panel=` sample map used: `sample<TAB>label` | Module 7 (copied from `params.flare_panel_file`) |
 | `local_ancestry/ancestry_labels.txt` | the cohort's ancestry labels; each stratum's own list, `data/tractor/<stratum>/ancestries.txt` (what the adapter is given as `--ancestries`), is the subset of these that the stratum's Tractor files carry | one label per line, **alphabetical** — the order the Tractor-GENESIS adapter reads and reports in, so a column is always identifiable by name | derived from the panel file |
 | `local_ancestry/flare_index_map.tsv` | the bridge from FLARE's numbering to those labels | header `anc_index label`; rows `0,1,2…` in the panel file's order of first appearance, which is how FLARE numbers `anc0…ancK-1`; the extraction step renames by this map so every downstream file is keyed by label | derived from the panel file |
-| `phenotypes/phenotypes.tsv` | the four GWAS outcomes, the null models, the Cox branch, covariates | tab-separated, header `FID IID sample_id mrd mrd_level eoi_day efs_time efs_event os_time os_event protocol study_group <covariates…>` (any column order; the checker finds each by name); `sample_id == IID` on every row (checked); `mrd` 0/1 (end-of-induction MRD ≥ 0.01 %); `mrd_level` the end-of-induction MRD level, **1** < 0.01 %, **2** 0.01–0.099 %, **3** 0.1–0.99 %, **4** ≥ 1 %, `NA` where unknown (never 9; checked); `eoi_day` the end of induction in **days from diagnosis** (the child's own day where known, else the protocol day: 29 in COG and REDIAL, 46 at St. Jude), numeric ≥ 0 or `NA` (checked); `*_time` in **days from diagnosis**, numeric ≥ 0 (negative refused) — the GWAS moves the origin to `eoi_day` itself, so ship the times from diagnosis; `*_event` 0/1, `NA` where unknown; `study_group` the MR-MEGA study, one of `COG_P9900`, `COG_AALL0232_0331`, `SJ_TXV`, `REDIAL` (never blank; checked); categorical covariates ship as 0/1 indicator columns (e.g. `nci_high`, `cyto_fav`, `cyto_unfav`; neutral / unknown cytogenetics is the reference), never as text; `protocol` is a short code for the treatment protocol the participant was enrolled on (never free text; `NA` where unknown) — the study-level environmental covariate for env-MR-MEGA (`docs/ENV_MRMEGA.md`); **no free-text columns** (no `comments`, `cyto_text`, `death_cause`…, no `mrn`, no `dob` — derive age upstream) | the study, placed here by the harmonization run |
+| `phenotypes/phenotypes.tsv` | the four GWAS outcomes, the null models, the Cox branch, covariates | tab-separated, header `FID IID sample_id mrd mrd_level eoi_day efs_time efs_event os_time os_event protocol study_group <covariates…>` (any column order; the checker finds each by name); `sample_id == IID` on every row (checked); `mrd` 0/1 (end-of-induction MRD ≥ 0.01 %); `mrd_level` the end-of-induction MRD level, **1** < 0.01 %, **2** 0.01–0.099 %, **3** 0.1–0.99 %, **4** ≥ 1 %, `NA` where unknown (never 9; checked); `eoi_day` the end of induction in **days from diagnosis**: the **protocol day** in COG (29) and St. Jude Total XV (46), **each child's own day** in REDIAL, numeric ≥ 0 or `NA` (checked: every COG and SJ row at its protocol day, the rule being `EOI_PROTOCOL_DAY` in `config/gwas_settings.txt`; decided 17 Nov 2026); `*_time` in **days from diagnosis**, numeric ≥ 0 (negative refused) — the GWAS moves the origin to `eoi_day` itself, so ship the times from diagnosis; `*_event` 0/1, `NA` where unknown; `study_group` the MR-MEGA study, one of `COG_P9900`, `COG_AALL0232_0331`, `SJ_TXV`, `REDIAL` (never blank; checked); the covariates (17 Nov 2026) are `sex`, `age_at_diagnosis` (years), `wbc_dx_log10` (log10 of the WBC at diagnosis, ×10^3/µL) and `cyto_risk`, a **categorical** column with the values `favorable` / `unfavorable` / `neutral_unknown` (checked: `COLUMN_LEVELS`), which the GWAS turns into 0/1 indicators against `neutral_unknown` (`FACTOR_COVARIATES`); any other categorical covariate ships the same way, as short text codes declared in the settings, never as free text; `protocol` is a short code for the treatment protocol the participant was enrolled on (never free text; `NA` where unknown) — the study-level environmental covariate for env-MR-MEGA (`docs/ENV_MRMEGA.md`); **no free-text columns** (no `comments`, `cyto_text`, `death_cause`…, no `mrn`, no `dob` — derive age upstream) | the study, placed here by the harmonization run |
 | `phenotypes/covariates.txt` | what the model adjusts for | one column name per line, every name present in `phenotypes.tsv` | the study |
 | `qc/removed_duplicates.tsv` | answers "were duplicates removed upstream" | header `kept_iid removed_iid kinship reason`; header-only when nothing was removed (never a 0-byte file); consistent with `# duplicates_removed`. Downstream re-checks the shipped kinship either way (pairs > 0.3536; `docs/WORKFLOW.md` section 10) and fails if a listed sample is still in the `.fam` | Module 6 kinship step |
 | `qc/sample_accounting.tsv` | n at every join | header `step n_in n_out n_removed reason` from first intake to this bundle | every Module |
@@ -81,18 +81,46 @@ final data, and never redone.
 
 The adapter is called per **trait × stratum × chromosome**, so the work fans out as SLURM arrays:
 `mrd` (binary), `mrd_level` (quantitative: the four levels as a linear trend, GENESIS gaussian null),
-`efs` and `os` (time-to-event via `--time_col efs_time --event_col efs_event`, likewise `os_*`).
+`efs` and `os` (time-to-event via `--time_col efs_time --event_col efs_event`, likewise `os_*`). These are
+this study's `trait.<name>` lines in `config/gwas_settings.txt`; nothing in the code names them.
 
 **Survival from the end of induction (decided 17 Nov 2026).** EFS and OS are counted from the end of
-induction, a landmark: the GWAS uses `<trait>_time − eoi_day`. A child whose event or censoring is at or
-before `eoi_day` was not at risk at the landmark, and a child without `eoi_day` cannot be placed on that
-clock; both are left out of that trait, counted in `sample_accounting.tsv` (step `landmark_eoi`), and
-named in the sumstats header (`## time_origin=`). The checker's ACCEPTED line gives the same counts for
-the bundle as shipped. Counting from diagnosis instead (`TIME_ORIGIN=diagnosis`) would credit every child
-with the induction weeks it had to survive to have an end-of-induction MRD value. By default each MRD level
-gets its own baseline hazard (`COX_STRATA=mrd_level`); the MRD-adjusted arm uses
-`COX_STRATA= COX_EXTRA_COVARIATES=mrd_level` with a `RUN_LABEL`. `SAMPLE_SUBSET=study_group=REDIAL`
-(with a `RUN_LABEL`) runs the same GWAS on REDIAL alone.
+induction, a landmark: the GWAS, PRS validation and GxG use `<trait>_time − eoi_day`. A child whose event
+or censoring is at or before `eoi_day` was not at risk at the landmark, and a child without `eoi_day`
+cannot be placed on that clock; both are left out of that trait, counted in `sample_accounting.tsv` (steps
+`landmark_eoi`, `gxg_landmark_eoi`, `prs_validation_landmark_eoi`), and named in the sumstats header
+(`## time_origin=`; GxG and PRS validation write it to `<prefix>.gxg.analysis.tsv` /
+`<prefix>.validation_analysis.tsv`). The checker's ACCEPTED line gives the same counts for the bundle as
+shipped. Counting from diagnosis instead (`TIME_ORIGIN=diagnosis`) would credit every child with the
+induction weeks it had to survive to have an end-of-induction MRD value.
+
+**MRD (decided 17 Nov 2026).** The whole-cohort EFS and OS models adjust for `mrd_level` as one linear
+trend term (`COX_EXTRA_COVARIATES=mrd_level`; `COX_STRATA`, one baseline per level, stays available and is
+off). `ARM=mrd_pos` and `ARM=mrd_neg` run EFS and OS within `mrd = 1` and `mrd = 0`, without an MRD
+covariate; the launcher refuses an MRD trait or covariate inside an MRD subset (`SUBSET_LINKED_COLUMNS`).
+`SAMPLE_SUBSET=study_group=REDIAL` (with a `RUN_LABEL`) runs the same GWAS on REDIAL alone.
+
+## Columns that follow from the settings
+
+The checker reads the same settings as the launcher (`config/gwas_settings.txt`, or `--settings FILE` /
+`SETTINGS_FILE`; an environment variable of the same name beats the file), so the required phenotype
+columns are not a fixed list:
+
+| setting | columns `phenotypes.tsv` must carry | checked |
+|---|---|---|
+| always | `FID`, `IID`, `sample_id` | `sample_id == IID`; one key with the `.fam` |
+| `trait.<name> = binary` | `<name>` | 0, 1 or `NA` |
+| `trait.<name> = quantitative` | `<name>` | numeric or `NA` |
+| `trait.<name> = survival[:time:event]` | `<name>_time`, `<name>_event` (or the columns named) | time numeric ≥ 0 or `NA`, event 0 / 1 / `NA` |
+| `TIME_ORIGIN = eoi` (with a survival trait) | `EOI_COL` (`eoi_day`) | numeric ≥ 0 or `NA` |
+| `EOI_PROTOCOL_DAY = group:day,...` | `STUDY_GROUP_COL` (`study_group`) | every row of a listed group at that day; other groups any day ≥ 0 or `NA` |
+| `FACTOR_COVARIATES = column:reference,...` | each column | the reference level occurs |
+| `COLUMN_LEVELS = column:a/b/...,...` | each column | only those values or `NA` |
+| `REQUIRED_COLUMNS = a,b` | each column (this study: `protocol`, `study_group`) | never blank (`NA` allowed) |
+| `phenotypes/covariates.txt` | each name listed | present |
+
+This study's values give the header listed in the table at the top. The first column missing is refused,
+naming what needs it, so a bundle made before a setting changed says what to re-export.
 
 **Bundles made before 17 Nov 2026** lack `mrd_level`, `eoi_day` and `study_group` and are **refused** by
 the checker, naming the first missing column. No real bundle had been delivered by then, so refusing costs

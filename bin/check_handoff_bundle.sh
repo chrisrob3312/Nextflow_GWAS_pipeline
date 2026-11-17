@@ -9,6 +9,9 @@
 #   --allow-missing-tools accept a bundle even when bcftools / Rscript are absent: their checks are then
 #                         SKIPPED and named in the ACCEPTED line. Without it a missing tool is a refusal,
 #                         because "did not run" must never read as "passed".
+#   --settings FILE       the GWAS settings whose traits, landmark and checks the phenotypes must meet
+#                         (default: SETTINGS_FILE, else config/gwas_settings.txt; bin/gwas_settings.sh).
+#                         Environment variables of the same names beat the file, as in a launch.
 #   --qc-dir DIR          also file the sample-ID verdict (handoff_sample_ids, PASS or FAIL) and its
 #                         sample-accounting row there, as bin/qc_assert.R does (default: $GWAS_QC_DIR when
 #                         set; otherwise nothing is filed). The bundle itself is never written.
@@ -25,6 +28,7 @@ while [[ $# -gt 0 ]]; do case "$1" in
   --qc-dir) [[ $# -ge 2 ]] || { echo "--qc-dir needs a directory" >&2; exit 1; }; QC_DIR="$2"; shift 2;;
   --chromosomes) [[ $# -ge 2 ]] || { echo "--chromosomes needs a value (e.g. 1-22 or 21,22)" >&2; exit 1; }; CHROM_SPEC="$2"; shift 2;;
   --allow-missing-tools) ALLOW_MISSING=1; shift;;
+  --settings) [[ $# -ge 2 ]] || { echo "--settings needs a file" >&2; exit 1; }; SETTINGS_FILE="$2"; export SETTINGS_FILE; shift 2;;
   *) echo "unknown arg $1" >&2; exit 1;; esac; done
 CHROMS=(); for part in ${CHROM_SPEC//,/ }; do
   if [[ "$part" =~ ^([0-9]+)-([0-9]+)$ ]]; then CHROMS+=($(seq "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"))
@@ -43,6 +47,11 @@ fail() { echo "HANDOFF REFUSED: $*" >&2; exit 2; }
 id_fail() { qc_row handoff_sample_ids FAIL "$NS" "sample ID mismatch: $1 vs fam: $3"
             acct_row handoff_sample_ids "$NS" "$2" "fam IIDs matched in $1"; fail "sample ID mismatch: $1 vs fam: $3"; }
 [[ -d "$B" ]] || fail "$B is not a directory"
+# The settings (read before the cd: a relative settings path is taken from where the checker runs)
+if [[ -n "${SETTINGS_FILE:-}" && "${SETTINGS_FILE}" != none && "${SETTINGS_FILE}" != /* ]]; then SETTINGS_FILE="${PWD}/${SETTINGS_FILE}"; export SETTINGS_FILE; fi
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/run_record.sh"    # RR_SWITCHES, rr_default, gs_* (bin/gwas_settings.sh)
+gs_load || fail "the settings file is wrong (REFUSED lines above)"
+SET_SRC="settings: ${GS_FILE:-none read, built-in defaults}"
 B="$(cd "$B" && pwd)"                       # absolute, so a relative bundle path works after the cd below
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT  # scratch lives outside the bundle; a refused or read-only bundle stays clean
 cd "$B"
@@ -103,38 +112,93 @@ NS=$(wc -l < genotypes/cohort.hardcall.maf01.fam); NV=$(wc -l < genotypes/cohort
 # 5. one key: .fam IID (maf01 and nomaf share it) == phenotypes sample_id == IID == ancestry_calls sample_id == VCF samples
 awk '{print $2}' genotypes/cohort.hardcall.maf01.fam > "$T/fam_order"
 LC_ALL=C sort "$T/fam_order" > "$T/fam_iid"
+# The phenotype columns follow from the settings (17 Nov 2026; docs/HANDOFF_CONTRACT.md): every trait's
+# column (binary 0/1/NA, quantitative numeric/NA) or a survival trait's time and event columns; the
+# landmark column (EOI_COL) under TIME_ORIGIN=eoi; the study-group column when EOI_PROTOCOL_DAY names
+# groups; FACTOR_COVARIATES' columns; REQUIRED_COLUMNS. The first one missing is refused, with what
+# needs it, so a bundle made before a setting changed says what to re-export.
 H=$(head -1 phenotypes/phenotypes.tsv)
-for c in FID IID sample_id mrd mrd_level eoi_day efs_time efs_event os_time os_event protocol study_group; do
-  grep -qP "(^|\t)${c}(\t|$)" <<<"$H" || fail "phenotypes.tsv lacks column '$c' (the GWAS runs MRD, the MRD level, EFS and OS from the end of induction (eoi_day); protocol is the env-MR-MEGA covariate, study_group the MR-MEGA study; a bundle made before 17 Nov 2026 must be re-exported with mrd_level, eoi_day and study_group)"; done
 col() { awk -F'\t' -v n="$1" 'NR==1{for(i=1;i<=NF;i++) if($i==n) {print i; exit}}' phenotypes/phenotypes.tsv; }
-IC=$(col IID); SC=$(col sample_id); PC=$(col protocol)
+tcol() { local v="TIME_COL_$1";  printf '%s' "${!v:-$(gs_value "$v" || printf '%s' "$1_time")}"; }
+ecol() { local v="EVENT_COL_$1"; printf '%s' "${!v:-$(gs_value "$v" || printf '%s' "$1_event")}"; }
+TRAITS_S="$(gs_effective TRAITS_LIST)"; SURV_S="$(gs_effective SURVIVAL_TRAITS)"; QUANT_S="$(gs_effective QUANTITATIVE_TRAITS)"
+TORIG="$(gs_effective TIME_ORIGIN)"; EOI="$(gs_effective EOI_COL)"; GRP="$(gs_effective STUDY_GROUP_COL)"
+PDAYS="$(gs_effective EOI_PROTOCOL_DAY)"; LEVELS="$(gs_effective COLUMN_LEVELS)"; FACT="$(gs_effective FACTOR_COVARIATES)"; REQ="$(gs_effective REQUIRED_COLUMNS)"
+[[ -n "$TRAITS_S" ]] || fail "no traits ($SET_SRC): declare trait.<name> lines in the settings file, or set TRAITS_LIST"
+NEED=(); declare -A WHY=()
+add_need() { [[ -n "${WHY[$1]+x}" ]] || { NEED+=("$1"); WHY[$1]="$2"; }; }
+for c in FID IID sample_id; do add_need "$c" "the contract's sample key"; done
+SURV_T=()
+for t in ${TRAITS_S//,/ }; do
+  if [[ ",$SURV_S," == *",$t,"* ]]; then SURV_T+=("$t"); add_need "$(tcol "$t")" "survival trait $t"; add_need "$(ecol "$t")" "survival trait $t"
+  else add_need "$t" "trait $t"; fi
+done
+[[ ${#SURV_T[@]} -gt 0 && "$TORIG" == eoi ]] && add_need "$EOI" "TIME_ORIGIN=eoi, the landmark (EOI_COL)"
+[[ -n "$PDAYS" ]] && add_need "$GRP" "EOI_PROTOCOL_DAY (STUDY_GROUP_COL)"
+for c in ${FACT//,/ }; do add_need "${c%%:*}" "FACTOR_COVARIATES"; done
+for c in ${REQ//,/ }; do add_need "$c" "REQUIRED_COLUMNS"; done
+for c in "${NEED[@]}"; do
+  grep -qP "(^|\t)${c}(\t|$)" <<<"$H" || fail "phenotypes.tsv lacks column '$c' (needed by ${WHY[$c]}; $SET_SRC; a bundle made before these settings must be re-exported with it)"; done
+IC=$(col IID); SC=$(col sample_id)
 awk -F'\t' -v i="$IC" -v s="$SC" 'NR>1 && $i != $s {print $i; exit 1}' phenotypes/phenotypes.tsv > "$T/badrow" \
   || id_fail phenotypes.tsv "$NS" "a row where IID != sample_id (IID $(cat "$T/badrow")); the contract keys everything on one id"
-awk -F'\t' -v p="$PC" 'NR>1 && ($p == "" || $p ~ /^[[:space:]]+$/) {exit 1}' phenotypes/phenotypes.tsv \
-  || fail "phenotypes.tsv has a blank protocol (use NA where unknown; the value is a short protocol code, never free text)"
-# mrd_level: 1 < 0.01 %, 2 0.01-0.099 %, 3 0.1-0.99 %, 4 >= 1 % (end of induction); unknown is NA, never 9
-LC=$(col mrd_level); EC=$(col eoi_day); GC=$(col study_group)
-awk -F'\t' -v c="$LC" 'NR>1 && $c == "9" {exit 1}' phenotypes/phenotypes.tsv \
-  || fail "phenotypes.tsv mrd_level has the value 9: code an unknown MRD level as NA"
-awk -F'\t' -v c="$LC" 'NR>1 && $c !~ /^([1-4]|NA)$/ {exit 1}' phenotypes/phenotypes.tsv \
-  || fail "phenotypes.tsv mrd_level has a value other than 1, 2, 3, 4 or NA"
-awk -F'\t' -v c="$EC" 'NR>1 && $c ~ /^-/ {exit 1}' phenotypes/phenotypes.tsv \
-  || fail "phenotypes.tsv eoi_day has a negative value (days from diagnosis to the end of induction)"
-awk -F'\t' -v c="$EC" 'NR>1 && $c !~ /^(NA|[0-9]+(\.[0-9]+)?)$/ {exit 1}' phenotypes/phenotypes.tsv \
-  || fail "phenotypes.tsv eoi_day has a non-numeric value"
-awk -F'\t' -v c="$GC" 'NR>1 && ($c == "" || $c ~ /^[[:space:]]+$/) {exit 1}' phenotypes/phenotypes.tsv \
-  || fail "phenotypes.tsv has a blank study_group (a short study code, e.g. COG_P9900, COG_AALL0232_0331, SJ_TXV, REDIAL)"
-LANDMARK=""
-for pair in efs os; do
-  tc=$(col "${pair}_time"); ec=$(col "${pair}_event")
-  awk -F'\t' -v e="$ec" 'NR>1 && $e !~ /^(0|1|NA)$/ {exit 1}' phenotypes/phenotypes.tsv || fail "phenotypes.tsv ${pair}_event has a value other than 0, 1 or NA"
-  awk -F'\t' -v t="$tc" 'NR>1 && $t ~ /^-/ {exit 1}' phenotypes/phenotypes.tsv \
-    || fail "phenotypes.tsv ${pair}_time has a negative value (times are days from diagnosis; the GWAS moves the origin to eoi_day itself)"
-  awk -F'\t' -v t="$tc" 'NR>1 && $t !~ /^(NA|[0-9]+(\.[0-9]+)?)$/ {exit 1}' phenotypes/phenotypes.tsv || fail "phenotypes.tsv ${pair}_time has a non-numeric value"
-  # the end-of-induction landmark (TIME_ORIGIN=eoi) leaves out a child whose time is at or before eoi_day
-  LANDMARK+="${LANDMARK:+, }${pair} $(awk -F'\t' -v t="$tc" -v e="$ec" -v d="$EC" 'NR>1 && $t != "NA" && $e != "NA" && $d != "NA" && $t+0 <= $d+0 {k++} END {print k+0}' phenotypes/phenotypes.tsv)"
+for c in ${REQ//,/ }; do
+  awk -F'\t' -v p="$(col "$c")" 'NR>1 && ($p == "" || $p ~ /^[[:space:]]+$/) {exit 1}' phenotypes/phenotypes.tsv \
+    || fail "phenotypes.tsv has a blank $c (REQUIRED_COLUMNS: use NA where unknown; a short code, never free text)"
 done
-NO_EOI=$(awk -F'\t' -v d="$EC" 'NR>1 && $d == "NA" {k++} END {print k+0}' phenotypes/phenotypes.tsv)
+# column:value/value/... (COLUMN_LEVELS): only these values, or NA
+for spec in ${LEVELS//,/ }; do
+  c="${spec%%:*}"; vals="${spec#*:}"; ci=$(col "$c")
+  [[ -n "$ci" ]] || fail "COLUMN_LEVELS names $c, which is not a column of phenotypes.tsv ($SET_SRC)"
+  v=$(awk -F'\t' -v c="$ci" -v ok="/${vals}/" 'NR>1 && $c != "NA" && index(ok, "/" $c "/") == 0 {print $c; exit}' phenotypes/phenotypes.tsv)
+  [[ -z "$v" ]] || fail "phenotypes.tsv $c has the value '$v', not one of ${vals//\//, } or NA (COLUMN_LEVELS, $SET_SRC; code an unknown as NA)"
+done
+for t in ${TRAITS_S//,/ }; do
+  [[ ",$SURV_S," == *",$t,"* ]] && continue
+  ci=$(col "$t")
+  if [[ ",$QUANT_S," == *",$t,"* ]]; then
+    awk -F'\t' -v c="$ci" 'NR>1 && $c !~ /^(NA|-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?)$/ {exit 1}' phenotypes/phenotypes.tsv || fail "phenotypes.tsv $t has a non-numeric value (quantitative trait)"
+  else
+    awk -F'\t' -v c="$ci" 'NR>1 && $c !~ /^(0|1|NA)$/ {exit 1}' phenotypes/phenotypes.tsv || fail "phenotypes.tsv $t has a value other than 0, 1 or NA (binary trait)"
+  fi
+done
+EC=""
+if [[ ${#SURV_T[@]} -gt 0 && "$TORIG" == eoi ]]; then
+  EC=$(col "$EOI")
+  awk -F'\t' -v c="$EC" 'NR>1 && $c ~ /^-/ {exit 1}' phenotypes/phenotypes.tsv \
+    || fail "phenotypes.tsv $EOI has a negative value (days from diagnosis to the landmark)"
+  awk -F'\t' -v c="$EC" 'NR>1 && $c !~ /^(NA|[0-9]+(\.[0-9]+)?)$/ {exit 1}' phenotypes/phenotypes.tsv \
+    || fail "phenotypes.tsv $EOI has a non-numeric value"
+fi
+# EOI_PROTOCOL_DAY (group:day): every row of a listed study group carries that day; other groups keep
+# each sample's own day (>= 0 or NA, checked above)
+if [[ -n "$PDAYS" ]]; then
+  [[ -n "$EC" ]] || EC=$(col "$EOI")
+  [[ -n "$EC" ]] || fail "phenotypes.tsv lacks column '$EOI' (needed by EOI_PROTOCOL_DAY; $SET_SRC)"
+  GCI=$(col "$GRP")
+  for spec in ${PDAYS//,/ }; do
+    g="${spec%%:*}"; d="${spec#*:}"
+    r=$(awk -F'\t' -v gc="$GCI" -v ec="$EC" -v sc="$SC" -v g="$g" -v d="$d" 'NR>1 && $gc == g && ($ec == "NA" || $ec + 0 != d + 0) {k++; if (!ex) ex = $sc " has " $ec} END {if (k) print k "|" ex}' phenotypes/phenotypes.tsv)
+    [[ -z "$r" ]] || fail "phenotypes.tsv $EOI: ${r%%|*} row(s) of $GRP $g are not at the protocol day $d (EOI_PROTOCOL_DAY, $SET_SRC); e.g. ${r#*|}"
+  done
+fi
+# FACTOR_COVARIATES (column:reference): the reference level occurs
+for spec in ${FACT//,/ }; do
+  c="${spec%%:*}"; ref="${spec#*:}"
+  awk -F'\t' -v c="$(col "$c")" -v r="$ref" 'NR>1 && $c == r {f = 1} END {exit !f}' phenotypes/phenotypes.tsv \
+    || fail "phenotypes.tsv $c: the reference level '$ref' (FACTOR_COVARIATES, $SET_SRC) never occurs"
+done
+LANDMARK=""
+for t in ${SURV_T[@]+"${SURV_T[@]}"}; do
+  tc=$(col "$(tcol "$t")"); ec=$(col "$(ecol "$t")")
+  awk -F'\t' -v e="$ec" 'NR>1 && $e !~ /^(0|1|NA)$/ {exit 1}' phenotypes/phenotypes.tsv || fail "phenotypes.tsv $(ecol "$t") has a value other than 0, 1 or NA"
+  awk -F'\t' -v t="$tc" 'NR>1 && $t ~ /^-/ {exit 1}' phenotypes/phenotypes.tsv \
+    || fail "phenotypes.tsv $(tcol "$t") has a negative value (times are days from diagnosis; the GWAS moves the origin to the landmark itself)"
+  awk -F'\t' -v t="$tc" 'NR>1 && $t !~ /^(NA|[0-9]+(\.[0-9]+)?)$/ {exit 1}' phenotypes/phenotypes.tsv || fail "phenotypes.tsv $(tcol "$t") has a non-numeric value"
+  # the landmark (TIME_ORIGIN=eoi) leaves out a sample whose time is at or before it
+  [[ -n "$EC" ]] && LANDMARK+="${LANDMARK:+, }$t $(awk -F'\t' -v t="$tc" -v e="$ec" -v d="$EC" 'NR>1 && $t != "NA" && $e != "NA" && $d != "NA" && $t+0 <= $d+0 {k++} END {print k+0}' phenotypes/phenotypes.tsv)"
+done
+NO_EOI=""; [[ -n "$EC" ]] && NO_EOI=$(awk -F'\t' -v d="$EC" 'NR>1 && $d == "NA" {k++} END {print k+0}' phenotypes/phenotypes.tsv)
 for bad in mrn dob comments cyto_text oth_features death_cause relapse_site_oth; do
   grep -qiP "(^|\t)${bad}(\t|$)" <<<"$H" && fail "phenotypes.tsv carries forbidden column '$bad'"; done
 awk -F'\t' -v c="$SC" 'NR>1{print $c}' phenotypes/phenotypes.tsv | LC_ALL=C sort > "$T/ph_id"
@@ -256,6 +320,6 @@ FAILS=$(awk -F'\t' 'NR>1 && $2=="FAIL" {print $1}' qc/qc_assertions.tsv | paste 
 [[ -z "$FAILS" ]] || fail "qc_assertions.tsv carries FAIL verdict(s): $FAILS — an upstream check failed; the bundle is not analysis-ready"
 awk -F'\t' 'NR>1 && $2 !~ /^(PASS|FAIL|INFO)$/ {exit 1}' qc/qc_assertions.tsv || fail "qc_assertions.tsv has a verdict other than PASS, FAIL or INFO"
 [[ "$(awk -F'\t' 'NR>1 && $2=="PASS"' qc/qc_assertions.tsv | wc -l)" -ge 1 ]] || fail "qc_assertions.tsv has no PASS verdict — 'did not run' is not 'passed'"
-NOTE="; landmark: at or before eoi_day ${LANDMARK}, no eoi_day ${NO_EOI}"
+NOTE=""; [[ -n "$LANDMARK" ]] && NOTE="; landmark: at or before $EOI ${LANDMARK}, no $EOI ${NO_EOI}"
 [[ ${#SKIPPED[@]} -eq 0 ]] || NOTE+="; SKIPPED: $(IFS='; '; echo "${SKIPPED[*]}")"
 echo "HANDOFF ACCEPTED: $B  ($NS samples, $NV GWAS-input variants at MAF >= 1 %, $NV_ALL unfiltered, chromosomes $CHROM_SPEC, server=$SERVER, duplicates_removed=$DUPS$NOTE)"

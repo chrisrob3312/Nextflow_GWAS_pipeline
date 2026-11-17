@@ -1,0 +1,32 @@
+# ============================================================================
+#  GWAS SETTINGS -- a generic example: one binary and one quantitative trait,
+#  no survival trait, no landmark, no subset arms.
+# ============================================================================
+#  Use it as the start of another study's settings:
+#      cp config/gwas_settings.example_generic.txt config/my_study.txt   # then edit
+#      SETTINGS_FILE=config/my_study.txt slurm/submit_full_pipeline.sh --dry-run
+#  The phenotype file (HANDOFF_DIR/phenotypes/phenotypes.tsv) must carry each trait's column, the
+#  covariates (phenotypes/covariates.txt) and FID / IID / sample_id. Format and precedence as in
+#  config/gwas_settings.txt: name = value, '#' comments, unknown names refused; an environment
+#  variable beats this file.
+# ============================================================================
+
+# trait.<name> = binary | quantitative | survival[:<time column>:<event column>]
+trait.case_status = binary        # 0/1 case-control status
+trait.bmi         = quantitative  # numeric
+
+# TIME_ORIGIN: no survival trait here, so the times are not used.  [eoi | diagnosis]
+TIME_ORIGIN = diagnosis
+
+# COVARIATES unset: the bundle's phenotypes/covariates.txt, then PC1..PC<N_PCS_MODEL>.  [whole number >= 1]
+N_PCS_MODEL = 4
+# FACTOR_COVARIATES: categorical covariates, column:reference_level (none here).  [column:level,...]
+FACTOR_COVARIATES =
+# REF_ANCESTRY: reference ancestry of the Tractor local-ancestry terms.  [an ancestry label]
+REF_ANCESTRY = EUR
+# MIN_STRATUM_N: smallest stratum analysed.  [whole number >= 1]
+MIN_STRATUM_N = 100
+# MAC_MIN: minor allele count an ancestry's dose term needs.  [whole number >= 1]
+MAC_MIN = 20
+# COLUMN_LEVELS: the only values (besides NA) a column may hold.  [column:values,...]
+COLUMN_LEVELS = case_status:0/1

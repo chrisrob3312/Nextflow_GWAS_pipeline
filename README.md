@@ -111,7 +111,7 @@ nextflow run main.nf \
   --input samplesheet.csv \
   --phenotype_file phenotypes.txt \
   --phenotype_cols "WBC,Lymphocytes,Monocytes" \
-  --covariate_cols "sex,age_at_diagnosis,cd19_pos_pct,storage_days,PC1,PC2,PC3,PC4,PC5" \
+  --covariate_cols "sex,age_at_diagnosis,wbc_dx_log10,PC1,PC2,PC3,PC4,PC5" \
   --run_ancestry_inference false \
   --ancestry_calls_file ancestry_calls.tsv \
   --gwas_tool genesis \
@@ -172,14 +172,17 @@ pipeline"); the run record is described in [docs/WORKFLOW.md](docs/WORKFLOW.md),
    with `RUN_PRS=true`, `RUN_COLOC=true`, `RUN_VALIDATION=true` (needs `RUN_PRS`) and
    `RUN_GXG=true`; every launch prints the ones it deferred, e.g.
    `deferred: PRS COLOC VALIDATION GXG (RUN_*=false)`.
-   Traits are `mrd` (binary), `mrd_level` (quantitative, the four end-of-induction MRD levels as a
-   linear trend), `efs` and `os` (time-to-event), the handoff contract's columns: each
-   survival trait reads its own `<trait>_time` and `<trait>_event` (override one trait with
-   `TIME_COL_<trait>` / `EVENT_COL_<trait>`); the launcher checks every column before queuing.
-   EFS and OS are counted from the end of induction (`TIME_ORIGIN=eoi`: time − `eoi_day`, children at
-   or before it left out and counted) with one Cox baseline per MRD level (`COX_STRATA=mrd_level`);
-   `COX_STRATA= COX_EXTRA_COVARIATES=mrd_level` gives the MRD-adjusted arm and
-   `SAMPLE_SUBSET=study_group=REDIAL` a REDIAL-only GWAS, each with its own `RUN_LABEL`
+   **What is analysed comes from the settings file**, `config/gwas_settings.txt` (this study's
+   values; next section for another study). This study: `mrd` (binary), `mrd_level`
+   (quantitative, the four end-of-induction MRD levels as a linear trend), `efs` and `os`
+   (time-to-event), each survival trait reading its own `<trait>_time` and `<trait>_event`; the
+   launcher checks every column before queuing. EFS and OS are counted from the end of induction
+   (`TIME_ORIGIN=eoi`: time − `eoi_day`, children at or before it left out and counted, in the GWAS,
+   PRS validation and GxG) and adjusted for `mrd_level` as one trend term
+   (`COX_EXTRA_COVARIATES=mrd_level`); the covariates are sex, age at diagnosis, log10 WBC at
+   diagnosis and cytogenetic risk (a categorical covariate, reference `neutral_unknown`), then the
+   first `N_PCS_MODEL` PCs. `ARM=mrd_pos` / `ARM=mrd_neg` run EFS and OS within each MRD group
+   without an MRD covariate, `ARM=all` runs the whole cohort and both
    (decided 17 Nov 2026; `docs/WORKFLOW.md` sections 3, 5 and 11).
    The number-changing switches (all recorded in the run record) include `MIN_STRATUM_N`, the
    smallest stratum analysed (default 50, decided 10 Nov 2026), and `MAC_MIN`, the minor allele
@@ -196,10 +199,13 @@ pipeline"); the run record is described in [docs/WORKFLOW.md](docs/WORKFLOW.md),
    number-changing switch) at launch, a row per task as it runs, and `trace.tsv` (with MaxRSS and
    Elapsed from `sacct`, and the adapter's sample and variant counts) and `summary.md` once the final
    job, which waits on all the others, has run.
-6. **Switches.** Every number-changing switch has one default and a domain (`RR_SWITCHES`,
-   `bin/run_record.sh`); a value outside it is refused before anything is queued, and `params.tsv`
-   records every value. `RUN_LABEL=<name>` writes a sensitivity arm under `results/<name>/`;
-   `PC_SCALE` and `MIX_RETAIN` are two such arms ([docs/WORKFLOW.md](docs/WORKFLOW.md) section 9).
+6. **Switches.** Every number-changing switch has one built-in default and a domain (`RR_SWITCHES`,
+   `bin/run_record.sh`); the settings file sets this study's values, and an environment variable of
+   the same name beats both for one launch. A value outside its domain is refused before anything
+   is queued (naming the settings-file line it came from), and `params.tsv` records every value and
+   where it came from (`default` / `settings` / `arm:<label>` / `environment`). `RUN_LABEL=<name>`
+   writes a sensitivity arm under `results/<name>/`; `PC_SCALE` and `MIX_RETAIN` are two such arms
+   ([docs/WORKFLOW.md](docs/WORKFLOW.md) section 9).
 7. **QC gates.** Steps file QC verdicts and per-join sample counts into the run record's `qc/`;
    each GWAS task requires the structure step's `pcair_pc_merge`, the combine job the adapter's
    join checks. A failed **or missing** verdict stops the job (exit 3);
@@ -209,6 +215,33 @@ pipeline"); the run record is described in [docs/WORKFLOW.md](docs/WORKFLOW.md),
 Logs go to `<repo>/logs/` (absolute paths; `LOG_DIR` to change). The wrappers under `shell/` are
 debug-only, not the execution path. `tests/test_chassis.sh` checks all of this locally with fake
 `sbatch`, `sacct` and `conda`.
+
+## Using the pipeline for another study
+
+Nothing specific to this study is built into the code: the traits and their models, the time
+origin, the covariates (and which are categorical, with which reference level), the subset arms,
+the protocol days the bundle checker enforces and the lead-SNP threshold are all settings. Another
+study edits one text file and ships its own phenotype columns:
+
+1. Copy the generic example, which has one binary and one quantitative trait, no survival trait and
+   no landmark: `cp config/gwas_settings.example_generic.txt config/my_study.txt`.
+2. Edit it: one `name = value` per line, `#` comments. Declare each trait as
+   `trait.<column> = binary | quantitative | survival[:<time column>:<event column>]`; categorical
+   covariates as `FACTOR_COVARIATES = column:reference_level,...`; subset arms as
+   `arm.<label> = SWITCH=value ...` (run with `ARM=<label>`). Every switch, with what it does and
+   what it accepts, is in `config/gwas_settings.txt`; the full list is `RR_SWITCHES` in
+   `bin/run_record.sh`. An unknown name, a name given twice or an out-of-range value stops the
+   launch and names the line.
+3. Ship a handoff bundle whose `phenotypes/phenotypes.tsv` has the columns the settings name
+   ([docs/HANDOFF_CONTRACT.md](docs/HANDOFF_CONTRACT.md), "Columns that follow from the settings")
+   and whose `phenotypes/covariates.txt` lists the study's covariates.
+4. Check and dry-run with that file:
+   ```bash
+   bin/check_handoff_bundle.sh data/handoff --settings config/my_study.txt
+   SETTINGS_FILE=config/my_study.txt slurm/submit_full_pipeline.sh --dry-run
+   ```
+   An environment variable still overrides one setting for one launch, e.g.
+   `SETTINGS_FILE=config/my_study.txt MAC_MIN=20 slurm/submit_full_pipeline.sh`.
 
 ## Input Requirements
 

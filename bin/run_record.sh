@@ -46,15 +46,21 @@ _RR_BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"     # this file's direct
 
 _RR_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# Number-changing switches, with the defaults the scripts use. One line each:
+# Number-changing switches, with the built-in defaults the scripts use. One line each:
 #   NAME|DEFAULT|what it changes|DOMAIN
-# DEFAULT is the only copy of the default: the scripts read it with $(rr_default NAME) (B-05).
+# DEFAULT is the only copy of the built-in default: the scripts read the value with $(rr_default NAME)
+# (B-05), which returns the settings file's value when it sets one (bin/gwas_settings.sh;
+# config/gwas_settings.txt). Nothing specific to one study is a built-in default: the trait list and
+# models, the time origin, the MRD handling, the factor reference levels, the protocol days and the
+# subset arms are this study's values in config/gwas_settings.txt (17 Nov 2026).
 # DEFAULT "@job" means it is chosen at run time (e.g. PHENO is the structure step's output if that
 # exists when the job starts) or derived by the launcher (STRATA_LIST, COVARIATES: set_by bundle).
 # DOMAIN is what the launcher accepts (rr_check_domains, before anything is queued):
 #   bool  true | false          int1  a whole number >= 1          num  a number > 0
 #   enum:a,b,...  one of these   names  comma-separated names (letters, digits, _ .; names0: may be empty)
 #   props  LABEL:number,...      any  not checked here (a path, or checked where it is used)
+#   factors  column:reference_level,...  (may be empty)
+#   levels   column:value/value/...,...  (may be empty)
 # tests/test_chassis.sh checks that no script carries a default of its own.
 # Asked for in the plan but read by no script, so not listed: STRATUM_MIN_N (the scripts use
 # MIN_STRATUM_N), BUNDLE_RULES (the bundling-rule table of the strata comparator, CP-04, which this
@@ -62,14 +68,27 @@ _RR_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # rather than let it be silently ignored.
 RR_SWITCHES=(
     "STRATA_LIST|@job|strata analysed; default: every stratum in HANDOFF_DIR/ancestry/strata.tsv (set_by bundle), MIX left out with MIX_RETAIN=false|names"
-    "TRAITS_LIST|mrd,mrd_level,efs,os|traits analysed (phenotype columns, as docs/HANDOFF_CONTRACT.md names them)|names"
-    "SURVIVAL_TRAITS|efs,os|traits run as time-to-event, with columns <trait>_time and <trait>_event; the rest are binary or quantitative|names0"
-    "QUANTITATIVE_TRAITS|mrd_level|traits run as quantitative (GENESIS linear null): mrd_level, the four end-of-induction MRD levels tested as a linear trend (decided 17 Nov 2026)|names0"
-    "TIME_ORIGIN|eoi|survival time origin: eoi = end of induction (<trait>_time - eoi_day; a child with an event or censoring at or before eoi_day, or without it, is left out of that trait), diagnosis = the times as shipped (decided 17 Nov 2026)|enum:eoi,diagnosis"
-    "COX_STRATA|mrd_level|phenotype column whose levels each get their own Cox baseline hazard (survival traits only); empty = no stratification (decided 17 Nov 2026: EFS and OS stratified on MRD)|names0"
-    "COX_EXTRA_COVARIATES||covariates added for the survival traits only, e.g. mrd_level for the MRD-adjusted arm (COX_STRATA= COX_EXTRA_COVARIATES=mrd_level RUN_LABEL=...)|names0"
-    "SAMPLE_SUBSET||restrict every GWAS to the samples whose phenotype column has one of these values, column=value[,value...] (e.g. study_group=REDIAL for the REDIAL-only GWAS); needs a RUN_LABEL|any"
-    "COVARIATES|@job|model covariates (GWAS, GxG), numeric phenotype columns; default: the bundle's phenotypes/covariates.txt then PC1..PC5 (set_by bundle)|names"
+    "TRAITS_LIST||traits analysed (phenotype columns); default: every trait.<name> line of the settings file, in file order|names0"
+    "SURVIVAL_TRAITS||traits run as time-to-event, with columns <trait>_time and <trait>_event (or TIME_COL_<trait> / EVENT_COL_<trait>); the rest are binary or quantitative; default: the trait.<name> = survival lines|names0"
+    "QUANTITATIVE_TRAITS||traits run as quantitative (GENESIS linear null); default: the trait.<name> = quantitative lines|names0"
+    "TIME_ORIGIN|diagnosis|survival time origin: eoi = a landmark (<trait>_time - EOI_COL; a sample with an event or censoring at or before it, or without it, is left out of that trait, in the GWAS, PRS validation and GxG), diagnosis = the times as shipped|enum:eoi,diagnosis"
+    "EOI_COL|eoi_day|the landmark column for TIME_ORIGIN=eoi: days from the time origin of the shipped times to the landmark (here the end of induction)|names"
+    "COX_STRATA||phenotype column whose levels each get their own Cox baseline hazard (survival traits only); empty = no stratification|names0"
+    "COX_EXTRA_COVARIATES||covariates added for the survival traits only (this study: mrd_level, one linear trend term, in the whole-cohort analysis)|names0"
+    "FACTOR_COVARIATES||categorical covariates, column:reference_level (e.g. cyto_risk:neutral_unknown); each is in the model (added when COVARIATES does not name it) as 0/1 indicators for the other levels|factors"
+    "SAMPLE_SUBSET||restrict every GWAS, PRS validation and GxG to the samples whose phenotype column has one of these values, column=value[,value...] (e.g. study_group=REDIAL); needs a RUN_LABEL|any"
+    "SUBSET_LINKED_COLUMNS||columns that describe what a subset selects on (this study: mrd,mrd_level); with SAMPLE_SUBSET set none of them, nor the subset column itself, may be a trait or a covariate|names0"
+    "ARM||one subset arm, an arm.<label> line of the settings file: its switches beat the settings file and lose to the environment, RUN_LABEL defaults to the label; all = the whole cohort, then every arm, one launch each|any"
+    "ARM_ALL||the arms ARM=all runs after the whole cohort, in this order; empty = every arm.<label> of the settings file|names0"
+    "COVARIATES|@job|model covariates (GWAS, GxG), numeric phenotype columns or FACTOR_COVARIATES; default: the bundle's phenotypes/covariates.txt then PC1..PC<N_PCS_MODEL> (set_by bundle)|names"
+    "N_PCS_MODEL|5|PCs in the default covariates (PC1..PC<N>); pick from the scree plot and the genomic-control lambda (docs/WORKFLOW.md)|int1"
+    "REF_ANCESTRY|EUR|the reference ancestry of the Tractor local-ancestry terms; every stratum's ancestries.txt must list it|names"
+    "STUDY_GROUP_COL|study_group|phenotype column naming each sample's study (the MR-MEGA study; the key of EOI_PROTOCOL_DAY)|names"
+    "EOI_PROTOCOL_DAY||group:day,... the landmark day every sample of a study group must have in EOI_COL (checked by bin/check_handoff_bundle.sh); groups not listed keep each sample's own day|props"
+    "COLUMN_LEVELS||column:value/value/...,... the only values (besides NA) a phenotype column may hold (checked by bin/check_handoff_bundle.sh)|levels"
+    "REQUIRED_COLUMNS||phenotype columns the bundle must carry besides the ones the traits, covariates and landmark need (never blank; NA allowed)|names0"
+    "VARIANT_INCLUDE||file of variant IDs (chr:pos:ref:alt), one per line: the GWAS tests only these (the study-cohort sensitivity arm; bin/mrmega_lead_snps.sh writes one)|any"
+    "LEAD_SNP_P|5e-8|MR-MEGA association P below which bin/mrmega_lead_snps.sh lists a variant|num"
     "MIN_STRATUM_N|50|smallest stratum analysed (--min_stratum_n); 50 decided by the user, 10 Nov 2026|int1"
     "MAC_MIN|10|minor allele count needed to test an ancestry's dose term (--mac_min); open: the contract says 20|int1"
     "MIX_RETAIN|true|analyse the bundle's MIX stratum (false: left out of the default STRATA_LIST, and refused in it)|bool"
@@ -105,9 +124,10 @@ RR_SWITCHES=(
     "KNOWN_LOCI|@job|known-loci table for GxG (default assets/known_leukemia_risk_loci.tsv)|any"
     "STRATA_FILE|@job|sample_id/stratum table the adapter checks --stratum against (default HANDOFF_DIR/ancestry/strata.tsv)|any"
     "ANC_INDEX_MAP|@job|anc_index/label map for numbered Tractor files (default HANDOFF_DIR/local_ancestry/flare_index_map.tsv)|any"
-    "PRS_ANCESTRY_PROPS|EUR:0.35,AFR:0.15,AMR:0.50|global ancestry proportions weighting the combined PRS; labels must match data/tractor/ancestries.txt|props"
+    "PRS_ANCESTRY_PROPS||global ancestry proportions weighting the combined PRS, LABEL:share,...; labels must match data/tractor/ancestries.txt|props"
 )
 declare -A RR_SET_BY=()
+source "${_RR_BIN}/gwas_settings.sh"     # the settings file (gs_*): read by rr_default and rr_resolve_switches
 
 # Refuse a launch that sets a switch name no script reads.
 rr_refuse_unknown_switches() {
@@ -126,10 +146,13 @@ rr_refuse_unknown_switches() {
     done
 }
 
-# rr_default NAME: the switch's default from RR_SWITCHES (the only copy of it). Scripts use
-# ${NAME:-$(rr_default NAME)} so a job submitted by hand gets the same default as a launch.
+# rr_default NAME: the value a switch takes when the environment does not set it: the arm's (ARM),
+# else the settings file's, else the built-in default from RR_SWITCHES (the only copy of it). Scripts
+# use ${NAME:-$(rr_default NAME)} so a job submitted by hand gets the same value as a launch.
 rr_default() {
     local entry name default
+    if [[ -n "${ARM:-}" && "${ARM}" != all ]] && gs_arm_value "${ARM}" "$1"; then return 0; fi
+    if gs_value "$1"; then return 0; fi
     for entry in "${RR_SWITCHES[@]}"; do
         IFS='|' read -r name default _ <<< "$entry"
         if [[ "$name" == "$1" ]]; then printf '%s' "$default"; return 0; fi
@@ -163,6 +186,14 @@ rr_domain_problem() {
             local IFS=,; for x in $value; do
                 [[ "$x" =~ ^[A-Za-z][A-Za-z0-9_]*:([0-9]+[.]?[0-9]*|[.][0-9]+)$ ]] || { echo "use LABEL:number,... ('${x}' is not one)"; break; }
             done ;;
+        factors)
+            local IFS=,; for x in $value; do
+                [[ "$x" =~ ^[A-Za-z_][A-Za-z0-9_.]*:[A-Za-z0-9_.+-]+$ ]] || { echo "use column:reference_level,... ('${x}' is not one)"; break; }
+            done ;;
+        levels)
+            local IFS=,; for x in $value; do
+                [[ "$x" =~ ^[A-Za-z_][A-Za-z0-9_.]*:[A-Za-z0-9_.+-]+(/[A-Za-z0-9_.+-]+)*$ ]] || { echo "use column:value/value/...,... ('${x}' is not one)"; break; }
+            done ;;
         *) ;;
     esac
 }
@@ -175,26 +206,45 @@ rr_check_domains() {
     for name in "${names[@]}"; do
         [[ -n "${!name+x}" ]] || continue
         problem="$(rr_domain_problem "$name" "${!name}")"
-        [[ -z "$problem" ]] || { echo "REFUSED: ${name}=${!name}; ${problem}" >&2; bad=1; }
+        [[ -z "$problem" ]] || { echo "REFUSED: ${name}=${!name}; ${problem}$([[ "${RR_SET_BY[$name]:-}" == settings ]] && gs_where "$name")" >&2; bad=1; }
     done
     return "$bad"
 }
 
-# Fill in every unset switch with its default and export it, so every job of the launch sees the
-# same value; remember which ones you set (RR_SET_BY). Call once, early, in the launcher.
+# Fill in every unset switch and export it, so every job of the launch sees the same value; remember
+# where each value came from (RR_SET_BY): environment > arm:<label> (ARM) > settings (the settings
+# file) > default (built-in) / job (chosen at run time). TIME_COL_<trait> / EVENT_COL_<trait> from the
+# settings file are exported too. Call once, early, in the launcher; returns 1 (REFUSED on stderr)
+# when the settings file or ARM is wrong.
 rr_resolve_switches() {
-    local entry name default
+    local entry name default arm="" key v
+    gs_load || return 1
+    if [[ -n "${ARM+x}" ]]; then arm="${ARM}"; else arm="${GS_VALUE[ARM]:-}"; fi
+    if [[ -n "$arm" && "$arm" != all && -z "${GS_ARM[$arm]+x}" ]]; then
+        echo "REFUSED: ARM=${arm}: no arm.${arm} line in ${GS_FILE:-the settings file (none is read: SETTINGS_FILE)}$([[ ${#GS_ARMS[@]} -gt 0 ]] && echo " (arms: ${GS_ARMS[*]})")" >&2
+        return 1
+    fi
     for entry in "${RR_SWITCHES[@]}"; do
         IFS='|' read -r name default _ <<< "$entry"
         if [[ -n "${!name+x}" ]]; then
             RR_SET_BY[$name]=environment
             export "${name}"
+        elif [[ -n "$arm" && "$arm" != all ]] && v="$(gs_arm_value "$arm" "$name")"; then
+            RR_SET_BY[$name]="arm:${arm}"
+            export "${name}=${v}"
+        elif [[ -n "${GS_LINE[$name]+x}" ]]; then
+            RR_SET_BY[$name]=settings
+            export "${name}=${GS_VALUE[$name]}"
         elif [[ "$default" == "@job" ]]; then
             RR_SET_BY[$name]=job
         else
             RR_SET_BY[$name]=default
             export "${name}=${default}"
         fi
+    done
+    for key in "${!GS_VALUE[@]}"; do      # one survival trait's columns, from the settings file
+        [[ "$key" == TIME_COL_* || "$key" == EVENT_COL_* ]] || continue
+        [[ -n "${!key+x}" ]] || export "${key}=${GS_VALUE[$key]}"
     done
 }
 
