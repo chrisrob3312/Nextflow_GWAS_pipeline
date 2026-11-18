@@ -185,6 +185,7 @@ fi
 # FACTOR_COVARIATES (column:reference): the reference level occurs
 for spec in ${FACT//,/ }; do
   c="${spec%%:*}"; ref="${spec#*:}"
+  [[ "$ref" == "@largest" ]] && continue          # chosen from the data at run time: nothing to check here
   awk -F'\t' -v c="$(col "$c")" -v r="$ref" 'NR>1 && $c == r {f = 1} END {exit !f}' phenotypes/phenotypes.tsv \
     || fail "phenotypes.tsv $c: the reference level '$ref' (FACTOR_COVARIATES, $SET_SRC) never occurs"
 done

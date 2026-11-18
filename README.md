@@ -180,7 +180,7 @@ pipeline"); the run record is described in [docs/WORKFLOW.md](docs/WORKFLOW.md),
    (`TIME_ORIGIN=eoi`: time − `eoi_day`, children at or before it left out and counted, in the GWAS,
    PRS validation and GxG) and adjusted for `mrd_level` as one trend term
    (`COX_EXTRA_COVARIATES=mrd_level`); the covariates are sex, age at diagnosis, log10 WBC at
-   diagnosis and cytogenetic risk (a categorical covariate, reference `neutral_unknown`), then the
+   diagnosis and cytogenetic risk (a categorical covariate: favorable, unfavorable or neutral, reference `favorable`), then the
    first `N_PCS_MODEL` PCs. `ARM=mrd_pos` / `ARM=mrd_neg` run EFS and OS within each MRD group
    without an MRD covariate, `ARM=all` runs the whole cohort and both
    (decided 17 Nov 2026; `docs/WORKFLOW.md` sections 3, 5 and 11).

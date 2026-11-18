@@ -9,7 +9,7 @@ Decision (17 Nov 2026): the meta-analysis combines **four study groups** — COG
 COG AALL0232 + AALL0331 (`COG_AALL0232_0331`), St. Jude Total XV (`SJ_TXV`) and REDIAL (`REDIAL`),
 shipped as the `study_group` column of `phenotypes.tsv` — with **MR-MEGA primary**. Each per-study GWAS
 adjusts for sex, age at diagnosis, log10 WBC at diagnosis, cytogenetic risk (`cyto_risk`, categorical,
-reference neutral-unknown) and its within-stratum PCs. The unit that decision implies is study group ×
+reference favorable; unknown coded neutral, decided 18 Nov 2026) and its within-stratum PCs. The unit that decision implies is study group ×
 ancestry stratum; those units are **not built yet** (`docs/WORKFLOW.md` section 11), so the unit below is
 still the ancestry stratum, and CP-29 is where the study × stratum units go.
 

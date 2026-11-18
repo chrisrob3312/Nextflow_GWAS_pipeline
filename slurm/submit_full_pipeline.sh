@@ -81,7 +81,7 @@ export LOG_DIR
 #                                           whose event or censoring is at or before it
 #   COX_STRATA=<column>                     survival only: each level gets its own baseline hazard
 #   COX_EXTRA_COVARIATES=mrd_level          survival only: covariates added to COVARIATES
-#   FACTOR_COVARIATES=cyto_risk:neutral_unknown   categorical covariates, column:reference level
+#   FACTOR_COVARIATES=cyto_risk:favorable   categorical covariates, column:reference level (or column:@largest)
 #   SAMPLE_SUBSET=study_group=REDIAL        restrict the GWAS, PRS validation and GxG to the rows whose
 #                                           column has one of the values; needs a RUN_LABEL
 #   COVARIATES="sex,age_at_diagnosis,PC1"  phenotype columns, used by GWAS and GxG; default: the

@@ -274,8 +274,8 @@ section "Traits and survival columns follow the settings file (this study: mrd; 
 check "built-in defaults carry nothing study-specific: TRAITS_LIST, SURVIVAL_TRAITS, QUANTITATIVE_TRAITS, COX_STRATA, COX_EXTRA_COVARIATES, FACTOR_COVARIATES, SUBSET_LINKED_COLUMNS, EOI_PROTOCOL_DAY, PRS_ANCESTRY_PROPS empty; TIME_ORIGIN diagnosis" \
     bash -c "for n in TRAITS_LIST SURVIVAL_TRAITS QUANTITATIVE_TRAITS COX_STRATA COX_EXTRA_COVARIATES FACTOR_COVARIATES SUBSET_LINKED_COLUMNS EOI_PROTOCOL_DAY COLUMN_LEVELS PRS_ANCESTRY_PROPS; do grep -q \"\\\"\$n||\" '$REPO/bin/run_record.sh' || exit 1; done; grep -q '\"TIME_ORIGIN|diagnosis|' '$REPO/bin/run_record.sh'"
 out="$(bash -c 'source "$1/bin/run_record.sh"; for n in TRAITS_LIST SURVIVAL_TRAITS QUANTITATIVE_TRAITS TIME_ORIGIN COX_STRATA COX_EXTRA_COVARIATES FACTOR_COVARIATES; do printf "%s=%s;" "$n" "$(rr_default $n)"; done' _ "$C")"
-[[ "$out" == "TRAITS_LIST=mrd,mrd_level,efs,os;SURVIVAL_TRAITS=efs,os;QUANTITATIVE_TRAITS=mrd_level;TIME_ORIGIN=eoi;COX_STRATA=;COX_EXTRA_COVARIATES=mrd_level;FACTOR_COVARIATES=cyto_risk:neutral_unknown;" ]] \
-    && ok "config/gwas_settings.txt (17 Nov 2026): trait.<name> lines give mrd binary, mrd_level quantitative, efs/os survival; eoi; no Cox strata; mrd_level one trend term; cyto_risk factor (reference neutral_unknown)" || bad "settings values: $out"
+[[ "$out" == "TRAITS_LIST=mrd,mrd_level,efs,os;SURVIVAL_TRAITS=efs,os;QUANTITATIVE_TRAITS=mrd_level;TIME_ORIGIN=eoi;COX_STRATA=;COX_EXTRA_COVARIATES=mrd_level;FACTOR_COVARIATES=cyto_risk:favorable;" ]] \
+    && ok "config/gwas_settings.txt (17 Nov 2026): trait.<name> lines give mrd binary, mrd_level quantitative, efs/os survival; eoi; no Cox strata; mrd_level one trend term; cyto_risk factor (reference favorable, 18 Nov)" || bad "settings values: $out"
 out="$(SETTINGS_FILE=none bash -c 'source "$1/bin/run_record.sh"; printf "[%s][%s]" "$(rr_default TRAITS_LIST)" "$(rr_default TIME_ORIGIN)"' _ "$C")"
 [[ "$out" == "[][diagnosis]" ]] && ok "SETTINGS_FILE=none: the built-in defaults only (no traits, TIME_ORIGIN diagnosis)" || bad "none: $out"
 out="$(cd /tmp && env "${SITE[@]}" "$L" --dry-run 2>&1)"
@@ -285,7 +285,7 @@ grep -q 'GWAS mrd (binary) / EUR' <<< "$out" && grep -q 'GWAS mrd_level (quantit
 # the survival clock and the MRD trend term reach the survival tasks only; the subset reaches every task
 COVS_B="sex,age_at_diagnosis,wbc_dx_log10,cyto_risk,PC1,PC2,PC3,PC4,PC5"
 out="$(cd /tmp && DRY_RUN=1 bash "$G" EUR efs survival 2>&1)"
-grep -q -- '--time_origin eoi --eoi_col eoi_day ' <<< "$out" && ! grep -q -- '--cox_strata' <<< "$out" && grep -q -- "--factor_covariates cyto_risk:neutral_unknown " <<< "$out" \
+grep -q -- '--time_origin eoi --eoi_col eoi_day ' <<< "$out" && ! grep -q -- '--cox_strata' <<< "$out" && grep -q -- "--factor_covariates cyto_risk:favorable " <<< "$out" \
     && grep -q -- "--covariates ${COVS_B},mrd_level " <<< "$out" \
     && ok "survival task (settings file): --time_origin eoi --eoi_col eoi_day, mrd_level one covariate (no Cox strata), cyto_risk a factor" || bad "survival flags: $(tail -1 <<< "$out")"
 out="$(cd /tmp && DRY_RUN=1 bash "$G" EUR mrd_level quantitative 2>&1)"
@@ -385,16 +385,16 @@ out="$("${C}/bin/check_handoff_bundle.sh" "${C}/data/handoff" --no-sha --allow-m
 # POOLED (the whole cohort) and the study-cohort sensitivity arm (E)
 out="$(cd /tmp && env "${SITE[@]}" STRATA_LIST=POOLED,EUR "$L" --dry-run 2>&1)"; rc=$?
 [[ $rc -ne 0 ]] && has "$out" "POOLED is the whole cohort; list it alone" && ok "STRATA_LIST=POOLED,EUR: refused (the cohort would be counted twice)" || bad "pooled+eur: rc=$rc"
-out="$(cd /tmp && DRY_RUN=1 VARIANT_INCLUDE=results/mrmega/lead_snps.txt FACTOR_COVARIATES=cyto_risk:neutral_unknown,study_group:REDIAL bash "$G" POOLED efs survival 2>&1)"
+out="$(cd /tmp && DRY_RUN=1 VARIANT_INCLUDE=results/mrmega/lead_snps.txt FACTOR_COVARIATES=cyto_risk:favorable,study_group:@largest bash "$G" POOLED efs survival 2>&1)"
 grep -q -- "--tractor_prefix ${C}/data/tractor/cohort/chr1 " <<< "$out" && grep -q -- "--variant_include ${C}/results/mrmega/lead_snps.txt" <<< "$out" \
-    && grep -q -- '--factor_covariates cyto_risk:neutral_unknown,study_group:REDIAL' <<< "$out" && grep -q -- "--phenotype ${C}/results/pcair/cohort.phenotypes.with_pcs.tsv" <<< "$out" \
-    && ok "POOLED task: data/tractor/cohort/ files, cohort PCs, VARIANT_INCLUDE and study_group a factor (reference REDIAL)" || bad "pooled task: $(tail -1 <<< "$out")"
+    && grep -q -- '--factor_covariates cyto_risk:favorable,study_group:@largest' <<< "$out" && grep -q -- "--phenotype ${C}/results/pcair/cohort.phenotypes.with_pcs.tsv" <<< "$out" \
+    && ok "POOLED task: data/tractor/cohort/ files, cohort PCs, VARIANT_INCLUDE and study_group a factor (reference @largest)" || bad "pooled task: $(tail -1 <<< "$out")"
 out="$(cd /tmp && env "${SITE[@]}" ARM=study_cohort "$L" 2>&1)"; rc=$?
 [[ $rc -ne 0 ]] && has "$out" "VARIANT_INCLUDE=results/mrmega/lead_snps.txt: ${C}/results/mrmega/lead_snps.txt is missing or lists no variant" && ok "ARM=study_cohort before the lead-SNP list exists: a launch refuses" || bad "study arm: rc=$rc $(tail -2 <<< "$out")"
 printf 'MarkerName\tChromosome\tPosition\tEA\tNEA\tNcohort\tP-value_association\n1:100:A:G\t1\t100\tG\tA\t3\t1e-9\n1:200000:A:G\t1\t200000\tG\tA\t3\t1e-10\n1:900000:A:G\t1\t900000\tG\tA\t3\t1e-8\n2:5:A:G\t2\t5\tG\tA\t3\t0.5\n' > "${W}/m.result"
 out="$("${C}/bin/mrmega_lead_snps.sh" --output "${W}/lead.txt" "${W}/m.result" 2>&1)"; rc=$?
-[[ $rc -eq 0 && "$(grep -v '^#' "${W}/lead.txt" | paste -sd, -)" == "1:200000:A:G,1:900000:A:G" ]] && has "$out" "3 variant(s) below P = 5e-8" \
-    && ok "mrmega_lead_snps.sh: below LEAD_SNP_P (5e-8, the settings file), one lead per 500 kb (1:100 sits within 500 kb of the stronger 1:200000)" || bad "lead snps: rc=$rc $out $(cat "${W}/lead.txt")"
+[[ $rc -eq 0 && "$(grep -v '^#' "${W}/lead.txt" | paste -sd, -)" == "1:200000:A:G,1:900000:A:G" ]] && has "$out" "3 variant(s) below P = 1e-5" \
+    && ok "mrmega_lead_snps.sh: below LEAD_SNP_P (1e-5, the settings file), one lead per 500 kb (1:100 sits within 500 kb of the stronger 1:200000)" || bad "lead snps: rc=$rc $out $(cat "${W}/lead.txt")"
 "${C}/bin/mrmega_lead_snps.sh" --p 1e-12 --output "${W}/lead0.txt" "${W}/m.result" >/dev/null 2>&1; rc=$?
 [[ $rc -eq 1 && ! -e "${W}/lead0.txt" ]] && ok "mrmega_lead_snps.sh: nothing below P: exit 1, no file (no arm on an empty list)" || bad "lead none: rc=$rc"
 
@@ -1086,12 +1086,20 @@ if [[ -n "${REAL_RSCRIPT}" ]] && "${REAL_RSCRIPT}" -e 'quit(status = !all(sapply
     out="$(ad --covariates sex,age_at_diagnosis,cyto_risk --output_prefix outfx0/chr22)"; rc=$?
     [[ $rc -ne 0 ]] && has "$out" "covariate cyto_risk is not numeric" && has "$out" "FACTOR_COVARIATES=cyto_risk:<reference level>" \
         && ok "an undeclared text covariate (cyto_risk): refused, naming FACTOR_COVARIATES" || bad "undeclared factor: rc=$rc $(tail -2 <<< "$out")"
-    out="$(ad --factor_covariates cyto_risk:neutral_unknown --output_prefix outfx/chr22)"; rc=$?
+    out="$(ad --factor_covariates cyto_risk:favorable --output_prefix outfx/chr22)"; rc=$?
     H="$(zcat "${TD}/outfx/chr22.tractor_genesis.genomic_order.tsv.gz" | grep '^##')"
-    [[ $rc -eq 0 ]] && grep -qx '## covariates=sex,age_at_diagnosis,cyto_risk_favorable,cyto_risk_unfavorable' <<< "$H" \
-        && grep -qx '## factor_covariates=cyto_risk:neutral_unknown -> cyto_risk_favorable,cyto_risk_unfavorable' <<< "$H" \
-        && grep -qP '^factor_covariates\tTOY\tos\t22\t115\t115\t0\t0/1 indicators: cyto_risk \(reference neutral_unknown, n=\d+\): cyto_risk_favorable n=\d+, cyto_risk_unfavorable n=\d+' "${TD}"/qc/accounting.d/*.tsv \
-        && ok "--factor_covariates cyto_risk:neutral_unknown: two indicators (favorable, unfavorable), '## factor_covariates=' and a sample-accounting row with the counts" || bad "factor: rc=$rc $H"
+    [[ $rc -eq 0 ]] && grep -qx '## covariates=sex,age_at_diagnosis,cyto_risk_neutral,cyto_risk_unfavorable' <<< "$H" \
+        && grep -qx '## factor_covariates=cyto_risk:favorable -> cyto_risk_neutral,cyto_risk_unfavorable' <<< "$H" \
+        && grep -qP '^factor_covariates\tTOY\tos\t22\t115\t115\t0\t0/1 indicators: cyto_risk \(reference favorable, n=\d+\): cyto_risk_neutral n=\d+, cyto_risk_unfavorable n=\d+' "${TD}"/qc/accounting.d/*.tsv \
+        && ok "--factor_covariates cyto_risk:favorable: two indicators (neutral, unfavorable), '## factor_covariates=' and a sample-accounting row with the counts" || bad "factor: rc=$rc $H"
+    # 18 Nov 2026: study_group:@largest = the level with the most analysed samples, named in the header
+    out="$(ad --factor_covariates cyto_risk:favorable,study_group:@largest --output_prefix outfl/chr22)"; rc=$?
+    H="$(zcat "${TD}/outfl/chr22.tractor_genesis.genomic_order.tsv.gz" | grep '^## factor_covariates=')"
+    [[ $rc -eq 0 ]] && grep -qxP '## factor_covariates=cyto_risk:favorable -> cyto_risk_neutral,cyto_risk_unfavorable; study_group:(COG \(largest\) -> study_group_REDIAL|REDIAL \(largest\) -> study_group_COG)' <<< "$H" \
+        && grep -qP '^factor_covariates\t.*study_group \(reference (COG|REDIAL) \(largest\), n=\d+\)' "${TD}"/qc/accounting.d/*.tsv \
+        && ok "--factor_covariates study_group:@largest: reference chosen from the data and named '(largest)' in the header and the accounting row" || bad "largest: rc=$rc $H $(tail -2 <<< "$out")"
+    out="$("${REAL_RSCRIPT}" -e 'source(commandArgs(TRUE)[1]); d <- data.frame(g = c("b","b","a","a","c",NA,"b")); r <- expand_factor_covariates(d, c(g = "@largest")); t <- expand_factor_covariates(data.frame(g = c("b","a")), c(g = "@largest")); cat(r$header, "|", t$header, "\n")' "${C}/bin/qc_assert.R" 2>&1)"
+    [[ "$out" == "g:b (largest) -> g_a,g_c | g:a (largest) -> g_b " ]] && ok "expand_factor_covariates @largest: the most frequent level (b, 3 of 6; NA not counted); a tie goes to the first alphabetically" || bad "largest unit: $out"
     out="$(ad --factor_covariates cyto_risk:none --output_prefix outfx2/chr22)"; rc=$?
     [[ $rc -ne 0 ]] && has "$out" "reference level 'none' is not a value of cyto_risk" && ok "a reference level absent from the analysed samples: refused" || bad "bad ref: rc=$rc"
     # E: --variant_include tests only the listed variants; a chromosome with none writes header-only tables
@@ -1113,10 +1121,10 @@ if [[ -n "${REAL_RSCRIPT}" ]] && "${REAL_RSCRIPT}" -e 'quit(status = !all(sapply
     { printf 'CHR\tPOS\tID\tP\n'; awk 'NR <= 4 {printf "%s\t%s\t%s\t1e-6\n", $1, $4, $2}' "${GX}/toy.bim"; } > "${GX}/ss.tsv"
     out="$(cd "$GX" && GWAS_QC_DIR="${GX}/qc" "${REAL_RSCRIPT}" "${C}/bin/run_gxg_interaction.R" --sumstats ss.tsv --no_default_loci --geno toy --phenotype ph.tsv \
            --trait os --model survival --time_col os_time --event_col os_event --time_origin eoi --eoi_col eoi_day --sample_subset protocol=P1 \
-           --covariates sex,age_at_diagnosis --factor_covariates cyto_risk:neutral_unknown --min_stratum_n 5 --output_prefix out/os --threads 1 2>&1)"; rc=$?
+           --covariates sex,age_at_diagnosis --factor_covariates cyto_risk:favorable --min_stratum_n 5 --output_prefix out/os --threads 1 2>&1)"; rc=$?
     NS="$(awk -F'\t' 'NR > 1 && $9 == "P1"' "${GX}/ph.tsv" | wc -l)"
     [[ $rc -eq 0 ]] && has "$out" "Sample subset protocol=P1: 63 -> ${NS} samples" && has "$out" "Time origin: end of induction (os_time - eoi_day); left out 0 with os_time at or before eoi_day," \
-        && grep -qP '^time_origin\tend_of_induction \(os_time - eoi_day; left out: ' "${GX}/out/os.gxg.analysis.tsv" && grep -qP '^covariates\tsex,age_at_diagnosis,cyto_risk_favorable,cyto_risk_unfavorable$' "${GX}/out/os.gxg.analysis.tsv" \
+        && grep -qP '^time_origin\tend_of_induction \(os_time - eoi_day; left out: ' "${GX}/out/os.gxg.analysis.tsv" && grep -qP '^covariates\tsex,age_at_diagnosis,cyto_risk_neutral,cyto_risk_unfavorable$' "${GX}/out/os.gxg.analysis.tsv" \
         && grep -qP '^gxg_landmark_eoi\t' "${GX}"/qc/accounting.d/*.tsv \
         && ok "run_gxg_interaction.R --time_origin eoi --sample_subset --factor_covariates: subset counted, landmark applied and counted, os.gxg.analysis.tsv says so" || bad "gxg landmark: rc=$rc $(tail -4 <<< "$out")"
 else

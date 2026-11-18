@@ -27,7 +27,7 @@ FID   IID   sample_id   mrd   mrd_level  eoi_day  efs_time  efs_event  os_time  
 ```
 (`mrd_level` 1–4 = < 0.01 %, 0.01–0.099 %, 0.1–0.99 %, ≥ 1 % at the end of induction; `eoi_day` and the
 `*_time` columns in days from diagnosis; `eoi_day` the protocol day in COG (29) and St. Jude (46), each child's own day in REDIAL;
-`study_group` one of `COG_P9900`, `COG_AALL0232_0331`, `SJ_TXV`, `REDIAL`; `cyto_risk` one of `favorable`, `unfavorable`, `neutral_unknown`)
+`study_group` one of `COG_P9900`, `COG_AALL0232_0331`, `SJ_TXV`, `REDIAL`; `cyto_risk` one of `favorable`, `unfavorable`, `neutral`)
 with `phenotype_cols = 'mrd,mrd_level,efs,os'`, `survival_traits = 'efs,os'`, `binary_traits = 'mrd'` (`mrd_level`,
 in neither list, runs as quantitative),
 `covariate_cols = 'sex,age_at_diagnosis,wbc_dx_log10,PC1,PC2,PC3,PC4,PC5'` on the Nextflow path (which has no categorical
@@ -255,9 +255,9 @@ Each pair reports Wald and LRT p-values with Bonferroni over pairs and BH FDR.
 | MIX stratum | (none) | `MIX_RETAIN` (`true` default, or `false`) | `false` leaves the bundle's MIX stratum out of the default strata |
 | Run label | (none) | `RUN_LABEL` (empty default) | a sensitivity arm's results go under `results/<RUN_LABEL>/` |
 | Covariates | `covariate_cols`, `gxg_covariates` | `COVARIATES` (default: the bundle's `phenotypes/covariates.txt`, this study `sex, age_at_diagnosis, wbc_dx_log10, cyto_risk`, then `PC1..PC<N_PCS_MODEL>`) | the launcher refuses a name that is not a column, the adapter a non-numeric one that `FACTOR_COVARIATES` does not declare; the list used is written as `## covariates=` above every results table |
-| Categorical covariates | (none) | `FACTOR_COVARIATES` (this study `cyto_risk:neutral_unknown`) | `column:reference_level`; 0/1 indicators for the other levels among the analysed samples, added to the model if `COVARIATES` lacks the column; the expansion is written as `## factor_covariates=` and filed as `adapter_factor_covariates` (INFO, with the count per level) |
+| Categorical covariates | (none) | `FACTOR_COVARIATES` (this study `cyto_risk:favorable`) | `column:reference_level` or `column:@largest` (the level with the most analysed samples); 0/1 indicators for the other levels among the analysed samples, added to the model if `COVARIATES` lacks the column; the expansion is written as `## factor_covariates=` and filed as `adapter_factor_covariates` (INFO, with the count per level) |
 | PCs in the model | (in `covariate_cols`) | `N_PCS_MODEL` (5) | how many to use: see "How many PCs" below |
-| Lead-SNP refit | (none) | `VARIANT_INCLUDE` (a file of variant IDs), `LEAD_SNP_P` (5e-8), `STRATA_LIST=POOLED` | the study-cohort sensitivity arm, below |
+| Lead-SNP refit | (none) | `VARIANT_INCLUDE` (a file of variant IDs), `LEAD_SNP_P` (built-in 5e-8; this study 1e-5), `STRATA_LIST=POOLED` | the study-cohort sensitivity arm, below |
 | Ancestry column | `gxg_ancestry_col` | `ANCESTRY_COL` | GRAF-ANC codes or labels |
 | Strata rules | `min_stratum_n`, `bin/ancestry_config.R` | `STRATA_LIST` (default: every stratum of the bundle's `ancestry/strata.tsv`; a name it lacks is refused), `MIN_STRATUM_N`, `bin/ancestry_config.R` | `MIN_STRATUM_N` default 50 (decided 10 Nov 2026); a smaller stratum is skipped, and STEP 2 names it in the pooled file's `## strata_skipped=` |
 | Known loci | `gxg_known_loci`, `gxg_use_default_loci` | `KNOWN_LOCI`, `GXG_USE_DEFAULT_LOCI` | default table is a starting point; verify positions |
@@ -299,7 +299,7 @@ ARM=study_cohort slurm/submit_full_pipeline.sh           # -> results/study_coho
 ```
 
 `arm.study_cohort` sets `STRATA_LIST=POOLED`, `VARIANT_INCLUDE=results/mrmega/lead_snps.txt` and
-`FACTOR_COVARIATES=cyto_risk:neutral_unknown,study_group:REDIAL`. Each lead SNP's effect with and
+`FACTOR_COVARIATES=cyto_risk:favorable,study_group:@largest` (reference: the largest study group). Each lead SNP's effect with and
 without the study adjustment is then compared by hand (no script compares them yet; section 11).
 
 ## 6. SLURM orchestration (`slurm/submit_full_pipeline.sh`)
@@ -519,7 +519,7 @@ Recorded here so that what is missing is not mistaken for what is done. Each ite
   stratum, with **MR-MEGA primary**; the planned sensitivity is now the study-cohort refit of the lead
   SNPs (section 5), env-MR-MEGA optional (`docs/ENV_MRMEGA.md`). Each unit adjusts for
   sex, age at diagnosis, log10 WBC at diagnosis, cytogenetic risk (`cyto_risk`, a categorical covariate,
-  reference neutral-unknown) and its within-stratum PCs (`PC_SCALE=stratum`, the
+  reference favorable) and its within-stratum PCs (`PC_SCALE=stratum`, the
   default). Today a unit is an ancestry stratum over all studies (`docs/ENV_MRMEGA.md`), and
   `SAMPLE_SUBSET` can restrict a whole launch to one study, but nothing builds the study × stratum
   units, their within-unit PCs, the 50-sample floor per unit, or the MR-MEGA input from them. It

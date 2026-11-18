@@ -53,8 +53,12 @@ EOI_COL = eoi_day
 #   and the genomic-control lambda of a first run (docs/WORKFLOW.md, "How many PCs").  [whole number >= 1]
 N_PCS_MODEL = 5
 # FACTOR_COVARIATES: categorical covariates, column:reference_level; each enters the model as 0/1
-#   indicators for its other levels (added to COVARIATES if not named there).  [column:level,...]
-FACTOR_COVARIATES = cyto_risk:neutral_unknown
+#   indicators for its other levels (added to COVARIATES if not named there). The reference may be
+#   @largest: the level with the most samples among those analysed (ties: the first alphabetically),
+#   named in every results header.  [column:level or column:@largest,...]
+#   This study (decided 18 Nov 2026): cytogenetic risk favorable / unfavorable / neutral, reference
+#   favorable; an unknown category is coded neutral.
+FACTOR_COVARIATES = cyto_risk:favorable
 # COX_EXTRA_COVARIATES: covariates for the survival traits only. mrd_level as ONE linear trend term,
 #   in the whole-cohort analysis; the MRD arms below set it empty.  [column names, may be empty]
 COX_EXTRA_COVARIATES = mrd_level
@@ -90,13 +94,15 @@ ARM_ALL = mrd_pos,mrd_neg
 SUBSET_LINKED_COLUMNS = mrd,mrd_level
 # Study-cohort sensitivity (replaces env-MR-MEGA as the planned sensitivity, 17 Nov 2026): the MR-MEGA
 # lead SNPs refitted in the whole cohort (POOLED: cohort PCs) with study_group as a categorical
-# covariate (reference REDIAL), a proxy for genotyping chip and treatment era; the other covariates
+# covariate (reference: the largest study group, @largest), a proxy for genotyping chip and treatment era; the other covariates
 # as in the main model. Write the SNP list first (docs/WORKFLOW.md, "Study-cohort sensitivity"):
 #     bin/mrmega_lead_snps.sh --output results/mrmega/lead_snps.txt results/mrmega/efs/efs.mrmega.result results/mrmega/os/os.mrmega.result
 #     ARM=study_cohort slurm/submit_full_pipeline.sh
-arm.study_cohort = STRATA_LIST=POOLED VARIANT_INCLUDE=results/mrmega/lead_snps.txt FACTOR_COVARIATES=cyto_risk:neutral_unknown,study_group:REDIAL
-# LEAD_SNP_P: MR-MEGA association P below which bin/mrmega_lead_snps.sh lists a variant.  [a number > 0]
-LEAD_SNP_P = 5e-8
+arm.study_cohort = STRATA_LIST=POOLED VARIANT_INCLUDE=results/mrmega/lead_snps.txt FACTOR_COVARIATES=cyto_risk:favorable,study_group:@largest
+# LEAD_SNP_P: MR-MEGA association P below which bin/mrmega_lead_snps.sh lists a variant (one lead per
+#   500 kb). This study: the suggestive threshold 1e-5 rather than genome-wide 5e-8, so the study-cohort
+#   check also covers the nominally significant loci (18 Nov 2026).  [a number > 0]
+LEAD_SNP_P = 1e-5
 
 ## The bundle checker (bin/check_handoff_bundle.sh) ----------------------------
 # STUDY_GROUP_COL: the column naming each sample's study (the MR-MEGA study).  [a column name]
@@ -106,7 +112,7 @@ STUDY_GROUP_COL = study_group
 #   which must be >= 0 or NA.  [group:number,...]
 EOI_PROTOCOL_DAY = COG_P9900:29,COG_AALL0232_0331:29,SJ_TXV:46
 # COLUMN_LEVELS: column:value/value/... -- the only values (besides NA) a column may hold.  [column:values,...]
-COLUMN_LEVELS = mrd_level:1/2/3/4,cyto_risk:favorable/unfavorable/neutral_unknown,study_group:COG_P9900/COG_AALL0232_0331/SJ_TXV/REDIAL
+COLUMN_LEVELS = mrd_level:1/2/3/4,cyto_risk:favorable/unfavorable/neutral,study_group:COG_P9900/COG_AALL0232_0331/SJ_TXV/REDIAL
 # REQUIRED_COLUMNS: further columns the bundle must carry (never blank; NA allowed): protocol is
 #   env-MR-MEGA's covariate (optional analysis, docs/ENV_MRMEGA.md).  [column names]
 REQUIRED_COLUMNS = protocol,study_group

@@ -120,13 +120,13 @@ check_covariates <- function(d, covs, source = "the phenotype file", factors = c
     invisible(covs)
 }
 
-# parse_factor_covariates("cyto_risk:neutral_unknown,study_group:REDIAL") -> c(cyto_risk = "neutral_unknown",
+# parse_factor_covariates("cyto_risk:favorable,study_group:@largest") -> c(cyto_risk = "favorable",
 # study_group = "REDIAL"): the declared categorical covariates and each one's reference level.
 parse_factor_covariates <- function(spec) {
     if (is.null(spec) || !nzchar(trimws(spec))) return(setNames(character(), character()))
     parts <- trimws(strsplit(spec, ",")[[1]])
     ok <- grepl("^[A-Za-z_][A-Za-z0-9_.]*:[^:]+$", parts)
-    if (!all(ok)) stop("factor covariates: '", parts[!ok][1], "' is not column:reference_level (e.g. cyto_risk:neutral_unknown)", call. = FALSE)
+    if (!all(ok)) stop("factor covariates: '", parts[!ok][1], "' is not column:reference_level (e.g. cyto_risk:favorable, or study_group:@largest)", call. = FALSE)
     cols <- sub(":.*$", "", parts); refs <- trimws(sub("^[^:]*:", "", parts))
     if (anyDuplicated(cols)) stop("factor covariates: ", cols[duplicated(cols)][1], " is declared twice", call. = FALSE)
     setNames(refs, cols)
@@ -135,14 +135,22 @@ parse_factor_covariates <- function(spec) {
 # expand_factor_covariates(d, spec, source): one 0/1 indicator column <column>_<level> per level other
 # than the reference, over the rows of d (the analysed samples). Returns list(data, indicators = named
 # list column -> indicator names, header = "col:ref -> ind1,ind2; ...", note = the same with counts).
-# Stops when the reference level is not a value of the column in these rows (the contrast would be
-# against nothing), or an indicator name is already a column.
+# Reference "@largest": the level with the most of these rows (ties: the first alphabetically); the
+# level chosen is named in the header and the note. Stops when the reference level is not a value of
+# the column in these rows (the contrast would be against nothing), or an indicator name is already a column.
 expand_factor_covariates <- function(d, spec, source = "the phenotype file") {
     indicators <- list(); hdr <- character(); note <- character()
     for (cv in names(spec)) {
         x <- trimws(as.character(d[[cv]])); x[!is.na(x) & !nzchar(x)] <- NA
         ref <- spec[[cv]]
         lev <- sort(unique(x[!is.na(x)]))
+        largest <- identical(ref, "@largest")
+        if (largest) {
+            if (!length(lev)) stop("factor covariate ", cv, ": no values in the analysed samples of ", source, call. = FALSE)
+            cnt <- vapply(lev, function(l) sum(x == l, na.rm = TRUE), 0)
+            ref <- lev[which(cnt == max(cnt))[1]]               # lev is sorted: ties go to the first alphabetically
+        }
+        ref_lab <- if (largest) paste0(ref, " (largest)") else ref
         if (!ref %in% lev) stop("factor covariate ", cv, ": reference level '", ref, "' is not a value of ", cv,
                                 " in the analysed samples of ", source, " (values: ", paste(lev, collapse = ", "), ")", call. = FALSE)
         others <- setdiff(lev, ref)
@@ -154,8 +162,8 @@ expand_factor_covariates <- function(d, spec, source = "the phenotype file") {
             if (data.table::is.data.table(d)) data.table::set(d, j = nm[i], value = v) else d[[nm[i]]] <- v
         }
         indicators[[cv]] <- nm
-        hdr <- c(hdr, paste0(cv, ":", ref, " -> ", if (length(nm)) paste(nm, collapse = ",") else "none (only the reference level)"))
-        note <- c(note, paste0(cv, " (reference ", ref, ", n=", sum(x == ref, na.rm = TRUE), "): ",
+        hdr <- c(hdr, paste0(cv, ":", ref_lab, " -> ", if (length(nm)) paste(nm, collapse = ",") else "none (only the reference level)"))
+        note <- c(note, paste0(cv, " (reference ", ref_lab, ", n=", sum(x == ref, na.rm = TRUE), "): ",
                                if (length(nm)) paste0(nm, " n=", vapply(others, function(o) sum(x == o, na.rm = TRUE), 0), collapse = ", ")
                                else "no other level among these samples, so no indicator"))
     }

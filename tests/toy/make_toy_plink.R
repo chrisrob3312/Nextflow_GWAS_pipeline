@@ -61,7 +61,7 @@ ph <- data.frame(FID = ph_ids, IID = ph_ids, sample_id = ph_ids,
                  protocol = sample(c("P1", "P2"), np, TRUE),
                  sex = rbinom(np, 1, 0.5), age_at_diagnosis = round(runif(np, 1, 18), 1),
                  wbc_dx_log10 = round(runif(np, 0.5, 2.5), 2),
-                 cyto_risk = c("favorable", "unfavorable", "neutral_unknown")[sample(100:3000, np, TRUE) %% 3 + 1])
+                 cyto_risk = c("favorable", "unfavorable", "neutral")[sample(100:3000, np, TRUE) %% 3 + 1])
 write.table(ph, paste0(out, ".phenotypes.tsv"), sep = "\t", quote = FALSE, row.names = FALSE)
 cat("toy set:", out, "-", n_all, "samples,", m, "SNPs, 22 chromosomes;", np, "phenotype rows (", k_extra,
     "not genotyped )", if (dup) "; T_DUP duplicates T001" else "", "\n")

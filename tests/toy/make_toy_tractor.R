@@ -74,7 +74,7 @@ ph <- data.frame(FID = ids, IID = ids, sample_id = ids,
                  efs_time = round(rexp(n, 0.08), 2), efs_event = rbinom(n, 1, 0.5),
                  os_time = os_time, os_event = os_event, protocol = sample(c("P1", "P2"), n, TRUE),
                  sex = sex, age_at_diagnosis = age, wbc_dx_log10 = round(runif(n, 0.5, 2.5), 2),
-                 cyto_risk = c("favorable", "unfavorable", "neutral_unknown")[sample(100:3000, n, TRUE) %% 3 + 1], PC1 = round(rnorm(n), 4), PC2 = round(rnorm(n), 4))
+                 cyto_risk = c("favorable", "unfavorable", "neutral")[sample(100:3000, n, TRUE) %% 3 + 1], PC1 = round(rnorm(n), 4), PC2 = round(rnorm(n), 4))
 if (na_rows > 0) { ph$mrd[seq_len(na_rows)] <- NA; ph$os_time[seq_len(na_rows)] <- NA }
 ph$mrd_level <- ifelse(ph$mrd == 0, 1L, 2L + pmin(2L, as.integer(floor(g))))
 ph$eoi_day <- as.numeric(opt("eoi", "0"))

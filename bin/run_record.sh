@@ -75,7 +75,7 @@ RR_SWITCHES=(
     "EOI_COL|eoi_day|the landmark column for TIME_ORIGIN=eoi: days from the time origin of the shipped times to the landmark (here the end of induction)|names"
     "COX_STRATA||phenotype column whose levels each get their own Cox baseline hazard (survival traits only); empty = no stratification|names0"
     "COX_EXTRA_COVARIATES||covariates added for the survival traits only (this study: mrd_level, one linear trend term, in the whole-cohort analysis)|names0"
-    "FACTOR_COVARIATES||categorical covariates, column:reference_level (e.g. cyto_risk:neutral_unknown); each is in the model (added when COVARIATES does not name it) as 0/1 indicators for the other levels|factors"
+    "FACTOR_COVARIATES||categorical covariates, column:reference_level (e.g. cyto_risk:favorable), or column:@largest for the level with the most analysed samples; each is in the model (added when COVARIATES does not name it) as 0/1 indicators for the other levels|factors"
     "SAMPLE_SUBSET||restrict every GWAS, PRS validation and GxG to the samples whose phenotype column has one of these values, column=value[,value...] (e.g. study_group=REDIAL); needs a RUN_LABEL|any"
     "SUBSET_LINKED_COLUMNS||columns that describe what a subset selects on (this study: mrd,mrd_level); with SAMPLE_SUBSET set none of them, nor the subset column itself, may be a trait or a covariate|names0"
     "ARM||one subset arm, an arm.<label> line of the settings file: its switches beat the settings file and lose to the environment, RUN_LABEL defaults to the label; all = the whole cohort, then every arm, one launch each|any"
@@ -188,7 +188,7 @@ rr_domain_problem() {
             done ;;
         factors)
             local IFS=,; for x in $value; do
-                [[ "$x" =~ ^[A-Za-z_][A-Za-z0-9_.]*:[A-Za-z0-9_.+-]+$ ]] || { echo "use column:reference_level,... ('${x}' is not one)"; break; }
+                [[ "$x" =~ ^[A-Za-z_][A-Za-z0-9_.]*:([A-Za-z0-9_.+-]+|@largest)$ ]] || { echo "use column:reference_level or column:@largest,... ('${x}' is not one)"; break; }
             done ;;
         levels)
             local IFS=,; for x in $value; do

@@ -90,7 +90,7 @@ option_list <- list(
     make_option(c("-c", "--covariates"), type = "character", default = NULL,
                 help = "Comma-separated covariate column names; each must be a numeric phenotype column, or declared with --factor_covariates (checked before anything is read or fitted). The list used is written as '## covariates=' above every results table"),
     make_option(c("--factor_covariates"), type = "character", default = NULL,
-                help = paste("column:reference[,column:reference...]: categorical covariates (e.g. cyto_risk:neutral_unknown).",
+                help = paste("column:reference[,column:reference...]: categorical covariates (e.g. cyto_risk:favorable; column:@largest = the level with the most analysed samples).",
                              "Each is in the model (added to --covariates when not named there) as one 0/1 indicator per",
                              "level other than the reference, among the analysed samples; the expansion is written as",
                              "'## factor_covariates=' above every results table and recorded, with the count per level, as the",
