@@ -78,12 +78,11 @@ for n in "${CHROMS[@]}"; do printf 'placeholder flare vcf chr%s\n' "$n" | gzip -
 
 # phenotypes: MRD (binary) and its level (1-4), EFS and OS (time, event; days from diagnosis), four
 # covariates (sex, age at diagnosis, log10 WBC at diagnosis, cytogenetic risk: categorical), then the
-# end of induction (eoi_day: the protocol day in COG (29) and St. Jude (46), each child's own day in
-# REDIAL) and the study group. Column positions are fixed: the tests edit columns by number.
+# end of induction (eoi_day: the protocol day, 29 in COG and REDIAL, 46 in St. Jude) and the study group. Column positions are fixed: the tests edit columns by number.
 { printf 'FID\tIID\tsample_id\tmrd\tefs_time\tefs_event\tos_time\tos_event\tprotocol\tsex\tage_at_diagnosis\twbc_dx_log10\tcyto_risk\tmrd_level\teoi_day\tstudy_group\n'
   i=0; protos=(P1 P2 P3); groups=(COG_P9900 COG_AALL0232_0331 SJ_TXV REDIAL); cyto=(favorable unfavorable neutral)
   for s in "${SAMPLES[@]}"; do
-    g=$((i % 4)); case $g in 0|1) e=29 ;; 2) e=46 ;; 3) e=$((30 + i)) ;; esac
+    g=$((i % 4)); case $g in 0|1|3) e=29 ;; 2) e=46 ;; esac
     printf 'F_%s\t%s\t%s\t%d\t%s\t%d\t%s\t%d\t%s\t%d\t%d\t%s\t%s\t%d\t%d\t%s\n' "$s" "$s" "$s" $((i % 2)) "$((300 + i * 10)).5" $((i % 2)) "$((400 + i * 10))" $(( (i + 1) % 2 )) "${protos[$((i % 3))]}" $((1 + i % 2)) $((5 + i)) "1.$((2 + i))" "${cyto[$((i % 3))]}" $(( i % 2 == 0 ? 1 : 3 )) "$e" "${groups[$g]}"; i=$((i + 1)); done; } > phenotypes/phenotypes.tsv
 printf 'sex\nage_at_diagnosis\nwbc_dx_log10\ncyto_risk\n' > phenotypes/covariates.txt
 

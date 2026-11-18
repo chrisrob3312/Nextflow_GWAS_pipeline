@@ -108,9 +108,10 @@ LEAD_SNP_P = 1e-5
 # STUDY_GROUP_COL: the column naming each sample's study (the MR-MEGA study).  [a column name]
 STUDY_GROUP_COL = study_group
 # EOI_PROTOCOL_DAY: group:day -- every sample of these study groups must have this day in EOI_COL
-#   (COG and St. Jude: the protocol day). Groups not listed (REDIAL) keep each child's own day,
-#   which must be >= 0 or NA.  [group:number,...]
-EOI_PROTOCOL_DAY = COG_P9900:29,COG_AALL0232_0331:29,SJ_TXV:46
+#   (the protocol day). Groups not listed keep each child's own day, which must be >= 0 or NA.
+#   This study (18 Nov 2026): COG day 29, St. Jude day 46, and REDIAL day 29 -- REDIAL's data are
+#   converted to the COG format before the bundle is built, its MRD being the day-29 marrow.  [group:number,...]
+EOI_PROTOCOL_DAY = COG_P9900:29,COG_AALL0232_0331:29,SJ_TXV:46,REDIAL:29
 # COLUMN_LEVELS: column:value/value/... -- the only values (besides NA) a column may hold.  [column:values,...]
 COLUMN_LEVELS = mrd_level:1/2/3/4,cyto_risk:favorable/unfavorable/neutral,study_group:COG_P9900/COG_AALL0232_0331/SJ_TXV/REDIAL
 # REQUIRED_COLUMNS: further columns the bundle must carry (never blank; NA allowed): protocol is

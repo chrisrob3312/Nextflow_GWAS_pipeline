@@ -105,14 +105,17 @@ b=$(fresh mrd2); pheno_set "$b" 2 4 2; remanifest "$b"
                                                            expect_refuse "binary trait mrd = 2" "$b" "mrd has a value other than 0, 1 or NA (binary trait)"
 b=$(fresh no_cyto_ref); sed -i 's/\tfavorable\t/\tneutral\t/' "$b/phenotypes/phenotypes.tsv"; remanifest "$b"
                                                            expect_refuse "FACTOR_COVARIATES reference level absent" "$b" "cyto_risk: the reference level 'favorable' (FACTOR_COVARIATES"
-# eoi_day (decided 17 Nov 2026): the protocol day in COG (29) and St. Jude (46), each child's own day in REDIAL; the rule is
-# EOI_PROTOCOL_DAY in the settings file, not in the checker
+# eoi_day (decided 17 Nov 2026, REDIAL 18 Nov): the protocol day, 29 in COG and REDIAL (converted to the COG format),
+# 46 in St. Jude; the rule is EOI_PROTOCOL_DAY in the settings file, not in the checker
 b=$(fresh eoi_cog_off); pheno_set "$b" 2 15 31; pheno_set "$b" 6 15 NA; remanifest "$b"
                                                            expect_refuse "COG rows off day 29" "$b" "eoi_day: 2 row(s) of study_group COG_P9900 are not at the protocol day 29 (EOI_PROTOCOL_DAY"
 b=$(fresh eoi_sj_off); pheno_set "$b" 4 15 29; remanifest "$b"
                                                            expect_refuse "St. Jude row off day 46" "$b" "eoi_day: 1 row(s) of study_group SJ_TXV are not at the protocol day 46"
-b=$(fresh eoi_redial_own); pheno_set "$b" 5 15 41; pheno_set "$b" 9 15 NA; remanifest "$b"
-                                                           expect_accept "REDIAL rows on each child's own day (41) or NA" "$b"
+b=$(fresh eoi_redial_off); pheno_set "$b" 5 15 41; remanifest "$b"
+                                                           expect_refuse "REDIAL row off day 29" "$b" "eoi_day: 1 row(s) of study_group REDIAL are not at the protocol day 29"
+b=$(fresh eoi_group_unlisted); pheno_set "$b" 5 15 41; pheno_set "$b" 9 15 NA; remanifest "$b"
+out=$(EOI_PROTOCOL_DAY=COG_P9900:29,COG_AALL0232_0331:29,SJ_TXV:46 "$CHECK" "$b" "${TOOLS[@]}" 2>&1); rc=$?
+[[ $rc -eq 0 ]] && ok "a group the setting does not list keeps each child's own day (41) or NA (another study's use)" || bad "unlisted group: rc=$rc $out"
 b=$(fresh eoi_rule_env); remanifest "$b"
 out=$(EOI_PROTOCOL_DAY=COG_P9900:28 "$CHECK" "$b" "${TOOLS[@]}" 2>&1); rc=$?
 [[ $rc -ne 0 && "$out" == *"of study_group COG_P9900 are not at the protocol day 28"* ]] && ok "the protocol day comes from the settings (EOI_PROTOCOL_DAY=COG_P9900:28 in the environment beats the file)" || bad "rule from settings: rc=$rc $out"
@@ -125,8 +128,9 @@ b=$(fresh os_negative); pheno_set "$b" 3 7 -12; remanifest "$b"
 b=$(fresh blank_group); pheno_set "$b" 4 16 ""; remanifest "$b"
                                                            expect_refuse "blank study_group" "$b" "blank study_group"
 b=$(fresh landmark_note); pheno_set "$b" 2 5 20; pheno_set "$b" 5 15 NA; remanifest "$b"
-out=$("$CHECK" "$b" "${TOOLS[@]}" 2>&1) && [[ "$out" == *"landmark: at or before eoi_day efs 1, os 0, no eoi_day 1"* ]] \
-  && ok "ACCEPTED line counts the children the landmark leaves out (efs_time 20 <= eoi_day 29; one REDIAL eoi_day NA)" || bad "landmark note: $out"
+# REDIAL is at its protocol day here (18 Nov 2026), so the NA row needs a group the rule does not list (another study's use)
+out=$(EOI_PROTOCOL_DAY=COG_P9900:29,COG_AALL0232_0331:29,SJ_TXV:46 "$CHECK" "$b" "${TOOLS[@]}" 2>&1) && [[ "$out" == *"landmark: at or before eoi_day efs 1, os 0, no eoi_day 1"* ]] \
+  && ok "ACCEPTED line counts the children the landmark leaves out (efs_time 20 <= eoi_day 29; one eoi_day NA in a group without a protocol day)" || bad "landmark note: $out"
 b=$(fresh iid_ne_sid); awk -F'\t' 'BEGIN{OFS="\t"} NR==2{$3="S002"} NR==3{$3="S001"} {print}' "$b/phenotypes/phenotypes.tsv" > "$b/p.tmp" && mv "$b/p.tmp" "$b/phenotypes/phenotypes.tsv"; remanifest "$b"
                                                            expect_refuse "IID differs from sample_id on a row" "$b" "IID != sample_id"
 b=$(fresh fail_verdict); printf 'M6_het\tFAIL\t8\tthree samples beyond 3 SD\n' >> "$b/qc/qc_assertions.tsv"; remanifest "$b"

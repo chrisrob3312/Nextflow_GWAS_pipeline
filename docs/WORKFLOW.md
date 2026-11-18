@@ -26,7 +26,7 @@ Example phenotype file:
 FID   IID   sample_id   mrd   mrd_level  eoi_day  efs_time  efs_event  os_time  os_event  protocol  study_group  sex  age_at_diagnosis  wbc_dx_log10  cyto_risk  PC1 ... PC5
 ```
 (`mrd_level` 1–4 = < 0.01 %, 0.01–0.099 %, 0.1–0.99 %, ≥ 1 % at the end of induction; `eoi_day` and the
-`*_time` columns in days from diagnosis; `eoi_day` the protocol day in COG (29) and St. Jude (46), each child's own day in REDIAL;
+`*_time` columns in days from diagnosis; `eoi_day` the protocol day: 29 in COG and REDIAL (REDIAL converted to the COG format, 18 Nov 2026), 46 in St. Jude;
 `study_group` one of `COG_P9900`, `COG_AALL0232_0331`, `SJ_TXV`, `REDIAL`; `cyto_risk` one of `favorable`, `unfavorable`, `neutral`)
 with `phenotype_cols = 'mrd,mrd_level,efs,os'`, `survival_traits = 'efs,os'`, `binary_traits = 'mrd'` (`mrd_level`,
 in neither list, runs as quantitative),
