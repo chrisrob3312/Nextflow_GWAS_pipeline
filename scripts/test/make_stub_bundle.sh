@@ -3,7 +3,8 @@
 # usage: make_stub_bundle.sh <out_dir> [--chromosomes 1-22|21,22]
 # Nothing in it is real data: 8 samples, 6 unfiltered sites of which 4 pass MAF >= 1 %. Where bcftools is on
 # PATH the dosage VCFs are real bgzipped VCFs with a .csi: contig chr{N}, the 8 samples in .fam order, phased
-# GT, FORMAT/DS, FORMAT/HDS (Number=2, HDS1 + HDS2 = DS), INFO/R2 and INFO/MRSQX, so the checker's VCF checks
+# GT, FORMAT/DS, FORMAT/HDS (Number=2, HDS1 + HDS2 = DS), INFO/R2 and the quality method's score (INFO/MRSQ for
+# STUB_QUALITY_METHOD=magicalrsq, the default since 20 Nov 2026; INFO/MRSQX for magicalrsqx), so the checker's VCF checks
 # run on them; without bcftools they are placeholder bytes (those checks are then SKIPPED). Where Rscript is
 # on PATH the two .rds files are matrices with dimnames = the .fam IIDs; otherwise placeholders. The FLARE
 # VCFs are always placeholder bytes (the checker reads only their presence). What the stub exercises is every
@@ -28,19 +29,23 @@ grep -v -e 'chr1:30000' -e 'chr2:30000' genotypes/cohort.hardcall.nomaf.bim > ge
 # .bed: 3 magic bytes + ceil(8/4)=2 bytes per variant
 mkbed() { local nv=$1 out=$2; { printf '\x6c\x1b\x01'; head -c $((2 * nv)) /dev/zero; } > "$out"; }
 mkbed 6 genotypes/cohort.hardcall.nomaf.bed; mkbed 4 genotypes/cohort.hardcall.maf01.bed
+# the imputation-quality method and the INFO field its score is written to (upstream lib/ImputationQuality.groovy)
+QMETHOD="${STUB_QUALITY_METHOD:-magicalrsq}"
+case "$QMETHOD" in magicalrsq) QFIELD=MRSQ; QLABEL="plain MagicalRsq" ;; *) QFIELD=MRSQX; QLABEL="MagicalRsq-X" ;; esac
+QFIELD="${STUB_SCORE_FIELD:-$QFIELD}"
 # dosage VCFs: three records per chromosome; per sample HDS = two haplotype ALT dosages, DS = their sum (3 dp),
 # GT = each haplotype's dosage rounded, phased
 mkdose() { local n=$1
   { printf '##fileformat=VCFv4.2\n##contig=<ID=chr%s>\n' "$n"
     printf '##INFO=<ID=R2,Number=1,Type=Float,Description="Estimated imputation accuracy (stub)">\n'
-    printf '##INFO=<ID=MRSQX,Number=1,Type=Float,Description="MagicalRsq-X recalibrated imputation quality (stub)">\n'
+    printf '##INFO=<ID=%s,Number=1,Type=Float,Description="%s recalibrated imputation quality (stub)">\n' "$QFIELD" "$QLABEL"
     printf '##FORMAT=<ID=GT,Number=1,Type=String,Description="Phased genotype">\n'
     printf '##FORMAT=<ID=DS,Number=1,Type=Float,Description="Estimated ALT dose">\n'
     printf '##FORMAT=<ID=HDS,Number=2,Type=Float,Description="Estimated ALT dose on haplotype 1 and haplotype 2">\n'
     printf '#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT'; printf '\t%s' "${SAMPLES[@]}"; printf '\n'
-    awk -v c="chr$n" -v ns="${#SAMPLES[@]}" 'BEGIN { split("A G C T G A", al, " ")
+    awk -v c="chr$n" -v ns="${#SAMPLES[@]}" -v qf="$QFIELD" 'BEGIN { split("A G C T G A", al, " ")
       for (r = 1; r <= 3; r++) {
-        printf "%s\t%d\t%s:%d:%s:%s\t%s\t%s\t.\tPASS\tR2=0.9%d;MRSQX=0.8%d\tGT:DS:HDS", c, r * 10000, c, r * 10000, al[2*r-1], al[2*r], al[2*r-1], al[2*r], r, r
+        printf "%s\t%d\t%s:%d:%s:%s\t%s\t%s\t.\tPASS\tR2=0.9%d;%s=0.8%d\tGT:DS:HDS", c, r * 10000, c, r * 10000, al[2*r-1], al[2*r], al[2*r-1], al[2*r], r, qf, r
         for (s = 1; s <= ns; s++) { h1 = ((s * 7 + r * 3) % 10) / 10; h2 = ((s * 3 + r * 5) % 10) / 10
           printf "\t%d|%d:%.3f:%.3f,%.3f", (h1 >= 0.5), (h2 >= 0.5), h1 + h2, h1, h2 }
         printf "\n" } }'; } ; }
@@ -90,7 +95,7 @@ printf 'sex\nage_at_diagnosis\nwbc_dx_log10\ncyto_risk\n' > phenotypes/covariate
 printf 'kept_iid\tremoved_iid\tkinship\treason\n' > qc/removed_duplicates.tsv   # header-only: nothing removed
 printf 'step\tn_in\tn_out\tn_removed\treason\n01_intake\t8\t8\t0\t-\n11_final_datasets\t8\t8\t0\t-\n' > qc/sample_accounting.tsv
 printf 'id\tverdict\tn\tmessage\nM6_callrate_95\tPASS\t8\tall samples >= 0.95\nM6_mrsqx_applied\tPASS\t6\tMagicalRsq-X applied after each pass\n' > qc/qc_assertions.tsv
-printf 'param\tvalue\nrun_lai\ttrue\nlai_methods\tflare\nimputation_quality_method\tmagicalrsqx\n' > run_record/params.tsv
+printf 'param\tvalue\nrun_lai\ttrue\nlai_methods\tflare\nimputation_quality_method\t%s\n' "$QMETHOD" > run_record/params.tsv
 printf 'task_id\tname\tstatus\n1\tMODULE1:harmonize\tCOMPLETED\n' > run_record/trace.tsv
 
 # manifest in the documented format
@@ -104,7 +109,7 @@ role() { case "$1" in
   phenotypes/covariates.txt) echo covariates;; qc/removed_duplicates.tsv) echo removed_duplicates;;
   qc/sample_accounting.tsv) echo sample_accounting;; qc/qc_assertions.tsv) echo qc_assertions;;
   run_record/*) echo run_record;; *) echo other;; esac; }
-{ printf '# run_id\tstub-run\n# upstream_git_sha\t0000000\n# imputation_server\ttopmed\n# duplicates_removed\tno\n# build\thg38\n'
+{ printf '# run_id\tstub-run\n# upstream_git_sha\t0000000\n# imputation_server\ttopmed\n# duplicates_removed\tno\n# imputation_quality_method\t%s\n# build\thg38\n' "${STUB_MANIFEST_METHOD:-$QMETHOD}"
   printf 'path\tsha256\tbytes\trole\n'
   find genotypes ancestry structure local_ancestry phenotypes qc run_record -type f | LC_ALL=C sort | while read -r p; do
     printf '%s\t%s\t%s\t%s\n' "$p" "$(sha256sum "$p" | cut -d' ' -f1)" "$(stat -c %s "$p")" "$(role "$p")"; done; } > manifest.tsv

@@ -103,6 +103,19 @@ b=$(fresh cyto_bad); pheno_set "$b" 3 13 high; remanifest "$b"
                                                            expect_refuse "cyto_risk = high (COLUMN_LEVELS)" "$b" "cyto_risk has the value 'high', not one of favorable, unfavorable, neutral or NA"
 b=$(fresh mrd2); pheno_set "$b" 2 4 2; remanifest "$b"
                                                            expect_refuse "binary trait mrd = 2" "$b" "mrd has a value other than 0, 1 or NA (binary trait)"
+# the quality-score field follows the upstream method (20 Nov 2026): plain MagicalRsq -> INFO/MRSQ (default), MagicalRsq-X -> INFO/MRSQX
+if command -v bcftools > /dev/null; then
+b=$(fresh q_plain); out=$("$CHECK" "$b" "${TOOLS[@]}" 2>&1); rc=$?
+[[ $rc -eq 0 && "$out" == *"score=INFO/MRSQ (imputation_quality_method=magicalrsq)"* ]] && ok "plain MagicalRsq bundle (INFO/MRSQ): accepted, the field named" || bad "q_plain: rc=$rc $out"
+b=$(STUB_QUALITY_METHOD=magicalrsqx fresh q_x); out=$("$CHECK" "$b" "${TOOLS[@]}" 2>&1); rc=$?
+[[ $rc -eq 0 && "$out" == *"score=INFO/MRSQX (imputation_quality_method=magicalrsqx)"* ]] && ok "MagicalRsq-X bundle (INFO/MRSQX): accepted" || bad "q_x: rc=$rc $out"
+b=$(STUB_SCORE_FIELD=MRSQX fresh q_mismatch)
+                                                           expect_refuse "manifest magicalrsq, VCFs carry INFO/MRSQX" "$b" "has no INFO/MRSQ (the plain MagicalRsq score"
+fi
+b=$(STUB_MANIFEST_METHOD=server_rsq fresh q_server)
+                                                           expect_refuse "imputation_quality_method server_rsq" "$b" "imputation_quality_method 'server_rsq': the dosage VCFs carry no calibrated score"
+b=$(fresh q_params); sed -i 's/^imputation_quality_method\tmagicalrsq$/imputation_quality_method\tmagicalrsqx/' "$b/run_record/params.tsv"; remanifest "$b"
+                                                           expect_refuse "run record disagrees with the manifest's method" "$b" "manifest.tsv says imputation_quality_method=magicalrsq but run_record/params.tsv records magicalrsqx"
 b=$(fresh no_cyto_ref); sed -i 's/\tfavorable\t/\tneutral\t/' "$b/phenotypes/phenotypes.tsv"; remanifest "$b"
                                                            expect_refuse "FACTOR_COVARIATES reference level absent" "$b" "cyto_risk: the reference level 'favorable' (FACTOR_COVARIATES"
 # eoi_day (decided 17 Nov 2026, REDIAL 18 Nov): the protocol day, 29 in COG and REDIAL (converted to the COG format),

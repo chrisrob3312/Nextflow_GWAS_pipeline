@@ -62,9 +62,23 @@ hdr() { awk -F'\t' -v k="# $1" '$1==k {print $2; exit}' manifest.tsv; }
 
 # 1. the manifest and its header fields (the manifest is not listed in itself)
 [[ -s manifest.tsv ]] || fail "manifest.tsv is missing or empty"
-for f in run_id upstream_git_sha imputation_server duplicates_removed build; do
+for f in run_id upstream_git_sha imputation_server duplicates_removed imputation_quality_method build; do
   [[ -n "$(hdr "$f")" ]] || fail "manifest.tsv lacks header field '# $f'"; done
-SERVER=$(hdr imputation_server); DUPS=$(hdr duplicates_removed)
+SERVER=$(hdr imputation_server); DUPS=$(hdr duplicates_removed); QMETHOD=$(hdr imputation_quality_method)
+# The calibrated imputation-quality score is the field the manifest's method declares (upstream
+# lib/ImputationQuality.groovy, 20 Nov 2026): magicalrsq -> INFO/MRSQ (plain MagicalRsq, the upstream default),
+# magicalrsqx -> INFO/MRSQX. The other method's field must be absent; server_rsq writes no score and is refused.
+case "$QMETHOD" in
+  magicalrsq)  SCORE=MRSQ;  OTHER=MRSQX; SCORE_LABEL="the plain MagicalRsq score" ;;
+  magicalrsqx) SCORE=MRSQX; OTHER=MRSQ;  SCORE_LABEL="the MagicalRsq-X score" ;;
+  server_rsq)  fail "imputation_quality_method 'server_rsq': the dosage VCFs carry no calibrated score (INFO/MRSQ or INFO/MRSQX), which the contract requires; the bundle must be made with imputation_quality_method = magicalrsq (or magicalrsqx)" ;;
+  *)           fail "imputation_quality_method '$QMETHOD' is not magicalrsq|magicalrsqx" ;;
+esac
+# the run record, when it records the setting, must agree with the manifest
+if [[ -s run_record/params.tsv ]]; then
+  RQ=$(awk -F'\t' '$1 == "imputation_quality_method" { print tolower($2); exit }' run_record/params.tsv)
+  [[ -z "$RQ" || "$RQ" == "$QMETHOD" ]] || fail "manifest.tsv says imputation_quality_method=$QMETHOD but run_record/params.tsv records $RQ"
+fi
 [[ "$SERVER" =~ ^(topmed|michigan|anvil)$ ]] || fail "imputation_server '$SERVER' is not topmed|michigan|anvil"
 [[ "$DUPS" =~ ^(yes|no)$ ]] || fail "duplicates_removed '$DUPS' is not yes|no"
 grep -q $'^path\tsha256\tbytes\trole$' manifest.tsv || fail "manifest.tsv column header must be: path sha256 bytes role"
@@ -218,14 +232,18 @@ MSG=$(awk -F'\t' -v codes="$GRAF_CODES" 'BEGIN{split("AFR MEN EUR SAS EAS AMR OC
 [[ -z "$MSG" ]] || fail "ancestry_calls.tsv: $MSG"
 head -1 ancestry/grafanc_raw.txt | grep -qP '^Sample\t' || fail "grafanc_raw.txt does not start with GrafAnc's header (first column Sample)"
 if command -v bcftools >/dev/null; then
-  # Every chromosome's header (a header read is cheap): FORMAT/DS, INFO/MRSQX, and the per-haplotype dosages
+  # Every chromosome's header (a header read is cheap): FORMAT/DS, the method's score INFO/$SCORE (and not the
+  # other method's INFO/$OTHER), and the per-haplotype dosages
   # FORMAT/HDS declared Number=2. The header is read once into a file, so a grep that stops early cannot
   # SIGPIPE bcftools into a false miss under pipefail.
   for n in "${CHROMS[@]}"; do
     v="genotypes/chr${n}.phased.dose.vcf.gz"
     bcftools view -h "$v" > "$T/vcf_hdr" 2>/dev/null || fail "chr${n}.phased.dose.vcf.gz is not a readable VCF (bcftools view -h failed)"
     grep -q '^##FORMAT=<ID=DS[,>]' "$T/vcf_hdr" || fail "chr${n}.phased.dose.vcf.gz has no FORMAT/DS"
-    grep -q '^##INFO=<ID=MRSQX[,>]' "$T/vcf_hdr" || fail "chr${n}.phased.dose.vcf.gz has no INFO/MRSQX (MagicalRsq-X score)"
+    grep -q "^##INFO=<ID=${SCORE}[,>]" "$T/vcf_hdr" || fail "chr${n}.phased.dose.vcf.gz has no INFO/${SCORE} (${SCORE_LABEL}, the field the manifest's imputation_quality_method=${QMETHOD} declares)"
+    if grep -q "^##INFO=<ID=${OTHER}[,>]" "$T/vcf_hdr"; then
+      fail "chr${n}.phased.dose.vcf.gz declares INFO/${OTHER}, the score of another method; the manifest's imputation_quality_method=${QMETHOD} declares INFO/${SCORE}"
+    fi
     grep -q '^##FORMAT=<ID=HDS[,>]' "$T/vcf_hdr" || fail "chr${n}.phased.dose.vcf.gz has no FORMAT/HDS header line: the contract requires per-haplotype dosages (an All of Us return carries them as FORMAT/AP1,AP2, which upstream Module 6 writes as HDS)"
     grep -qE '^##FORMAT=<ID=HDS,([^"]*,)?Number=2[,>]' "$T/vcf_hdr" \
       || fail "chr${n}.phased.dose.vcf.gz declares FORMAT/HDS with Number=$(sed -nE 's/^##FORMAT=<ID=HDS,([^"]*,)?Number=([^,>]*).*/\2/p' "$T/vcf_hdr"), not Number=2 (two haplotype ALT dosages per sample)"
@@ -272,8 +290,8 @@ if command -v bcftools >/dev/null; then
   qc_row handoff_sample_ids PASS "$NS" "VCF samples (chr${CHROMS[0]}, chr${CHROMS[-1]}) == .fam IID in order == phenotypes.tsv IID == sample_id"
   acct_row handoff_sample_ids "$NS" "$NS" "fam IIDs that are VCF samples and phenotype rows"
 else
-  [[ "$ALLOW_MISSING" -eq 1 ]] || fail "bcftools is not on PATH, so the VCF sample-order, FORMAT/DS, FORMAT/HDS and INFO/MRSQX checks cannot run (pass --allow-missing-tools to accept the bundle with those checks SKIPPED)"
-  SKIPPED+=("VCF sample order / FORMAT/DS / FORMAT/HDS / INFO/MRSQX (no bcftools)")
+  [[ "$ALLOW_MISSING" -eq 1 ]] || fail "bcftools is not on PATH, so the VCF sample-order, FORMAT/DS, FORMAT/HDS and INFO/${SCORE} checks cannot run (pass --allow-missing-tools to accept the bundle with those checks SKIPPED)"
+  SKIPPED+=("VCF sample order / FORMAT/DS / FORMAT/HDS / INFO/${SCORE} (no bcftools)")
   qc_row handoff_sample_ids INFO "$NS" "phenotypes.tsv IID == sample_id == .fam IID; the VCF samples were NOT checked (no bcftools)"
 fi
 
@@ -323,4 +341,4 @@ awk -F'\t' 'NR>1 && $2 !~ /^(PASS|FAIL|INFO)$/ {exit 1}' qc/qc_assertions.tsv ||
 [[ "$(awk -F'\t' 'NR>1 && $2=="PASS"' qc/qc_assertions.tsv | wc -l)" -ge 1 ]] || fail "qc_assertions.tsv has no PASS verdict — 'did not run' is not 'passed'"
 NOTE=""; [[ -n "$LANDMARK" ]] && NOTE="; landmark: at or before $EOI ${LANDMARK}, no $EOI ${NO_EOI}"
 [[ ${#SKIPPED[@]} -eq 0 ]] || NOTE+="; SKIPPED: $(IFS='; '; echo "${SKIPPED[*]}")"
-echo "HANDOFF ACCEPTED: $B  ($NS samples, $NV GWAS-input variants at MAF >= 1 %, $NV_ALL unfiltered, chromosomes $CHROM_SPEC, server=$SERVER, duplicates_removed=$DUPS$NOTE)"
+echo "HANDOFF ACCEPTED: $B  ($NS samples, $NV GWAS-input variants at MAF >= 1 %, $NV_ALL unfiltered, chromosomes $CHROM_SPEC, server=$SERVER, duplicates_removed=$DUPS, score=INFO/$SCORE (imputation_quality_method=$QMETHOD)$NOTE)"
